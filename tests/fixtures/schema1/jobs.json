@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "jobs": [
+    {"id": "job1", "status": "done", "url": "https://example.test/list",
+     "playlist_id": "PLSCHEMA1000000000000000000001", "title": "Schema One",
+     "video_count": 1, "kind": "playlist", "downloaded": 1,
+     "bytes_downloaded": 1024}
+  ]
+}

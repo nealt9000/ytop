@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "playlists": {"PLSCHEMA1000000000000000000001": "My schema playlist"},
+  "videos": {"vid1": "My schema video"}
+}

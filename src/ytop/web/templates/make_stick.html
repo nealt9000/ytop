@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_bar %}
+{% block title %}{% if job %}Stick {{ job.title }}{% else %}Make a stick{% endif %} · {{ product_name }}{% endblock %}
+{% block body_attrs %}{% if job and job.active %} data-live-job="{{ job.id }}" data-live-page="move" data-live-state="{{ job.status }}"{% endif %}{% endblock %}
+{% block content %}
+{% if job %}
+{% set upgrade = job.stick_mode == "upgrade" %}
+{% if job.status == "done" %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">{% if upgrade %}Stick upgraded{% else %}Stick ready{% endif %}</p>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">
+      <code>{{ job.target_path }}</code>
+      <span class="dot">·</span>{{ job.stick_platforms|length }} platform{% if job.stick_platforms|length != 1 %}s{% endif %}
+      {% if job.video_count %}<span class="dot">·</span>{{ job.video_count }} playlist{% if job.video_count != 1 %}s{% endif %} copied{% endif %}
+      <span class="dot">·</span>{{ job.move_total_label }}
+    </p>
+    <p class="muted small">
+      {% if upgrade %}The library on the stick was not changed.{% endif %}
+      Eject the drive with your computer’s eject command before unplugging it.
+      It starts {{ product_name }} on {{ job.stick_platforms|join(", ") }}.
+    </p>
+    {% if job.notice %}<p class="small job-notice" role="status">⚠ {{ job.notice }}</p>{% endif %}
+  </div>
+</section>
+<div class="hero-actions">
+  <a class="btn primary" href="/storage">Storage</a>
+  <a class="btn ghost" href="/make-stick">Make another stick</a>
+  <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="/downloads">
+    <button type="submit" class="btn tiny ghost">Clear from downloads</button>
+  </form>
+</div>
+
+{% elif job.status in ["queued", "running"] %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow" data-live-status>{% if job.cancel_requested %}Cancelling…{% elif job.status == "queued" %}Stick queued{% elif upgrade %}Upgrading stick{% else %}Making stick{% endif %}</p>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">
+      <code>{{ job.target_path }}</code>
+      <span class="dot">·</span>{{ job.stick_platforms|join(", ") }}
+    </p>
+  </div>
+  <div class="hero-actions">
+    {% if not job.cancel_requested %}
+    <form action="/jobs/{{ job.id }}/cancel" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/make-stick/{{ job.id }}">
+      <button type="submit" class="btn ghost">Cancel</button>
+    </form>
+    {% else %}
+    <span class="muted small">Cancelling…</span>
+    {% endif %}
+  </div>
+</section>
+<div class="job-progress">
+  {{ progress_bar(job.percent, "Stick progress", "wide", live_hooks=true) }}
+  <p class="muted small">
+    <span data-live-progress>{{ job.moved_label }} of {{ job.move_total_label }}{% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}{% if job.current_title %} · {{ job.current_title }}{% endif %}</span>
+  </p>
+  <p class="unplug unplug-busy">❌ Not safe to unplug yet — the stick is being written</p>
+  <p class="muted tiny">
+    {{ product_name }} is copied to a hidden folder and checked first; only then does it
+    replace anything on the stick. This page updates automatically. You can
+    leave it.
+  </p>
+</div>
+
+{% elif job.status == "cancelled" %}
+<section class="empty-state">
+  <h1>Stick cancelled</h1>
+  <p>{{ job.title }} · <code>{{ job.target_path }}</code></p>
+  <p class="muted">Anything copied before {{ product_name }} was put in place was removed; the drive was left as it was.</p>
+  <div class="hero-actions" style="justify-content: center">
+    <a class="btn primary" href="/make-stick">Make a stick</a>
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+  </div>
+</section>
+
+{% else %}
+<section class="empty-state">
+  <h1>Could not {% if upgrade %}upgrade{% else %}make{% endif %} the stick</h1>
+  <p>{{ job.error or "Unknown error" }}</p>
+  <p class="muted"><code>{{ job.target_path }}</code></p>
+  <div class="hero-actions" style="justify-content: center">
+    <a class="btn primary" href="/make-stick?target={{ job.target_path|urlencode }}">Try again</a>
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
+{% else %}
+<section class="page-head">
+  <div>
+    <h1>Make a stick</h1>
+    <p class="muted">
+      Put {{ product_name }} on another USB stick or drive, so it runs on any computer it is
+      plugged into. Choose which computers it should start on and, for a new
+      stick, which playlists to give it. Nothing is ever erased or formatted:
+      {{ product_name }} is copied next to whatever is already on the drive.
+    </p>
+  </div>
+  <div class="hero-actions">
+    {% if target %}<a class="btn ghost" href="/make-stick">Choose another drive</a>{% endif %}
+    <a class="btn ghost" href="/storage">Storage</a>
+  </div>
+</section>
+
+{% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+
+{% if image_error %}
+<p class="form-error">{{ image_error }}</p>
+<p class="muted small">Sticks are made from the stick {{ product_name }} is running from. Start {{ product_name }} from a stick and open this page again.</p>
+
+{% elif not target %}
+<table class="storage-table">
+  <thead>
+    <tr><th>Drive or folder</th><th>Now</th><th>Space</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for info in candidates %}
+    <tr>
+      <td data-label="Drive"><code>{{ info.path }}</code><br><span class="muted tiny">{{ info.fstype }}</span></td>
+      <td data-label="Now">
+        {% if info.library %}<strong>{{ info.library.label }}</strong>
+          <br><span class="muted tiny">{% if info.image_build %}{{ product_name }} {{ info.image_build.build_id }} — can be upgraded{% else %}a library without the app — {{ product_name }} can be added{% endif %}</span>
+        {% else %}<span class="muted">No {{ product_name }} yet</span>{% endif %}
+        {% for warning in info.warnings %}<br><span class="muted tiny">⚠ {{ warning }}</span>{% endfor %}
+      </td>
+      <td data-label="Space">
+        {% if info.free_label %}{{ info.free_label }} free{% endif %}
+        {% if info.total_label %}<br><span class="muted tiny">of {{ info.total_label }}</span>{% endif %}
+      </td>
+      <td class="storage-actions" data-label="Actions">
+        {% if info.is_source %}<span class="muted tiny">running from this one</span>
+        {% else %}<a class="btn tiny" href="/make-stick?target={{ info.path|string|urlencode }}">{% if info.library %}Upgrade…{% else %}Choose…{% endif %}</a>{% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">No drive found. Plug in a USB stick, or type its folder below.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<section class="storage-add">
+  <h2>Another folder</h2>
+  <p class="muted small">A flash drive usually appears under <code>/media/&lt;you&gt;/&lt;drive&gt;</code> or <code>/run/media/&lt;you&gt;/&lt;drive&gt;</code>.</p>
+  <form action="/make-stick" method="get" class="storage-add-form">
+    <label class="field">
+      <span>Folder</span>
+      <input type="text" name="target" required autocomplete="off" value="{{ raw_target }}"
+             placeholder="/media/you/USB STICK">
+    </label>
+    <button type="submit" class="btn primary">Continue</button>
+  </form>
+</section>
+
+{% else %}
+{% set upgrade = target.mode == "upgrade" %}
+<section class="storage-add">
+  <h2><code>{{ target.path }}</code></h2>
+  <p class="muted small">
+    {{ target.fstype }}
+    {% if target.free_label %}<span class="dot">·</span>{{ target.free_label }} free{% endif %}
+    {% if target.total_label %} of {{ target.total_label }}{% endif %}
+  </p>
+  {% for warning in target.warnings %}<p class="form-error">⚠ {{ warning }}</p>{% endfor %}
+  {% if upgrade %}
+  <p>
+    This drive already holds the library <strong>{{ target.library.label }}</strong>{% if target.image_build %}
+    with {{ product_name }} {{ target.image_build.build_id }}{% endif %}.
+    Upgrading replaces only the {{ product_name }} app and its start files with build
+    <strong>{{ build.build_id }}</strong>. It won’t change the library:
+    playlists, videos, watch history and settings stay exactly as they are.
+  </p>
+  {% if upgrade_line %}<p class="muted small">{{ upgrade_line }}</p>{% endif %}
+  {% else %}
+  <p>
+    This makes a new {{ product_name }} stick here: the app for the computers you pick, start
+    files for each, and a new library — with the playlists you choose copied
+    onto it. Files already on the drive are left alone; if one of them already
+    uses a start-file name (such as <code>README.txt</code>), {{ product_name }} asks you to
+    move it first instead of overwriting it.
+  </p>
+  {% endif %}
+</section>
+
+{% if not target.is_source %}
+<form action="/make-stick" method="post" class="add-video-form"
+      data-confirm="{% if upgrade %}Upgrade {{ product_name }} on {{ target.path }}? The library on it is not changed.{% else %}Make a {{ product_name }} stick at {{ target.path }}?{% endif %}"
+      data-confirm-action="{% if upgrade %}Upgrade stick{% else %}Make stick{% endif %}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="target" value="{{ target.path }}">
+  <fieldset class="policy-fieldset">
+    <legend>Starts on</legend>
+    {% for plat, size in platform_sizes.items() %}
+    <label class="check-row">
+      <input type="checkbox" name="platforms" value="{{ plat }}" checked>
+      <span>{{ plat }}{% if size %} <small class="muted">{{ size|bytes }}</small>{% endif %}</span>
+    </label><br>
+    {% endfor %}
+    {% if base_size %}<p class="muted tiny">Plus {{ base_size|bytes }} shared by all of them.</p>{% endif %}
+  </fieldset>
+  {% if not upgrade %}
+  <label class="field">
+    <span>Stick name</span>
+    <input type="text" name="label" maxlength="80" value="{{ target.path.name }}">
+  </label>
+  <fieldset class="policy-fieldset">
+    <legend>Playlists to copy onto it</legend>
+    {% for playlist in playlists %}
+    <label class="check-row">
+      <input type="checkbox" name="playlists" value="{{ playlist.key }}">
+      <span>{{ playlist.title }} <small class="muted">{{ playlist.video_count }} video{% if playlist.video_count != 1 %}s{% endif %}{% if playlist.total_bytes %} · {{ playlist.total_bytes|bytes }}{% endif %}{% if multi_library %} · {{ playlist.library_label }}{% endif %}</small></span>
+    </label><br>
+    {% else %}
+    <p class="muted small">No playlists yet; the stick starts with an empty library.</p>
+    {% endfor %}
+    <p class="muted tiny">Copies keep their watch history; the originals stay where they are.</p>
+  </fieldset>
+  {% endif %}
+  <div class="hero-actions">
+    <button type="submit" class="btn primary">{% if upgrade %}Upgrade stick{% else %}Make stick{% endif %}</button>
+  </div>
+</form>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

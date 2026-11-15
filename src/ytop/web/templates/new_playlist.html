@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}New playlist · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>New playlist from your library</h1>
+    <p class="muted">
+      Build a playlist out of videos you already have. Media is linked, not
+      copied again, so the new playlist takes no extra disk space and keeps
+      playing even if you remove the playlist it came from. You can reorder and
+      remove entries afterwards.
+    </p>
+  </div>
+</section>
+
+{% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+
+<form action="/playlist/new" method="post" class="new-playlist-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="new-playlist-head">
+    <label class="field">
+      <span>Playlist title</span>
+      <input type="text" name="title" required maxlength="300"
+             placeholder="Evening lectures">
+    </label>
+    <label class="field compact">
+      <span>Store on</span>
+      <select name="location" id="new-playlist-location">
+        {% for ref in libraries %}
+        <option value="{{ ref.id }}" {% if default_library and ref.id == default_library.id %}selected{% endif %}>
+          {{ ref.label }}{% if not ref.is_launch %} — {{ ref.root }}{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <p class="muted tiny">
+    Videos already on the chosen drive are shared with the new playlist without
+    using extra space. Videos from another drive are copied onto the chosen one.
+  </p>
+
+  {% if videos %}
+  <div class="pick-head">
+    <label class="field compact">
+      <span>Filter</span>
+      <input type="search" id="video-filter" autocomplete="off"
+             placeholder="Title, channel or playlist">
+    </label>
+    <span class="muted small" id="pick-count">{{ videos|length }} videos in the library</span>
+  </div>
+  <ol class="pick-list">
+    {% for video in videos %}
+    <li class="pick-row"
+        data-search="{{ (video.title ~ ' ' ~ video.channel ~ ' ' ~ video.source)|lower }}"
+        data-location-id="{{ video.library_id }}">
+      <label class="pick-main">
+        <input type="checkbox" name="video" value="{{ video.playlist_id }}:{{ video.id }}"
+               {% if not video.available %}disabled{% endif %}>
+        <span class="pick-thumb">
+          <img src="{{ video.thumb_url }}" alt="" loading="lazy"
+               onerror="this.classList.add('missing'); this.removeAttribute('src')">
+          <span class="duration-badge small">{{ video.duration_label }}</span>
+        </span>
+        <span class="pick-body">
+          <strong>{{ video.title }}</strong>
+          <span class="muted small">
+            {{ video.source }}{% if video.channel %} · {{ video.channel }}{% endif %}
+          </span>
+          <span class="tag-row">
+            {% if video.quality_label %}<span class="tag quality-tag">{{ video.quality_label }}</span>{% endif %}
+            {% if video.audio_detail %}<span class="tag audio-tag">{{ video.audio_detail }}</span>{% endif %}
+            {% if video.size_label %}<span class="tag">{{ video.size_label }}</span>{% endif %}
+            {% if video.watched %}<span class="tag watched-tag">watched</span>{% endif %}
+            {% if not video.available %}<span class="tag">media missing</span>{% endif %}
+          </span>
+        </span>
+      </label>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">Your library has no videos yet. Add a playlist or a single video first.</p>
+  {% endif %}
+
+  <div class="hero-actions">
+    <button type="submit" class="btn primary">Create playlist</button>
+    <a class="btn ghost" href="/">Cancel</a>
+  </div>
+</form>
+{% endblock %}

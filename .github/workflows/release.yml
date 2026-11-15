@@ -1,0 +1,89 @@
+name: Release
+
+# A pushed tag vX.Y.Z builds the image, runs the smoke tests, packages the
+# per-piece archives and publishes a GitHub release.  A manual run with
+# dry_run (the default) does everything except publish and uploads the files
+# as a workflow artifact instead.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and package only; create no release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must be v + the pyproject version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          init=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/ytop/__init__.py)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match pyproject version v$version"
+            exit 1
+          fi
+          if [ "$init" != "$version" ]; then
+            echo "::error::src/ytop/__init__.py says $init, pyproject says $version"
+            exit 1
+          fi
+
+  stick:
+    uses: ./.github/workflows/stick.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
+  release:
+    needs: [check-tag, stick]
+    # check-tag is skipped on a manual run; anything else must have passed.
+    if: ${{ !cancelled() && !failure() && needs.stick.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: stick
+      - name: Unpack the image
+        run: mkdir -p dist && tar -C dist -xf stick.tar && rm stick.tar
+      - name: Package the release files
+        run: uv run python tools/package_release.py dist/stick/.ytop release
+      - name: Release notes from the tag message
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git for-each-ref "refs/tags/$TAG" --format='%(contents)' > notes.md
+          test -s notes.md || { echo "::error::tag $TAG has no annotated message"; exit 1; }
+      - name: Create the GitHub release
+        if: github.ref_type == 'tag' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/* --title "YTOP $TAG" --notes-file notes.md --verify-tag
+      - name: Keep the packaged files (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release/
+          retention-days: 7
+          if-no-files-found: error

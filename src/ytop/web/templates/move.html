@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_bar %}
+{% block title %}Moving {{ job.title }} · {{ product_name }}{% endblock %}
+{% block body_class %}{% endblock %}
+{% block body_attrs %}{% if job.active %} data-live-job="{{ job.id }}" data-live-page="move" data-live-state="{{ job.status }}"{% endif %}{% endblock %}
+{% block content %}
+{% if job.status == "done" %}
+<section class="page-head">
+  <p class="eyebrow">Moved</p>
+  <h1>{{ job.title }}</h1>
+  <p class="muted">
+    {{ job.move_total_label }} across {{ job.move_total_files }} files
+    <span class="dot">·</span>{{ job.source_library_label }}
+    → <strong>{{ job.library_label }}</strong>
+  </p>
+</section>
+<div class="hero-actions">
+  <a class="btn primary" href="/playlist/{{ playlist_key(job.library_id, job.playlist_id) }}">Open playlist</a>
+  <a class="btn ghost" href="/storage">Storage</a>
+  <a class="btn ghost" href="/downloads">All downloads</a>
+  <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear" class="inline-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="/downloads">
+    <button type="submit" class="btn tiny ghost">Clear from downloads</button>
+  </form>
+</div>
+
+{% elif job.status in ["queued", "running"] %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow" data-live-status>{% if job.cancel_requested %}Cancelling…{% elif job.status == "queued" %}Move queued{% else %}Moving playlist{% endif %}</p>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">
+      {{ job.source_library_label }} → <strong>{{ job.library_label }}</strong>
+      <span class="dot">·</span>{{ job.video_count }} videos
+    </p>
+  </div>
+  <div class="hero-actions">
+    {% if not job.cancel_requested %}
+    <form action="/jobs/{{ job.id }}/cancel" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/move/{{ job.id }}">
+      <button type="submit" class="btn ghost">Cancel move</button>
+    </form>
+    {% else %}
+    <span class="muted small">Cancelling…</span>
+    {% endif %}
+  </div>
+</section>
+<div class="job-progress">
+  {{ progress_bar(job.percent, "Move progress", "wide", live_hooks=true) }}
+  <p class="muted small">
+    <span data-live-progress>{{ job.moved_label }} of {{ job.move_total_label }}{% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}{% if job.current_title %} · {{ job.current_title }}{% endif %}</span>
+  </p>
+  <p class="muted tiny">
+    Moves within one filesystem rename the folder instantly. Moving to another
+    drive copies the media first, verifies it, then removes the original. This
+    page updates automatically. You can leave it.
+  </p>
+</div>
+
+{% elif job.status == "cancelled" %}
+<section class="empty-state">
+  <h1>Move cancelled</h1>
+  <p>{{ job.title }}</p>
+  <p class="muted">The playlist is still in {{ job.source_library_label }}. Any partial copy on the destination was removed.</p>
+  <div class="hero-actions" style="justify-content: center">
+    <a class="btn primary" href="/playlist/{{ playlist_key(job.source_library_id or job.library_id, job.playlist_id) }}">Open playlist</a>
+    <a class="btn ghost" href="/downloads">All downloads</a>
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+  </div>
+</section>
+
+{% else %}
+<section class="empty-state">
+  <h1>Could not move this playlist</h1>
+  <p>{{ job.error or "Unknown error" }}</p>
+  {% if job.source_cleanup_complete %}
+  <p class="muted">The original playlist was kept in {{ job.source_library_label }}.</p>
+  {% endif %}
+  <div class="hero-actions" style="justify-content: center">
+    <a class="btn primary" href="/playlist/{{ playlist_key(job.source_library_id or job.library_id, job.playlist_id) if job.source_cleanup_complete else playlist_key(job.library_id, job.playlist_id) }}">Open playlist</a>
+    <a class="btn ghost" href="/downloads">All downloads</a>
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

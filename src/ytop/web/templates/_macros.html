@@ -1,0 +1,44 @@
+{# Shared controls. Keep this file free of page-specific markup. #}
+
+{% macro progress_bar(percent, label, extra="", job_hooks=false, live_hooks=false) -%}
+<span class="bar {{ extra }}" role="progressbar" aria-label="{{ label }}"
+      aria-valuemin="0" aria-valuemax="100"
+      aria-valuenow="{{ ((percent or 0) * 100)|round(1) }}"
+      {% if job_hooks %}data-job-bar{% elif live_hooks %}data-live-bar{% endif %}>
+  <span {% if job_hooks %}data-job-fill{% elif live_hooks %}data-live-bar-fill{% endif %}
+        style="width: {{ ((percent or 0) * 100)|round(1) }}%"></span>
+</span>
+{%- endmacro %}
+
+{% macro job_state(job) -%}
+{%- if job.cancel_requested -%}
+  {%- if job.kind == "move" %}Cancelling move…{% else %}Cancelling…{% endif -%}
+{%- elif job.kind == "make_stick" -%}
+  {%- if job.status == "queued" %}Stick queued
+  {%- elif job.status == "running" %}{% if job.stick_mode == "upgrade" %}Upgrading stick{% else %}Making stick{% endif %}
+  {%- elif job.status == "done" %}{% if job.stick_mode == "upgrade" %}Stick upgraded{% else %}Stick ready{% endif %}
+  {%- elif job.status == "cancelled" %}Stick cancelled
+  {%- elif job.status == "failed" %}Stick failed
+  {%- else %}Preparing stick{% endif -%}
+{%- elif job.kind == "update" -%}
+  {%- if job.status == "running" %}Updating
+  {%- elif job.status == "done" %}Updated
+  {%- else %}Update failed{% endif -%}
+{%- elif job.kind == "move" -%}
+  {%- if job.status == "queued" %}Move queued
+  {%- elif job.status == "running" %}Moving playlist
+  {%- elif job.status == "done" %}Move complete
+  {%- elif job.status == "cancelled" %}Move cancelled
+  {%- elif job.status == "failed" %}Move failed
+  {%- else %}Preparing move{% endif -%}
+{%- else -%}
+  {%- if job.status == "probing" %}Reading playlist metadata
+  {%- elif job.status == "ready" %}Ready to download
+  {%- elif job.status == "queued" %}Queued
+  {%- elif job.status == "running" %}Downloading
+  {%- elif job.status == "paused_offline" %}Paused — library offline
+  {%- elif job.status == "done" %}Complete
+  {%- elif job.status == "cancelled" %}Cancelled
+  {%- else %}Failed{% endif -%}
+{%- endif -%}
+{%- endmacro %}

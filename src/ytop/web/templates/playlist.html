@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_bar %}
+{% block title %}{{ playlist.title }} · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="playlist-hero">
+  <div class="playlist-hero-art {% if not playlist.thumb_url %}placeholder{% endif %}">
+    {% if playlist.thumb_url %}
+      <img src="{{ playlist.thumb_url }}" alt="" loading="lazy">
+    {% else %}
+      <span>{{ playlist.title[:1] }}</span>
+    {% endif %}
+  </div>
+  <div class="playlist-hero-info">
+    <p class="eyebrow">Playlist</p>
+    <h1>{{ playlist.title }}</h1>
+    <p class="muted">
+      {% if playlist.channel_url %}
+        <a class="channel-link" href="{{ playlist.channel_url }}" target="_blank" rel="noopener noreferrer">{{ playlist.channel or "Unknown channel" }}</a>
+      {% else %}
+        {{ playlist.channel or "Unknown channel" }}
+      {% endif %}
+      <span class="dot">·</span>
+      {{ playlist.video_count }} videos
+      <span class="dot">·</span>
+      {{ playlist.total_duration_label }}
+      {% if playlist.quality_summary %}<span class="dot">·</span> {{ playlist.quality_summary }}{% endif %}
+      {% if playlist.preserve_audio %}<span class="dot">·</span> high-quality audio{% endif %}
+      {% if playlist.kind == "local" %}<span class="dot">·</span> from your library{% endif %}
+      {% if playlist.is_ungrouped %}<span class="dot">·</span> single videos{% endif %}
+      {% if playlist.updated_at %}<span class="dot">·</span> synced {{ playlist.updated_at[:10] }}{% endif %}
+      {% if multi_library %}<span class="dot">·</span> <a class="channel-link" href="/storage" title="{{ playlist.library_label }}">{{ playlist.library_label }}</a>{% endif %}
+    </p>
+    {% if playlist.description %}
+      <div class="description clamp-3">{{ playlist.description_html|safe }}</div>
+    {% endif %}
+    <div class="hero-actions">
+      {% if playlist.next_url %}
+        <a class="btn primary" href="{{ playlist.next_url }}?autoplay=1">
+          <span class="play-glyph" aria-hidden="true"></span>
+          Play {% if playlist.watched_count %}next{% else %}all{% endif %}
+        </a>
+      {% endif %}
+      <a class="btn ghost" href="/add/video?playlist={{ playlist.key }}">Add video to this playlist</a>
+      {% if playlist.entries|length > 1 %}
+      <span class="order-controls">
+        <button type="button" class="btn ghost" id="order-edit">✎ Edit order</button>
+        <button type="button" class="btn primary" id="order-save" hidden>Save order</button>
+        <span class="muted tiny" id="order-hint" hidden>Drag a video to move it</span>
+      </span>
+      {% endif %}
+      <span class="muted small">
+        {{ playlist.watched_count }}/{{ playlist.video_count }} watched
+        {% if playlist.downloaded_count < playlist.video_count %} · {{ playlist.downloaded_count }}/{{ playlist.video_count }} available{% endif %}
+        {% if playlist.transcript_summary %} · {{ playlist.transcript_summary }}{% elif playlist.transcript_count %} · {{ playlist.transcript_count }} transcripts{% endif %}
+        · {{ playlist.total_bytes_label }} on disk
+      </span>
+      <details class="manage-menu">
+        <summary class="btn ghost">Manage</summary>
+        <div class="manage-panel">
+          <form action="/playlist/{{ playlist.key }}/title" method="post" class="stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label for="playlist-title">Playlist title</label>
+            <input id="playlist-title" type="text" name="title" value="{{ playlist.title }}" maxlength="300" required>
+            <button type="submit" class="btn ghost tiny">Save title</button>
+          </form>
+          <form action="/playlist/{{ playlist.key }}/options" method="post" class="stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label class="check-row">
+              <input type="checkbox" name="preserve_audio" value="1" {% if playlist.preserve_audio %}checked{% endif %}>
+              <span>Keep high-quality audio</span>
+            </label>
+            <p class="muted tiny">Video stays efficient; the best available audio rendition is kept. Applies to new downloads and syncs; existing media keeps the track it was downloaded with.</p>
+            <button type="submit" class="btn tiny">Save audio policy</button>
+          </form>
+          <form action="/playlist/{{ playlist.key }}/delete" method="post"
+                data-confirm="Remove “{{ playlist.title }}” and all of its downloaded media from disk? Watch history is kept."
+                data-confirm-action="Remove playlist">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn danger tiny">Remove playlist</button>
+          </form>
+          <p class="muted tiny">Removing deletes this playlist's folder and its downloaded media from <strong>{{ playlist.library_label }}</strong>. Your watch history stays.</p>
+          <a class="muted tiny" href="/storage">Manage libraries</a>
+          {% if move_locations %}
+          <form action="/playlist/{{ playlist.key }}/move" method="post" class="stack-form"
+                data-confirm="Move “{{ playlist.title }}” with its media, watch progress and titles to the selected library? Moving to another drive copies, verifies, then removes the original."
+                data-confirm-action="Move playlist">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label for="move-location">Move to another location</label>
+            <select id="move-location" name="location">
+              {% for location in move_locations %}
+              <option value="{{ location.id }}">{{ location.label }}{% if location.free_label %} — {{ location.free_label }} free{% endif %}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn tiny">Move playlist</button>
+            <p class="muted tiny">Moving between libraries on one drive renames the folders. Moving to another drive copies the media and then removes the original; progress appears in Downloads.</p>
+          </form>
+          {% endif %}
+        </div>
+      </details>
+    </div>
+    {{ progress_bar(playlist.progress, playlist.watched_count ~ " of " ~ playlist.video_count ~ " watched", "wide") }}
+  </div>
+</section>
+
+<section class="tag-editor" aria-labelledby="tag-editor-heading">
+  <h2 id="tag-editor-heading" class="section-title">Tags and category</h2>
+  {% if effective_tags %}
+  <ul class="tag-row">
+    {% for tag in effective_tags %}
+    <li class="chip tag-removable">
+      <a href="/videos?tag={{ tag.key|urlencode }}&amp;library={{ playlist.library_id|urlencode }}">{{ tag.label }}</a>
+      {% if can_edit_tags %}
+      <form action="/playlist/{{ playlist.key }}/tags" method="post" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="action" value="remove">
+        <input type="hidden" name="tag" value="{{ tag.key }}">
+        <button type="submit" class="chip-remove" aria-label="Remove tag {{ tag.label }}" title="Remove tag">×</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted small">No tags yet.</p>
+  {% endif %}
+  {% if can_edit_tags %}
+  <div class="tag-forms">
+    <form action="/playlist/{{ playlist.key }}/tags" method="post" class="field-row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="add">
+      <label class="field compact">
+        <span>Add a tag</span>
+        <input type="text" name="tag" list="tag-vocabulary" maxlength="80" required autocomplete="off">
+      </label>
+      <datalist id="tag-vocabulary">
+        {% for tag in tag_vocabulary %}<option value="{{ tag.label }}">{% endfor %}
+      </datalist>
+      <button type="submit" class="btn ghost tiny">Add tag</button>
+    </form>
+    <form action="/playlist/{{ playlist.key }}/category" method="post" class="field-row">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field compact">
+        <span>Category</span>
+        <input type="text" name="category" value="{{ effective_category }}" list="category-names" maxlength="80" autocomplete="off" placeholder="None">
+      </label>
+      <datalist id="category-names">
+        {% for name in category_names %}<option value="{{ name }}">{% endfor %}
+      </datalist>
+      <button type="submit" class="btn ghost tiny">Save category</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted small">Category: {{ effective_category or "None" }}</p>
+  {% endif %}
+</section>
+
+{% if live_job %}
+<section class="download-banner" aria-live="polite">
+  {% if live_job.kind == "move" %}
+  <div>
+    <strong data-live-status>{{ "Cancelling move…" if live_job.cancel_requested else "Moving playlist" }}</strong>
+    <span data-live-progress>{{ live_job.moved_label }} of {{ live_job.move_total_label }} → {{ live_job.library_label }}</span>
+  </div>
+  {{ progress_bar(live_job.percent, "Move progress", "wide", live_hooks=true) }}
+  <a class="muted tiny" href="/move/{{ live_job.id }}">Move details</a>
+  {% else %}
+  <div>
+    <strong data-live-status>{{ "Cancelling…" if live_job.cancel_requested else "Downloading" }}</strong>
+    <span data-live-progress>{{ live_job.downloaded + live_job.skipped + live_job.failed }} of {{ live_job.video_count }} · {{ live_job.bytes_label }} on disk</span>
+  </div>
+  {{ progress_bar(live_job.percent, "Download progress", "wide", live_hooks=true) }}
+  <a class="muted tiny" href="/add/{{ live_job.id }}">Download details</a>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if playlist.entries %}
+<div class="list-toolbar" aria-label="Playlist tools">
+  <label class="field compact">
+    <span class="sr-only">Filter videos</span>
+    <input type="search" id="playlist-filter" placeholder="Filter videos…"
+           autocomplete="off">
+  </label>
+  <label class="field compact">
+    <span class="sr-only">Show videos</span>
+    <select id="playlist-filter-state">
+      <option value="all">All videos</option>
+      <option value="unwatched">Unwatched</option>
+      <option value="watched">Watched</option>
+      <option value="missing">Media missing</option>
+    </select>
+  </label>
+  <span class="muted tiny" id="playlist-count" role="status"></span>
+</div>
+<form id="order-form" action="/playlist/{{ playlist.key }}/reorder" method="post" hidden>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="order" id="order-value" value="">
+</form>
+<ol class="video-list">
+  {% for entry in playlist.entries %}
+  <li class="video-row {% if entry.watched %}watched{% endif %} {% if not entry.available %}unavailable{% endif %}"
+      data-video-id="{{ entry.id }}"
+      data-search="{{ (entry.title ~ ' ' ~ entry.channel ~ ' ' ~ entry.description_snippet)|lower }}"
+      data-watched="{{ '1' if entry.watched else '0' }}"
+      data-available="{{ '1' if entry.available else '0' }}">
+    <a href="{{ entry.url }}" class="video-row-link">
+      <span class="video-row-index">{{ entry.index }}</span>
+      <span class="video-row-thumb">
+        <img src="{{ entry.thumb_url }}" alt="" loading="lazy"
+             onerror="this.classList.add('missing'); this.removeAttribute('src')">
+        <span class="duration-badge">{{ entry.duration_label }}</span>
+        {% if entry.fraction > 0 %}
+          <span class="thumb-progress"><span style="width: {{ (entry.fraction * 100)|round(1) }}%"></span></span>
+        {% endif %}
+        {% if not entry.available %}<span class="missing-badge">media missing</span>{% endif %}
+      </span>
+      <span class="video-row-body">
+        <strong class="video-row-title">{{ entry.title }}</strong>
+        <span class="muted small">{{ entry.channel }}</span>
+        {% if entry.description_snippet %}
+          <span class="video-row-desc muted small">{{ entry.description_snippet }}</span>
+        {% endif %}
+        <span class="tag-row">
+          {% if entry.quality_label %}<span class="tag quality-tag">{{ entry.quality_label }}</span>{% endif %}
+          {% if entry.audio_detail %}<span class="tag audio-tag"{% if entry.audio_label %} title="{{ entry.audio_label }}"{% endif %}>{{ entry.audio_detail }}</span>{% endif %}
+          {% if entry.size_label %}<span class="tag">{{ entry.size_label }}</span>{% endif %}
+          {% if entry.watched %}<span class="tag watched-tag">watched</span>{% endif %}
+          {% if entry.chapter_count %}<span class="tag">{{ entry.chapter_count }} chapters</span>{% endif %}
+          {% if entry.has_transcript %}<span class="tag">transcript</span>{% endif %}
+        </span>
+      </span>
+    </a>
+    <div class="row-tools">
+      <details class="row-rename">
+        <summary class="link-button">Rename</summary>
+        <form action="/playlist/{{ playlist.key }}/videos/{{ entry.id }}/title" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="text" name="title" value="{{ entry.title }}" maxlength="300" required aria-label="Video title">
+          <button type="submit" class="btn tiny primary">Save</button>
+        </form>
+      </details>
+      <form action="/playlist/{{ playlist.key }}/videos/{{ entry.id }}/remove" method="post"
+            class="inline-form"
+            data-confirm="Remove “{{ entry.title }}” from this playlist and delete its downloaded media?"
+            data-confirm-action="Remove video">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn tiny danger">Remove</button>
+      </form>
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="muted">This playlist has no entries.</p>
+{% endif %}
+{% endblock %}

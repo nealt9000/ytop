@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}{{ product_name }} updates{% endblock %}
+{% block content %}
+<section class="storage-add app-update">
+  <h1>{{ product_name }} updates</h1>
+  {% if not updates.available %}
+  <p class="muted">This copy of {{ product_name }} is not running from a stick, so it is not updated here.</p>
+  {% else %}
+  {% if updates.phase == "failed" and updates.message %}
+  <p class="error" role="alert">{{ updates.message }}</p>
+  {% endif %}
+  <p class="muted small">This stick runs {{ product_name }} {{ updates.version }}.</p>
+  {% if updates.offer %}
+  <h2>{{ product_name }} {{ updates.offer.version }} is available</h2>
+  {% if updates.offer.notes %}
+  <div class="release-notes" style="white-space: pre-wrap">{{ updates.offer.notes }}</div>
+  {% else %}
+  <p class="muted small">This release has no notes.</p>
+  {% endif %}
+  <p class="muted small">
+    Installing downloads only the parts that changed, then stops any
+    downloads, saves, puts the new version in place and quits. Start
+    {{ product_name }} again afterwards. Your library is not changed.
+  </p>
+  <form action="/app-update/install" method="post"
+        data-confirm="Install {{ product_name }} {{ updates.offer.version }} on this stick? {{ product_name }} quits when it is done; start it again afterwards."
+        data-confirm-action="Install">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="build_id" value="{{ updates.offer.build_id }}">
+    <button type="submit" class="btn primary">Install {{ product_name }} {{ updates.offer.version }}</button>
+  </form>
+  {% elif updates.last_status == "up_to_date" and updates.last_message == "no published release" %}
+  <p>No {{ product_name }} release has been published yet, so there is nothing to update to.</p>
+  {% elif updates.last_status == "up_to_date" %}
+  <p>{{ product_name }} is up to date.</p>
+  {% elif updates.last_status == "unsupported" %}
+  <p>{{ updates.last_message }}.</p>
+  {% elif updates.last_status in ("offline", "rate_limited", "error") %}
+  <p>Couldn't check for updates{% if updates.last_status == "offline" %} (no network){% endif %}. Try again later.</p>
+  {% endif %}
+  <form action="/app-update/check" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="btn">Check now</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

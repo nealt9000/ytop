@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "PLSCHEMA1000000000000000000001",
+  "title": "Schema One",
+  "channel": "Fixture Channel",
+  "description": "A schema-1 fixture playlist.",
+  "entries": [
+    {
+      "id": "vid1",
+      "index": 1,
+      "title": "First video",
+      "path": "videos/vid1",
+      "video": "video.mp4",
+      "available": true,
+      "duration": 60
+    }
+  ],
+  "options": {"preserve_audio": true},
+  "updated_at": "2026-01-01T00:00:00+00:00"
+}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}Search: {{ q }}{% else %}Search{% endif %} · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Search</h1>
+  <form class="search wide-search" action="/search" method="get" role="search">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search titles, tags, transcripts" aria-label="Search titles, descriptions, channels, tags and transcripts" autofocus>
+    {% if playlist_id %}<input type="hidden" name="playlist" value="{{ playlist_id }}">{% endif %}
+    <button type="submit">Search</button>
+  </form>
+  {% if searched %}
+    <p class="muted">
+      {{ hit_count }} match{% if hit_count != 1 %}es{% endif %} for
+      <strong>“{{ q }}”</strong>
+      {% if playlist_id %} in one playlist{% endif %}
+    </p>
+  {% else %}
+    <p class="muted">Search runs fully offline over titles, descriptions, channels, tags and stored transcripts.</p>
+  {% endif %}
+</section>
+
+{% if searched and not groups %}
+<section class="empty-state">
+  <h2>No results</h2>
+  <p class="muted">Try a shorter word or a distinctive name. Videos without captions have no transcript hits.</p>
+</section>
+{% endif %}
+
+{% for group in groups %}
+<section class="search-group">
+  <h2><a href="/playlist/{{ group.card.key }}">{{ group.card.title }}</a></h2>
+  {% if group.tag_matches %}
+  <p class="chips">
+    {% for tag in group.tag_matches %}
+    <a class="chip" href="/videos?tag={{ tag.key|urlencode }}&amp;library={{ group.card.library_id|urlencode }}">{{ tag.label }}</a>
+    {% endfor %}
+  </p>
+  {% endif %}
+  {% if group.video_hits %}
+  <ul class="search-videos">
+    {% for hit in group.video_hits %}
+    {% if hit.url %}
+    <li><a href="{{ hit.url }}"><strong>{{ hit.title }}</strong>
+      <span class="muted small">{{ hit.field }}</span>
+      <span class="search-snippet">{{ hit.html|safe }}</span></a></li>
+    {% else %}
+    <li><strong>{{ hit.title }}</strong>
+      <span class="muted small">{{ hit.field }} · <span class="state-missing">Not downloaded</span></span>
+      <span class="search-snippet">{{ hit.html|safe }}</span></li>
+    {% endif %}
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if group.transcript_hits %}
+  <ol class="search-results">
+    {% for result in group.transcript_hits %}
+    <li class="search-result">
+      <a href="{{ result.url }}">
+        <span class="search-time">{{ result.time_label }}</span>
+        <span class="search-body">
+          <strong>{{ result.title }}</strong>
+          <span class="search-snippet">{{ result.html|safe }}</span>
+        </span>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}

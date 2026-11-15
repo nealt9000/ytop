@@ -1,0 +1,238 @@
+name: Stick
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stick-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Cache pinned sources
+        uses: actions/cache@v4
+        with:
+          path: .tools/stick-cache
+          key: stick-cache-${{ hashFiles('stick/versions.toml') }}
+      - name: Build the 5-platform image
+        env:
+          # ffmpeg-minimal comes from this repo's release (token avoids rate limits).
+          GH_TOKEN: ${{ github.token }}
+        run: uv run python tools/build_stick.py --platforms all
+      - name: Make a library with the fixture playlist
+        run: |
+          uv run ytop init dist/stick --label CI
+          uv run python tools/smoke_stick.py --seed dist/stick
+      - name: Pack (tar keeps the exec bits)
+        run: tar -C dist -cf stick.tar stick
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stick
+          path: stick.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # Only drives the test; YTOP itself runs on the stick's bundled python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: stick
+      - name: Unpack
+        run: mkdir -p dist && tar -C dist -xf stick.tar && rm stick.tar
+      - name: Smoke test
+        run: python tools/smoke_stick.py dist/stick --timeout 120
+
+  smoke-fat32:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: stick
+      - name: Unpack
+        run: mkdir -p dist && tar -C dist -xf stick.tar && rm stick.tar
+      - name: Make a FAT32 stick image and copy YTOP onto it
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q dosfstools
+          truncate -s 3G fat32.img
+          mkfs.vfat -F 32 -n YTOP fat32.img
+          sudo mkdir -p /mnt/stick
+          sudo mount -o loop,uid=$(id -u),gid=$(id -g),showexec fat32.img /mnt/stick
+          cp -R dist/stick/. /mnt/stick/
+          # showexec: nothing without .exe/.com/.bat is executable here.
+          test ! -x /mnt/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          df -h /mnt/stick
+      - name: Smoke test from the FAT32 stick
+        run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
+      - name: Upgrade the stick from the same image (nothing changed)
+        run: |
+          set -o pipefail
+          py=dist/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          up() {
+            "$py" -s -E dist/stick/.ytop/boot.py --home dist/stick -- \
+              make-stick /mnt/stick --upgrade --image dist/stick/.ytop
+          }
+          start=$(date +%s)
+          up 2>&1 | tee upgrade.log
+          elapsed=$(( $(date +%s) - start ))
+          echo "Upgrade took ${elapsed}s"
+          grep -q "Upgrade: 0 files to write " upgrade.log \
+            || { echo "::error::an unchanged upgrade should write 0 files"; exit 1; }
+          [ "$elapsed" -lt 120 ] \
+            || { echo "::error::unchanged upgrade took ${elapsed}s (limit 120s)"; exit 1; }
+      - name: Smoke test after the upgrade
+        run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
+      - name: Upgrade a stick that has no file list
+        run: |
+          set -o pipefail
+          py=dist/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          rm /mnt/stick/.ytop/manifest.sha256
+          "$py" -s -E dist/stick/.ytop/boot.py --home dist/stick -- \
+            make-stick /mnt/stick --upgrade --image dist/stick/.ytop 2>&1 | tee upgrade2.log
+          test "${PIPESTATUS[0]}" -eq 0
+          grep -q "every file is checked first" upgrade2.log \
+            || { echo "::error::expected the no-file-list message"; exit 1; }
+          test -f /mnt/stick/.ytop/manifest.sha256
+      - name: Smoke test after the second upgrade
+        run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
+      - name: Unmount
+        if: always()
+        run: sudo umount /mnt/stick || true
+
+  self-update-fat32:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: stick
+      - name: Unpack
+        run: mkdir -p dist && tar -C dist -xf stick.tar && rm stick.tar
+      - name: Make a FAT32 stick image and copy YTOP onto it
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q dosfstools
+          truncate -s 3G fat32.img
+          mkfs.vfat -F 32 -n YTOP fat32.img
+          sudo mkdir -p /mnt/stick
+          sudo mount -o loop,uid=$(id -u),gid=$(id -g),showexec fat32.img /mnt/stick
+          cp -R dist/stick/. /mnt/stick/
+          df -h /mnt/stick
+      - name: Build release A (this build) and release B (one app file changed)
+        run: |
+          mkdir -p serve
+          uv run python tools/ci_fake_release.py app-release \
+            dist/stick/.ytop work serve --repo test/ytop
+          ls -l serve/test/ytop/*/
+      - name: Serve the fake releases on 127.0.0.1 and point the stick at them
+        run: |
+          rm -f port.txt access.log
+          setsid nohup uv run python tools/fake_release_server.py serve \
+            --port-file port.txt --log access.log > server.log 2>&1 &
+          for _ in $(seq 100); do [ -s port.txt ] && break; sleep 0.2; done
+          test -s port.txt || { cat server.log; exit 1; }
+          port=$(cat port.txt)
+          # smoke_video "" = no online probe: the job stays hermetic.
+          uv run python - "$port" <<'PY'
+          import sys
+          from pathlib import Path
+          from ytop.config import set_updates_option
+          port = sys.argv[1]
+          for key, value in {
+              "api_base": f"http://127.0.0.1:{port}/api",
+              "repo": "test/ytop",
+              "smoke_video": "",
+          }.items():
+              set_updates_option(Path("/mnt/stick"), key, value)
+          PY
+          cat /mnt/stick/.ytop/config.toml
+      - name: App update without consent is refused
+        run: |
+          py=dist/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          before=$(jq -r .build_id /mnt/stick/.ytop/build.json)
+          rc=0
+          "$py" -s -E dist/stick/.ytop/boot.py --home /mnt/stick -- \
+            app-update install || rc=$?
+          [ "$rc" -eq 2 ] || { echo "::error::install without --yes exited $rc"; exit 1; }
+          [ ! -e access.log ] || { echo "::error::it touched the network"; exit 1; }
+          [ "$(jq -r .build_id /mnt/stick/.ytop/build.json)" = "$before" ]
+      - name: App update to release B (only the app piece may download)
+        run: |
+          set -o pipefail
+          py=dist/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          "$py" -s -E dist/stick/.ytop/boot.py --home /mnt/stick -- \
+            app-update install --yes 2>&1 | tee app-update.log
+          fetched=$(grep '^/dl/' access.log | sed 's#.*/##' | sort | tr '\n' ' ')
+          echo "fetched: $fetched"
+          [ "$fetched" = "SHA256SUMS app.tar.gz ytop-release.json " ] \
+            || { echo "::error::expected only the app piece, got: $fetched"; exit 1; }
+          want=$(jq -r .build_id serve/test/ytop/*/ytop-release.json)
+          have=$(jq -r .build_id /mnt/stick/.ytop/build.json)
+          [ "$want" = "$have" ] \
+            || { echo "::error::stick is $have, release B is $want"; exit 1; }
+          [ "$(jq -r .version /mnt/stick/.ytop/build.json)" = "0.1.1" ]
+      - name: Smoke test after the app update
+        run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
+      - name: Component update to a re-packed newer yt-dlp
+        run: |
+          set -o pipefail
+          uv run python tools/ci_fake_release.py ytdlp-release \
+            dist/stick/.ytop serve --version 2099.1.1
+          py=dist/stick/.ytop/runtime/linux-x86_64/python/bin/python3
+          "$py" -s -E dist/stick/.ytop/boot.py --home /mnt/stick -- \
+            components update yt-dlp 2>&1 | tee components.log
+          have=$(jq -r '.current["yt-dlp"]' /mnt/stick/.ytop/components/current.json)
+          [ "$have" = "2099.1.1" ] \
+            || { echo "::error::yt-dlp is $have, expected 2099.1.1"; exit 1; }
+      - name: Smoke test after the component update
+        run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
+      - name: Logs
+        if: always()
+        run: |
+          for f in server.log access.log app-update.log components.log; do
+            [ -f "$f" ] && { echo "== $f"; cat "$f"; }
+          done
+          true
+      - name: Stop the server and unmount
+        if: always()
+        run: |
+          pkill -f fake_release_server.py || true
+          sudo umount /mnt/stick || true

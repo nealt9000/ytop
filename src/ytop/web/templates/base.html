@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}{{ product_name }}{% endblock %}</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ff0033'/%3E%3Cpath d='M12 9l11 7-11 7z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+  {% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}"{% block body_attrs %}{% if live_job %} data-live-job="{{ live_job.id }}" data-live-page="{% if request.url.path == '/' %}library{% else %}playlist{% endif %}" data-live-state="{{ live_job.status }}"{% endif %}{% endblock %}>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="{{ product_name }} library">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">{{ product_name }}</span>
+      <span class="brand-tag">offline</span>
+    </a>
+    <form class="search" action="/search" method="get" role="search">
+      <input type="search" name="q" value="{{ q }}" placeholder="Search titles, tags, transcripts" aria-label="Search titles, descriptions, channels, tags and transcripts" autocomplete="off">
+      <button type="submit" aria-label="Search">Search</button>
+    </form>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="site-nav">
+      <span class="sr-only">Menu</span>
+      <span aria-hidden="true">☰</span>
+    </button>
+    <nav class="topbar-side" id="site-nav" aria-label="Primary">
+      <a href="/" class="topbar-link{% if request.url.path == '/' %} active{% endif %}"{% if request.url.path == '/' %} aria-current="page"{% endif %}>Library</a>
+      <details class="add-menu">
+        <summary class="topbar-link{% if request.url.path.startswith('/add') or request.url.path.startswith('/playlist/new') %} active{% endif %}"{% if request.url.path.startswith('/add') or request.url.path.startswith('/playlist/new') %} aria-current="page"{% endif %}>Add</summary>
+        <div class="add-menu-list">
+          <a href="/add">Add playlist</a>
+          <a href="/add/video">Add video</a>
+          <a href="/playlist/new">New empty playlist</a>
+        </div>
+      </details>
+      <a href="/downloads" class="topbar-link{% if request.url.path.startswith('/downloads') or request.url.path.startswith('/jobs') or request.url.path.startswith('/move') %} active{% endif %}"{% if request.url.path.startswith('/downloads') or request.url.path.startswith('/jobs') or request.url.path.startswith('/move') %} aria-current="page"{% endif %}>Downloads</a>
+      <a href="/storage" class="topbar-link{% if request.url.path.startswith('/storage') %} active{% endif %}"{% if request.url.path.startswith('/storage') %} aria-current="page"{% endif %}>Storage</a>
+      <a href="/make-stick" class="topbar-link{% if request.url.path.startswith('/make-stick') %} active{% endif %}"{% if request.url.path.startswith('/make-stick') %} aria-current="page"{% endif %}>Make a stick</a>
+      <span class="topbar-count">{{ playlist_count }} playlist{% if playlist_count != 1 %}s{% endif %}</span>
+      {% if portable %}
+      <span class="topbar-running">
+        {% if launch_connected %}<span>Running from {{ launch_label }}</span>{% if runs_from_cache %} <span class="muted tiny">(running from this computer's cache — the stick can be unplugged after Quit)</span>{% endif %}{% else %}<span class="launch-gone">Launch stick disconnected</span>{% endif %}
+        <span aria-hidden="true">·</span>
+        <form action="/api/quit" method="post" class="quit-form" data-quit>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="topbar-link quit-button">Quit</button>
+        </form>
+      </span>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% if request.query_params.get('offer_switch') == '1' %}
+  <div class="offer-switch" role="status">A newer {{ product_name }} is available on {{ request.query_params.get('offer_from') or 'another stick' }}; switch when downloads finish</div>
+  {% endif %}
+  {% if ask_app_updates %}
+  <div class="offer-switch app-update-ask" role="region" aria-label="{{ product_name }} updates">
+    <span>Check for {{ product_name }} updates on this stick?</span>
+    <span class="muted tiny">{{ product_name }} looks for a new version when it starts and asks before installing anything.</span>
+    <form action="/app-update/answer" method="post" class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ request.url.path }}">
+      <button type="submit" name="answer" value="yes" class="btn tiny primary">Yes</button>
+      <button type="submit" name="answer" value="no" class="btn tiny ghost">No</button>
+    </form>
+  </div>
+  {% elif app_offer %}
+  <div class="offer-switch app-update-offer" role="status">
+    {{ product_name }} {{ app_offer.version }} is available. <a href="/app-update">See what's new</a>
+  </div>
+  {% endif %}
+  <main class="page" id="main-content" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>{{ library_name }}</span>
+    <span>Local only · no network required to browse</span>
+  </footer>
+
+  <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">Confirm</h2>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" class="btn ghost">Cancel</button>
+        <button type="submit" value="confirm" class="btn danger" id="confirm-accept">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

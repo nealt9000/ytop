@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "vid1",
+  "title": "First video",
+  "description": "Fixture description.",
+  "channel": "Fixture Channel",
+  "duration": 60,
+  "chapters": [{"start_time": 0, "end_time": 30, "title": "Opening"}],
+  "files": {"video": "video.mp4"}
+}

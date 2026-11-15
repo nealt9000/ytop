@@ -1,0 +1,33 @@
+# Pinned toolchain (fetched by tools/fetch_ffmpeg.sh)
+.tools/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Spike / scratch output
+scratch/
+*.png
+*.webp
+
+# Media
+*.webm
+*.mkv
+*.mp4
+*.m4a
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Build / test artifacts
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Small committed media fixtures (see tools/ffmpeg-minimal/README.md)
+!tests/fixtures/media/*

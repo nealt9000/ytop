@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% from "_cards.html" import playlist_card with context %}
+{% block title %}Library · {{ product_name }}{% endblock %}
+{% block content %}
+{% set chip_cap = 12 %}
+{% if several or not view.summaries %}<h1 class="sr-only">Library</h1>{% endif %}
+
+{% if switcher %}
+<nav class="library-switcher" aria-label="Libraries">
+  <a href="/" class="switcher-link"{% if not active_library %} aria-current="page"{% endif %}>All libraries</a>
+  {% for ref in switcher %}
+  <a href="/?library={{ ref.id|urlencode }}" class="switcher-link"{% if active_library == ref.id %} aria-current="page"{% endif %}>{{ ref.label }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
+
+<div class="library-summaries{% if several %} several{% endif %}">
+{% for s in view.summaries %}
+<section class="library-summary" aria-labelledby="summary-{{ s.id }}">
+  <div class="summary-head">
+    <div class="summary-title">
+      {% if several %}
+      <h2 id="summary-{{ s.id }}"><a href="/?library={{ s.id|urlencode }}">{{ s.label }}</a></h2>
+      {% else %}
+      <h1 id="summary-{{ s.id }}">{{ s.label }}</h1>
+      {% endif %}
+      {% if s.read_only %}<span class="tag">Read-only</span>{% endif %}
+    </div>
+    {% if s.description %}<p class="summary-description">{{ s.description }}</p>{% endif %}
+  </div>
+  <dl class="summary-stats">
+    <div><dt>Playlists</dt><dd>{{ s.playlist_count }}</dd></div>
+    <div><dt>Videos</dt><dd>{{ s.video_count }}</dd></div>
+    <div><dt>Total</dt><dd>{{ s.total_hours|hours }}</dd></div>
+    <div><dt>Watched</dt><dd>{{ s.watched_hours|hours }}</dd></div>
+    <div><dt>Unwatched</dt><dd>{{ s.unwatched_hours|hours }}</dd></div>
+    <div><dt>Space</dt><dd>{{ s.used_bytes|bytes }} used{% if s.free_bytes %}<span class="muted"> · {{ s.free_bytes|bytes }} free</span>{% endif %}</dd></div>
+  </dl>
+  {% if s.top_categories or s.top_channels %}
+  <div class="summary-tops">
+    {% if s.top_categories %}
+    <div class="summary-top">
+      <span class="summary-top-label">Top categories</span>
+      <ul class="tag-row chip-links">
+        {% for name, count in s.top_categories %}
+        <li><a class="chip" href="/videos?category={{ name|urlencode }}&amp;library={{ s.id|urlencode }}">{{ name }} <span class="chip-count">{{ count }}</span></a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if s.top_channels %}
+    <div class="summary-top">
+      <span class="summary-top-label">Top channels</span>
+      <ul class="tag-row chip-links">
+        {% for name, count in s.top_channels %}
+        <li><a class="chip" href="/videos?channel={{ name|urlencode }}&amp;library={{ s.id|urlencode }}">{{ name }} <span class="chip-count">{{ count }}</span></a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if not s.read_only %}
+  <details class="summary-edit">
+    <summary class="btn tiny ghost">Edit<span class="sr-only"> {{ s.label }}</span></summary>
+    <form class="summary-edit-form" action="/storage/{{ s.id }}/label" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/?library={{ s.id }}">
+      <label class="field">
+        <span>Name</span>
+        <input type="text" name="label" value="{{ s.label }}" maxlength="80" required>
+      </label>
+      <label class="field">
+        <span>Description</span>
+        <input type="text" name="description" value="{{ s.description }}" maxlength="500"
+               placeholder="What is in this library?">
+      </label>
+      <button type="submit" class="btn primary">Save</button>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% endfor %}
+</div>
+
+{% if view.all_playlists %}
+{% if view.continue_watching %}
+<section class="home-section" aria-labelledby="continue-heading">
+  <h2 id="continue-heading" class="section-title">Continue watching</h2>
+  <div class="playlist-grid card-rail" data-browse-section>
+    {% for card in view.continue_watching %}{{ playlist_card(card, multi_library, "continue") }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if view.start_new %}
+<section class="home-section" aria-labelledby="start-heading">
+  <h2 id="start-heading" class="section-title">Start something new</h2>
+  <div class="playlist-grid card-rail" data-browse-section>
+    {% for card in view.start_new %}{{ playlist_card(card, multi_library, "new") }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="home-section" aria-labelledby="browse-heading" id="browse">
+  <h2 id="browse-heading" class="section-title">Browse all</h2>
+  <div class="list-toolbar browse-toolbar" role="group" aria-label="Browse options">
+    <div class="view-toggle" role="group" aria-label="View">
+      <button type="button" class="btn tiny" data-view="list" aria-pressed="false">List</button>
+      <button type="button" class="btn tiny" data-view="grid" aria-pressed="true">Grid</button>
+    </div>
+    <label class="field compact">
+      <span>Group by</span>
+      <select id="browse-group">
+        <option value="none">None</option>
+        <option value="category">Category</option>
+        <option value="tag">Tag</option>
+        <option value="channel">Channel</option>
+        {% if several %}<option value="library">Library</option>{% endif %}
+      </select>
+    </label>
+    <label class="field compact">
+      <span>Sort</span>
+      <select id="browse-sort">
+        <option value="recent">Recent</option>
+        <option value="title">Title</option>
+        <option value="length">Length</option>
+        <option value="remaining">Unwatched remaining</option>
+        <option value="size">Size</option>
+      </select>
+    </label>
+    <a class="btn ghost tiny" href="/tags{% if active_library %}?library={{ active_library|urlencode }}{% endif %}">Manage tags</a>
+    <span class="list-count" id="browse-count" role="status">{{ view.all_playlists|length }} playlist{% if view.all_playlists|length != 1 %}s{% endif %}</span>
+  </div>
+  {% if view.categories or view.tags or view.channels %}
+  <div class="chip-filters">
+    {% if view.categories %}
+    <div class="chip-filter-row" role="group" aria-label="Filter by category" data-facet="category">
+      <span class="chip-filter-label" aria-hidden="true">Categories</span>
+      <div class="chip-scroll">
+        {% for name in view.categories %}<button type="button" class="chip" data-value="{{ name }}" aria-pressed="false"{% if loop.index > chip_cap %} data-extra hidden{% endif %}>{{ name }}</button>{% endfor %}
+        {% if view.categories|length > chip_cap %}<button type="button" class="chip-more" aria-expanded="false" data-more>More</button>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if view.tags %}
+    <div class="chip-filter-row" role="group" aria-label="Filter by tag" data-facet="tags">
+      <span class="chip-filter-label" aria-hidden="true">Tags</span>
+      <div class="chip-scroll">
+        {% for tag in view.tags %}<button type="button" class="chip" data-value="{{ tag.key }}" aria-pressed="false"{% if loop.index > chip_cap %} data-extra hidden{% endif %}>{{ tag.label }}</button>{% endfor %}
+        {% if view.tags|length > chip_cap %}<button type="button" class="chip-more" aria-expanded="false" data-more>More</button>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+    {% if view.channels %}
+    <div class="chip-filter-row" role="group" aria-label="Filter by channel" data-facet="channel">
+      <span class="chip-filter-label" aria-hidden="true">Channels</span>
+      <div class="chip-scroll">
+        {% for name in view.channels %}<button type="button" class="chip" data-value="{{ name }}" aria-pressed="false"{% if loop.index > chip_cap %} data-extra hidden{% endif %}>{{ name }}</button>{% endfor %}
+        {% if view.channels|length > chip_cap %}<button type="button" class="chip-more" aria-expanded="false" data-more>More</button>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+  <div class="browse-results" id="browse-results" data-view="grid">
+    <div class="playlist-grid" data-browse-section data-browse-all>
+      {% for card in view.all_playlists %}{{ playlist_card(card, multi_library) }}{% endfor %}
+    </div>
+  </div>
+  <p class="empty-filter" id="browse-empty" hidden>No playlists match these filters.</p>
+</section>
+{% else %}
+<section class="empty-state">
+  <h2>No playlists yet</h2>
+  <p class="muted">Paste a YouTube playlist link and it downloads here for watching offline.</p>
+  <a class="btn primary" href="/add">Add playlist</a>
+</section>
+{% endif %}
+{% endblock %}

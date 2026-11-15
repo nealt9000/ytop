@@ -1,0 +1,133 @@
+# Pinned sources for the YTOP stick image (tools/build_stick.py).
+# Every artifact is verified against its sha256 before use. The yt-dlp-ejs
+# version is pinned by uv.lock, not here.
+#
+# The build also seeds the component store (.ytop/components, see
+# src/ytop/components.py) with the Python components it installed (uv.lock
+# pins yt-dlp, yt-dlp-ejs, the bgutil plugin, youtube-transcript-api);
+# lib/common keeps the same versions as the always-present fallback. Deno is
+# not seeded (size budget): [deno] below pins runtime/<plat>/bin/deno, which
+# is used until the updater puts a newer Deno in the store.
+#
+# The bgutil PO-token server (the plugin's Deno provider runs its
+# src/generate_once.ts) is the upstream tag tarball, whose tag must equal the
+# bgutil plugin version uv.lock pins (the build refuses a mismatch).  The build
+# runs `deno install` in server/ with the pinned Deno, keeps only pure
+# JavaScript (it fails on any native binary or symlink), and seeds it into the
+# component store.  The sha256 below is of GitHub's generated tag archive,
+# recorded when the pin was made; the server is GPL-3.0-only (its LICENSE is
+# seeded beside it).
+#
+# Linux floor: glibc 2.28, set by the dependency wheels (installed for
+# manylinux_2_28, see UV_TRIPLES in build_stick.py). Python needs 2.17, Deno 2.27.
+
+[python]
+version = "3.12.15"
+build = "20261021"
+
+[deno]
+version = "2.9.8"
+
+[ffmpeg_minimal]
+release = "ffmpeg-minimal-1"  # this repo's release; a GitHub token is used if one is at hand
+
+[[artifact]]
+name = "python"
+platform = "linux-x86_64"
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772"
+
+[[artifact]]
+name = "python"
+platform = "linux-aarch64"
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "b4567aa5a11f51b540c4dfd9e082ebf23e554f8ac17b85caa6cea23e83693394"
+
+[[artifact]]
+name = "python"
+platform = "macos-arm64"
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "7b8d00b751db21cea87dc551a8f8165147c5fbc5251d5537d7e5497dde00a219"
+
+[[artifact]]
+name = "python"
+platform = "macos-x86_64"
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "f12e0504397683d6be0745ffd4c39ef45a455cec169adf35c628840d06133773"
+
+[[artifact]]
+name = "python"
+platform = "windows-x86_64"
+url = "https://releases.astral.sh/github/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "aac5d331fc3307343f95928fdbea4583f0d53973d08c7e1d081884fbd229a0e1"
+
+[[artifact]]
+name = "deno"
+platform = "linux-x86_64"
+url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"
+sha256 = "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609"
+
+[[artifact]]
+name = "deno"
+platform = "linux-aarch64"
+url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip"
+sha256 = "d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905"
+
+[[artifact]]
+name = "deno"
+platform = "macos-arm64"
+url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-apple-darwin.zip"
+sha256 = "9f0bf660393da2eaff044cdc7444cb08c73f235849b61d224d825a194ce7c98e"
+
+[[artifact]]
+name = "deno"
+platform = "macos-x86_64"
+url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-apple-darwin.zip"
+sha256 = "4b2f5edd2639b7470f034238b321d7002d8dfb4726d8558f52c17afac370eb2c"
+
+[[artifact]]
+name = "deno"
+platform = "windows-x86_64"
+url = "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip"
+sha256 = "cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf"
+
+[[artifact]]
+name = "ffmpeg_minimal"
+platform = "linux-x86_64"
+url = "https://github.com/nealt9000/ytop/releases/download/ffmpeg-minimal-1/ffmpeg-minimal-linux-x86_64.tar.gz"
+sha256 = "ed077a53503b6bf505a0645284718458a9e6a9540024fd770aa5577ead793db1"
+auth = "github"
+
+[[artifact]]
+name = "ffmpeg_minimal"
+platform = "linux-aarch64"
+url = "https://github.com/nealt9000/ytop/releases/download/ffmpeg-minimal-1/ffmpeg-minimal-linux-aarch64.tar.gz"
+sha256 = "f608fd124aea5e6b2a399bf80ea9d81a8e1a6144ac4b2db5163efc5f6a2bbf25"
+auth = "github"
+
+[[artifact]]
+name = "ffmpeg_minimal"
+platform = "macos-arm64"
+url = "https://github.com/nealt9000/ytop/releases/download/ffmpeg-minimal-1/ffmpeg-minimal-macos-arm64.tar.gz"
+sha256 = "fefb4cca5369a12a42d685bbfbd0c6db0c28ff28d359841194e6bc1ecc99b2b0"
+auth = "github"
+
+[[artifact]]
+name = "ffmpeg_minimal"
+platform = "macos-x86_64"
+url = "https://github.com/nealt9000/ytop/releases/download/ffmpeg-minimal-1/ffmpeg-minimal-macos-x86_64.tar.gz"
+sha256 = "462f0ef9e1c353aaea200c464935700a28c1ba3201a4c9831836334f00173e11"
+auth = "github"
+
+[[artifact]]
+name = "ffmpeg_minimal"
+platform = "windows-x86_64"
+url = "https://github.com/nealt9000/ytop/releases/download/ffmpeg-minimal-1/ffmpeg-minimal-windows-x86_64.tar.gz"
+sha256 = "1afb6cbb194a9947714599f41d2e3851c77e7c5270b932676f641df44a5bfd66"
+auth = "github"
+
+[[artifact]]
+name = "bgutil-server"
+platform = "any"
+url = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/2.0.2.tar.gz"
+sha256 = "1f2ae9ec39405b8e80397dfc2551f58deed09d8dff4b2b8fbc314df8e091c0a1"

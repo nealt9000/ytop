@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Cache the pinned FFmpeg download
+        uses: actions/cache@v4
+        with:
+          path: .tools/dl
+          key: ffmpeg-${{ hashFiles('tools/fetch_ffmpeg.sh') }}
+      - name: Fetch the pinned FFmpeg (tests decode H.264)
+        run: tools/fetch_ffmpeg.sh
+      - name: Lint
+        run: uv run ruff check src tests tools
+      - name: Type-check job and persistence boundaries
+        run: uv run mypy
+      - name: Offline test suite
+        run: uv run pytest -q
+      - name: CLI smoke test
+        run: uv run ytop --help >/dev/null

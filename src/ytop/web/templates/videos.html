@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% from "_cards.html" import video_card with context %}
+{% block title %}{{ heading }} · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <p class="eyebrow"><a href="/{% if active_library %}?library={{ active_library|urlencode }}{% endif %}">Library</a></p>
+  <h1>{{ heading }}</h1>
+  <p class="muted">
+    {{ video_total }} video{% if video_total != 1 %}s{% endif %}
+    {%- if groups %} in {{ groups|length }} playlist{% if groups|length != 1 %}s{% endif %}{% endif %}
+    {%- if library_label %} on {{ library_label }}{% endif %}
+  </p>
+</section>
+
+{% if not groups %}
+<section class="empty-state">
+  <h2>No videos match</h2>
+  <p class="muted">Nothing in the library has that tag, category or channel any more.</p>
+  <a class="btn ghost" href="/">Back to the library</a>
+</section>
+{% endif %}
+
+{% for card, videos in groups %}
+<section class="video-group" aria-labelledby="group-{{ loop.index }}">
+  <h2 id="group-{{ loop.index }}"><a href="/playlist/{{ card.key }}">{{ card.title }}</a>
+    {% if multi_library %}<span class="muted small">· {{ card.library_label }}</span>{% endif %}</h2>
+  <ul class="browse-video-list">
+    {% for video in videos %}{{ video_card(video) }}{% endfor %}
+  </ul>
+</section>
+{% endfor %}
+{% endblock %}

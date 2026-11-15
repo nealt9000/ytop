@@ -1,0 +1,11 @@
+# Cross build for windows-x86_64 with mingw-w64.
+#   podman build -t ytop-ffmpeg-mingw -f Containerfile.mingw .
+#   podman run --rm -v "$PWD/dist:/out:Z" ytop-ffmpeg-mingw windows-x86_64 /out
+FROM docker.io/library/debian:bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev \
+      build-essential nasm meson ninja-build pkg-config git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY build.sh /usr/local/bin/build.sh
+ENTRYPOINT ["/usr/local/bin/build.sh"]

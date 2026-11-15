@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if phase == "installing" %}<meta http-equiv="refresh" content="1">{% endif %}
+  <title>{{ product_name }} update</title>
+  {# Self-contained (no base.html, no /static): it is loaded once at start
+     and must render while the update replaces the app's own files. #}
+  <style>
+    :root { color-scheme: dark light; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #0f0f10; color: #f1f1f1;
+    }
+    main { max-width: 34rem; padding: 24px; text-align: center; }
+    h1 { font-size: 1.4rem; margin: 0 0 8px; }
+    p { color: #b5b5b5; margin: 0 0 8px; }
+    @media (prefers-color-scheme: light) {
+      body { background: #fafafa; color: #111; }
+      p { color: #555; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    {% if phase == "installing" %}
+    <h1 role="status">{% if kind == "revert" %}Going back to{% else %}Installing{% endif %} {{ product_name }} {{ version }}…</h1>
+    <p>Keep the stick plugged in. {{ product_name }} quits when it is done.</p>
+    {% if progress %}<p>{{ progress }}</p>{% endif %}
+    {% else %}
+    <h1 role="status">{{ message }}</h1>
+    <p>{{ product_name }} has stopped. You can close this tab.</p>
+    {% endif %}
+  </main>
+</body>
+</html>

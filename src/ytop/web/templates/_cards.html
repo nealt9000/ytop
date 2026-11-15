@@ -1,0 +1,98 @@
+{# Playlist and video cards for the library home and video lists.
+   Import "with context": cards read job_by_playlist and active_library. #}
+{% from "_macros.html" import progress_bar %}
+
+{% macro tag_chips(tags, limit=None) -%}
+{%- set shown = tags[:limit] if limit else tags -%}
+{%- if shown %}
+<ul class="tag-row chip-links" aria-label="Tags">
+  {% for tag in shown %}
+  <li><a class="chip" href="/videos?tag={{ tag.key|urlencode }}{% if active_library %}&amp;library={{ active_library|urlencode }}{% endif %}">{{ tag.label }}</a></li>
+  {% endfor %}
+</ul>
+{%- endif %}
+{%- endmacro %}
+
+{% macro playlist_card(card, multi, section="browse") -%}
+{%- set download = job_by_playlist.get(card.key) if job_by_playlist else None -%}
+{%- set resume = section == "continue" and card.next_url -%}
+{%- set href = card.next_url if resume else "/playlist/" ~ card.key -%}
+<article class="playlist-card{% if resume %} continue-card{% endif %}"
+     data-key="{{ card.key }}"
+     data-title="{{ card.title }}"
+     data-updated="{{ card.updated_at or '' }}"
+     data-length="{{ card.total_duration|round(1) }}"
+     data-remaining="{{ card.remaining_duration|round(1) }}"
+     data-bytes="{{ card.total_bytes }}"
+     data-category="{{ card.category }}"
+     data-tags="{{ card.tags|map(attribute='key')|join('|') }}"
+     data-channel="{{ card.channel }}"
+     data-library="{{ card.library_id }}"
+     data-library-label="{{ card.library_label }}">
+  <a class="playlist-card-link" href="{{ href }}">
+    <div class="playlist-card-art {% if not card.thumb_url %}placeholder{% endif %}">
+      {% if card.thumb_url %}
+        <img src="{{ card.thumb_url }}" alt="" loading="lazy">
+      {% else %}
+        <span aria-hidden="true">{{ card.title[:1] }}</span>
+      {% endif %}
+      <span class="count-badge">{{ card.video_count }} video{% if card.video_count != 1 %}s{% endif %}</span>
+      <span class="playlist-card-duration">{{ card.total_duration|duration }}</span>
+      {% if download %}<span class="download-badge">Downloading {{ download.downloaded + download.skipped + download.failed }}/{{ download.video_count }}</span>{% endif %}
+    </div>
+    <div class="playlist-card-body">
+      <h3 class="playlist-card-title">{{ card.title }}</h3>
+      {% if resume %}
+      <span class="continue-next">
+        <span class="continue-label">{{ card.next_label }}</span>
+        <span class="continue-title">{{ card.next_title }}</span>
+      </span>
+      {% endif %}
+      <span class="muted small playlist-card-meta">
+        {%- if card.playlist_id == "un-grouped" %}Single videos{% else %}{{ card.channel or "Unknown channel" }}{% endif %}
+        {%- if card.kind == "local" %} · built from your library{% endif %}
+        {%- if multi %} · {{ card.library_label }}{% endif %}
+      </span>
+    </div>
+  </a>
+  <div class="playlist-card-foot">
+    {{ progress_bar(card.progress, card.watched_count ~ " of " ~ card.available_count ~ " watched") }}
+    {% if download %}
+    {{ progress_bar(download.percent, "Download progress", "download-bar", job_hooks=false) }}
+    {% endif %}
+    <p class="muted tiny">
+      {{ card.watched_count }}/{{ card.available_count }} watched
+      {%- if card.remaining_duration and card.watched_count %} · {{ card.remaining_duration|duration }} left{% endif %}
+      · {{ card.total_bytes|bytes }}
+      {%- if card.available_count < card.video_count %} · {{ card.available_count }}/{{ card.video_count }} downloaded{% endif %}
+    </p>
+    {{ tag_chips(card.tags, 3) }}
+  </div>
+</article>
+{%- endmacro %}
+
+{% macro video_card(card) -%}
+<li class="browse-video{% if card.watched %} watched{% endif %}{% if not card.available %} unavailable{% endif %}">
+  {% if card.available %}<a class="video-row-thumb" href="{{ card.url }}" tabindex="-1" aria-hidden="true">{% else %}<span class="video-row-thumb">{% endif %}
+    <img src="{{ card.thumb_url }}" alt="" loading="lazy" onerror="this.classList.add('missing')">
+    <span class="duration-badge">{{ card.duration_label }}</span>
+    {% if not card.available %}<span class="missing-badge" aria-hidden="true">Not downloaded</span>
+    {% elif card.fraction > 0 and not card.watched %}<span class="thumb-progress"><span style="width: {{ (card.fraction * 100)|round(1) }}%"></span></span>{% endif %}
+  {% if card.available %}</a>{% else %}</span>{% endif %}
+  <div class="video-row-body">
+    {% if card.available %}
+    <a class="video-row-title" href="{{ card.url }}">{{ card.title }}</a>
+    {% else %}
+    <span class="video-row-title">{{ card.title }}</span>
+    {% endif %}
+    <span class="muted small">
+      {%- if card.channel %}{{ card.channel }} · {% endif %}{{ card.duration_label }} ·
+      {% if not card.available %}<span class="state-missing">Not downloaded</span>
+      {%- elif card.watched %}<span class="tag watched-tag">Watched</span>
+      {%- elif card.fraction > 0 %}{{ (card.fraction * 100)|round|int }}% watched
+      {%- else %}Unwatched{% endif %}
+    </span>
+    {{ tag_chips(card.tags) }}
+  </div>
+</li>
+{%- endmacro %}

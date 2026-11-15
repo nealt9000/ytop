@@ -1,0 +1,331 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_bar %}
+{% block title %}{% if job and job.kind == "video" %}Add video{% elif job %}{{ job.title or "Add playlist" }}{% else %}Add playlist{% endif %} · {{ product_name }}{% endblock %}
+{% block body_class %}{% endblock %}
+{% block body_attrs %}{% if job and job.active %} data-live-job="{{ job.id }}" data-live-page="add" data-live-state="{{ job.status }}"{% endif %}{% endblock %}
+{% block content %}
+{% if job and job.notice %}<p class="muted small job-notice" role="status">{{ job.notice }}</p>{% endif %}
+{% if not job %}
+<section class="page-head">
+  <h1>Add playlist</h1>
+  <p class="muted">Paste a YouTube playlist link or id. {{ product_name }} reads the playlist and shows both the efficient and native download sizes before anything is downloaded.</p>
+</section>
+<form class="add-playlist-form" action="/add" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="add-playlist wide">
+    <input type="text" name="url" required autofocus autocomplete="off"
+           placeholder="https://www.youtube.com/playlist?list=…"
+           aria-label="YouTube playlist link or id">
+    <button type="submit" class="btn primary">Review playlist</button>
+  </div>
+  <label class="field compact location-field">
+    <span>Store downloaded media on</span>
+    <select name="location">
+      {% for ref in libraries %}
+      <option value="{{ ref.id }}" {% if default_library and ref.id == default_library.id %}selected{% endif %}>
+        {{ ref.label }} — {{ ref.root }}{% if ref.free_label %} · {{ ref.free_label }} free{% endif %}
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+<p class="muted small">
+  Pasting a single video link adds it to <strong>Un-grouped</strong>.
+</p>
+
+{% elif job.status == "probing" %}
+<section class="page-head">
+  <div>
+    <h1>{% if job.cancel_requested %}Cancelling…{% elif job.kind == "video" %}Reading video…{% else %}Reading playlist…{% endif %}</h1>
+    <p class="muted">{{ job.url }}</p>
+  </div>
+  <div class="hero-actions">
+    {% if not job.cancel_requested %}
+    <form action="/jobs/{{ job.id }}/cancel" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/add/{{ job.id }}">
+      <button type="submit" class="btn ghost">Cancel</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+<div class="job-progress">
+  {% set probe_percent = (job.probe_done / job.video_count) if job.video_count else 0.04 %}
+  {{ progress_bar(probe_percent, "Probe progress", "wide", live_hooks=true) }}
+  <p class="muted small">
+    <span data-live-status>{% if job.cancel_requested %}Cancelling…{% elif job.current_title %}Checking {{ job.current_title }}{% elif job.kind == "video" %}Reading video metadata{% else %}Reading playlist metadata{% endif %}</span>
+    <span data-live-progress>{% if job.probe_done %} · {{ job.probe_done }} of {{ job.video_count or "?" }} checked{% endif %}{% if job.probe_in_flight %} · {{ job.probe_in_flight }} in progress{% endif %}</span>
+  </p>
+  <p class="muted tiny">
+    {% if job.kind == "video" %}Probing the video.{% else %}Probing is parallelised across {{ job.video_count or "the" }} videos.{% endif %}
+    This page updates automatically. Cancel stops it immediately.
+  </p>
+</div>
+
+{% elif job.status == "ready" %}
+<section class="playlist-hero add-hero">
+  <div class="playlist-hero-info">
+    <p class="eyebrow">Ready to add</p>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">
+      {{ job.channel or "Unknown channel" }}
+      <span class="dot">·</span>{{ job.video_count }} video{% if job.video_count != 1 %}s{% endif %}
+      <span class="dot">·</span>{{ job.total_duration|duration }}
+      {% if job.library_label %}<span class="dot">·</span> storing on {{ job.library_label }}{% endif %}
+    </p>
+    {% if job.description %}<div class="description clamp-3">{{ job.description }}</div>{% endif %}
+    {% if job.kind == "video" %}
+    <p class="muted small">
+      Destination: <a href="/playlist/{{ playlist_key(job.library_id, job.target_playlist_id) }}">{{ job.target_playlist_title }}</a>
+    </p>
+    {% endif %}
+  </div>
+</section>
+
+<div class="size-options">
+  <div class="size-option">
+    <span class="size-label">Efficient ({{ job.target_mb_per_hour|round|int }} MB/h budget)</span>
+    <strong>{{ job.estimate_label }}</strong>
+    <span class="muted tiny">Best native rendition under the budget, no re-encode</span>
+  </div>
+  <div class="size-option">
+    <span class="size-label">Native (best available)</span>
+    <strong>{{ job.estimate_native_label }}</strong>
+    <span class="muted tiny">Highest resolution YouTube offers</span>
+  </div>
+</div>
+{% if job.fat32_warning %}
+<p class="form-error">⚠ {{ job.fat32_count }} videos exceed FAT32's 4 GB limit on this drive</p>
+{% endif %}
+{% if job.kind == "video" %}
+<p class="muted small">
+  This video is added to
+  <a href="/playlist/{{ playlist_key(job.library_id, job.target_playlist_id) }}">{{ job.target_playlist_title }}</a>.
+  {{ product_name }} does not re-encode; the efficient budget picks the best native rendition for this one
+  video. {% if job.in_library %}The destination playlist already exists, so only this video is
+  downloaded and the rest of the playlist is left alone.{% endif %}
+</p>
+{% else %}
+<details class="policy-explainer">
+  <summary>How efficient sizing works</summary>
+  <p class="muted small">
+    {{ product_name }} does not re-encode. The efficient size is what will be on disk because it downloads the
+    smaller native rendition directly. Resolution and codec vary by video on purpose: efficient
+    spends one playlist-wide budget, starts every video at the smallest legible rendition, and buys
+    height upgrades where they cost the fewest bytes. Forcing one resolution would either waste the
+    budget or throw away higher-resolution videos, and forcing one codec would require a re-encode.
+    {% if job.in_library %}This playlist is already in your
+    library; syncing adds new videos and refreshes metadata without deleting existing media.{% endif %}
+  </p>
+</details>
+{% endif %}
+
+<form action="/jobs/{{ job.id }}/download" method="post" class="download-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <fieldset class="policy-fieldset">
+    <legend>Download quality</legend>
+    <label class="policy-option">
+      <input type="radio" name="policy" value="efficient" checked>
+      <span><strong>Efficient</strong> — {{ job.estimate_label }}<br><small>≈{{ job.target_mb_per_hour|round|int }} MB/h budget</small></span>
+    </label>
+    <label class="policy-option">
+      <input type="radio" name="policy" value="native">
+      <span><strong>Native</strong> — {{ job.estimate_native_label }}<br><small>best available resolution</small></span>
+    </label>
+  </fieldset>
+  <label class="check-row">
+    <input type="checkbox" name="preserve_audio" value="1" {% if job.preserve_audio %}checked{% endif %}>
+    <span>Keep high-quality audio <small class="muted">(music playlists)</small></span>
+  </label>
+  <button type="submit" class="btn primary">
+    {% if job.kind == "video" %}Add to {{ job.target_playlist_title }}
+    {% elif job.in_library %}Sync playlist{% else %}Download playlist{% endif %}
+  </button>
+  <a class="btn ghost" href="/downloads">All downloads</a>
+</form>
+<form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this review? Nothing has been downloaded yet."
+        data-confirm-action="Clear" class="inline-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="next" value="/downloads">
+  <button type="submit" class="btn tiny ghost">Clear review</button>
+</form>
+
+<div class="table-scroll">
+<table class="review-table">
+  <thead>
+    <tr>
+      <th>#</th><th>Title</th><th>Duration</th>
+      <th>Efficient format</th><th class="num">Efficient</th><th class="num">Native</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in job.items %}
+    <tr>
+      <td class="muted">{{ item.index }}</td>
+      <td>{{ item.title }}</td>
+      <td class="muted">{{ item.duration_label }}</td>
+      <td class="muted small">
+        {% if item.error %}unavailable
+        {% else %}{{ item.height }}p {{ item.video_codec }}{% if item.fps %} {{ item.fps|round|int }}fps{% endif %}{% if item.container %} · {{ item.container }}{% endif %}{% if item.audio_detail %} · {{ item.audio_detail }}{% endif %}{% if item.audio_alternates %} · +{{ item.audio_alternates }} alt audio{% endif %}
+        {% endif %}
+      </td>
+      <td class="num">{% if item.size %}{{ item.size|bytes }}{% else %}—{% endif %}</td>
+      <td class="num muted">{% if item.native_size %}{{ item.native_size|bytes }}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% elif job.status in ["queued", "running"] %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow" data-live-status>{% if job.cancel_requested %}Cancelling…{% else %}Downloading{% endif %}</p>
+    <h1>{{ job.title }}</h1>
+    <p class="muted">
+      {{ job.downloaded }} new · {{ job.skipped }} already on disk
+      {% if job.failed %} · {{ job.failed }} failed{% endif %}
+      <span class="dot">·</span>{{ job.bytes_label }} on disk
+      <span class="dot">·</span>{{ job.policy_label }}
+      {% if job.library_label %}<span class="dot">·</span>{{ job.library_label }}{% endif %}
+    </p>
+  </div>
+  <div class="hero-actions">
+    {% if not job.cancel_requested %}
+    <form action="/jobs/{{ job.id }}/cancel" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/add/{{ job.id }}">
+      <button type="submit" class="btn ghost">Cancel download</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+<div class="job-progress">
+  {{ progress_bar(job.percent, "Download progress", "wide", live_hooks=true) }}
+  <p class="muted small">
+    <span data-live-status>{% if job.status == "queued" %}Queued{% else %}Downloading{% endif %}</span>
+    <span data-live-progress>{% if job.current_title %}{{ job.current_title }}{% if job.current_total %} · {{ (job.current_percent * 100)|round(0)|int }}%{% endif %}{% elif job.status == "queued" %}— waiting for the current download to finish{% else %}Preparing the first video…{% endif %}</span>
+  </p>
+  <p class="muted tiny">This page updates automatically. You can leave it; the download continues.</p>
+</div>
+<ol class="download-items">
+  {% for item in job.items %}
+  <li class="download-item {{ item.status }}">
+    <span class="download-index">{{ item.index }}</span>
+    <span class="download-title">{{ item.title }}</span>
+    <span class="download-status">
+      {% if item.status == "downloaded" %}{{ item.size|bytes }}
+      {% elif item.status == "skipped" %}{{ item.error or "already on disk" }}
+      {% elif item.status == "failed" %}failed{% if item.error %}: {{ item.error|truncate(80) }}{% endif %}
+      {% elif item.status == "downloading" %}downloading…
+      {% elif item.status == "cancelled" %}cancelled
+      {% else %}pending{% endif %}
+    </span>
+  </li>
+  {% endfor %}
+</ol>
+
+{% elif job.status == "done" %}
+<section class="page-head">
+  <p class="eyebrow">Added</p>
+  <h1>{{ job.title }}</h1>
+  <p class="muted">
+    {{ job.downloaded }} new · {{ job.skipped }} already on disk
+    {% if job.failed %} · {{ job.failed }} failed{% endif %}
+    <span class="dot">·</span>{{ job.bytes_label }} on disk
+    <span class="dot">·</span>{{ job.policy_label }}
+  </p>
+</section>
+<div class="hero-actions">
+  {% if job.playlist_id %}<a class="btn primary" href="/playlist/{{ playlist_key(job.library_id, job.playlist_id) }}">Open playlist</a>{% endif %}
+  <form action="/jobs/{{ job.id }}/download" method="post" class="inline-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="policy" value="{{ job.policy }}">
+    <button type="submit" class="btn ghost">{% if job.kind == "video" %}Add again{% else %}Sync again{% endif %}</button>
+  </form>
+  <a class="btn ghost" href="/downloads">All downloads</a>
+  <a class="btn ghost" href="/">Library</a>
+  <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear" class="inline-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="/downloads">
+    <button type="submit" class="btn tiny ghost">Clear from downloads</button>
+  </form>
+</div>
+
+{% elif job.status == "cancelled" %}
+<section class="empty-state">
+  <h1>Cancelled</h1>
+  <p>{{ job.title or job.url }}</p>
+  <p class="muted">
+    {% if job.kind == "video" %}Nothing was added. Run it again to add the video.{% else %}Completed videos stay in the library. Run the sync again to finish the rest.{% endif %}
+  </p>
+  <div class="hero-actions" style="justify-content: center">
+    {% if job.items %}
+    <form action="/jobs/{{ job.id }}/download" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="policy" value="{{ job.policy }}">
+      <button type="submit" class="btn primary">Resume download</button>
+    </form>
+    {% endif %}
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+    <a class="btn ghost" href="/downloads">All downloads</a>
+  </div>
+</section>
+
+{% elif job.status == "paused_offline" %}
+<section class="empty-state">
+  <h1>Paused — library offline</h1>
+  <p>{{ job.title or job.url }}</p>
+  <p class="muted">{{ job.error or "Its library is not connected." }} Completed videos are kept.</p>
+  <div class="hero-actions" style="justify-content: center">
+    {% if job.items %}
+    <form action="/jobs/{{ job.id }}/download" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="policy" value="{{ job.policy }}">
+      <button type="submit" class="btn primary">Resume</button>
+    </form>
+    {% endif %}
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+    <a class="btn ghost" href="/downloads">All downloads</a>
+  </div>
+</section>
+
+{% else %}
+<section class="empty-state">
+  <h1>{% if job.kind == "video" %}Could not add this video{% else %}Could not add this playlist{% endif %}</h1>
+  <p>{{ job.error or "Unknown error" }}</p>
+  <div class="hero-actions" style="justify-content: center">
+    {% if job.items %}
+    <form action="/jobs/{{ job.id }}/download" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="policy" value="{{ job.policy }}">
+      <button type="submit" class="btn primary">Retry download</button>
+    </form>
+    {% endif %}
+    <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="/downloads">
+      <button type="submit" class="btn ghost">Clear</button>
+    </form>
+    <a class="btn ghost" href="/">Back to the library</a>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

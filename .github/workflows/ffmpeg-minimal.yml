@@ -1,0 +1,130 @@
+name: ffmpeg-minimal
+
+# Builds the minimal ffmpeg + ffprobe for all five stick platforms and checks
+# each with tools/ffmpeg-minimal/verify.py on a native runner. A release
+# `ffmpeg-minimal-<n>` is published when a `ffmpeg-minimal-*` tag is pushed,
+# or on a manual run with `release: true` (next free <n>).
+# Pushes to the work branch only build and verify.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a release ffmpeg-minimal-<next n> after all verifies pass
+        type: boolean
+        default: false
+  push:
+    tags: ["ffmpeg-minimal-*"]
+    # Pushes that touch the recipe also run the build + verify (no release).
+    branches: [main]
+    paths: ["tools/ffmpeg-minimal/**", ".github/workflows/ffmpeg-minimal.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04, container: linux, verify: true }
+          - { platform: linux-aarch64, os: ubuntu-24.04-arm, container: linux, verify: true }
+          - { platform: windows-x86_64, os: ubuntu-24.04, container: mingw, verify: false }
+          - { platform: macos-arm64, os: macos-15, container: "", verify: true }
+          - { platform: macos-x86_64, os: macos-15-intel, container: "", verify: true }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in container
+        if: matrix.container != ''
+        run: |
+          docker build -t ffmpeg-minimal -f tools/ffmpeg-minimal/Containerfile.${{ matrix.container }} tools/ffmpeg-minimal
+          mkdir -p dist
+          docker run --rm -v "$PWD/dist:/out" ffmpeg-minimal ${{ matrix.platform }} /out
+
+      - name: Build natively (macOS)
+        if: matrix.container == ''
+        run: |
+          brew install nasm meson ninja pkg-config
+          uname -m
+          tools/ffmpeg-minimal/build.sh ${{ matrix.platform }} dist
+
+      - uses: actions/setup-python@v5
+        if: matrix.verify
+        with:
+          python-version: "3.12"
+
+      - name: Verify
+        if: matrix.verify
+        run: |
+          mkdir -p check
+          tar -xzf dist/ffmpeg-minimal-${{ matrix.platform }}.tar.gz -C check
+          file check/bin/ffmpeg check/bin/ffprobe
+          python tools/ffmpeg-minimal/verify.py check/bin/ffmpeg check/bin/ffprobe tests/fixtures/media
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-minimal-${{ matrix.platform }}
+          path: dist/ffmpeg-minimal-${{ matrix.platform }}.tar.gz*
+          if-no-files-found: error
+
+  verify-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-minimal-windows-x86_64
+          path: dist
+      - name: Verify
+        shell: bash
+        run: |
+          mkdir -p check
+          tar -xzf dist/ffmpeg-minimal-windows-x86_64.tar.gz -C check
+          python tools/ffmpeg-minimal/verify.py check/bin/ffmpeg.exe check/bin/ffprobe.exe tests/fixtures/media
+
+  release:
+    needs: [build, verify-windows]
+    if: github.ref_type == 'tag' || inputs.release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ffmpeg-minimal-*
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          test "$(ls dist/*.tar.gz | wc -l)" -eq 5
+          (cd dist && cat *.sha256 && sha256sum -c *.sha256)
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"
+            gh release create "$tag" dist/* --verify-tag --title "$tag" \
+              --notes "Minimal ffmpeg + ffprobe for YTOP sticks (tools/ffmpeg-minimal), all 5 platforms verified."
+          else
+            n=1
+            # git/ref/tags/<prefix> prefix-matches (e.g. -1 also hits -10), which can
+            # only over-skip numbers, never reuse an existing tag.
+            while gh release view "ffmpeg-minimal-$n" >/dev/null 2>&1 \
+                || gh api "repos/$GH_REPO/git/ref/tags/ffmpeg-minimal-$n" >/dev/null 2>&1; do
+              n=$((n + 1))
+            done
+            tag="ffmpeg-minimal-$n"
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "$tag" \
+              --notes "Minimal ffmpeg + ffprobe for YTOP sticks (tools/ffmpeg-minimal), all 5 platforms verified."
+          fi

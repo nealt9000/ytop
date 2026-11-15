@@ -1,0 +1,4 @@
+*.sh eol=lf
+*.command eol=lf
+*.cmd eol=crlf
+src/ytop/stick/launchers/README.txt eol=crlf

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Manage tags · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="home-section">
+  <p class="eyebrow">{{ tag_library.label }}</p>
+  <h1>Manage tags</h1>
+  <p class="muted small">Rename a tag to change its label everywhere. Renaming it to an existing tag merges the two. Every change can be undone.</p>
+  {% if multi_library %}
+  <p class="muted small">
+    {% for ref in libraries_all %}{% if ref.id != tag_library.id %}<a href="/tags?library={{ ref.id|urlencode }}">{{ ref.label }}</a> {% endif %}{% endfor %}
+  </p>
+  {% endif %}
+  {% if tags %}
+  <ul class="tag-manage-list">
+    {% for key, label, count in tags %}
+    <li class="tag-manage-row">
+      <a class="chip" href="/videos?tag={{ key|urlencode }}&amp;library={{ tag_library.id|urlencode }}">{{ label }}</a>
+      <span class="muted small">{{ count }} playlist{% if count != 1 %}s{% endif %}</span>
+      {% if can_edit_tags %}
+      <form action="/tags/{{ tag_library.id }}/rename" method="post" class="field-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="key" value="{{ key }}">
+        <label class="field compact">
+          <span>Rename or merge into…</span>
+          <input type="text" name="label" maxlength="80" required autocomplete="off" aria-label="Rename or merge {{ label }} into">
+        </label>
+        <button type="submit" class="btn ghost tiny">Rename</button>
+      </form>
+      <form action="/tags/{{ tag_library.id }}/hide" method="post" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="key" value="{{ key }}">
+        <button type="submit" class="btn ghost tiny" aria-label="Hide {{ label }}">Hide</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <section class="empty-state">
+    <h2>No tags yet</h2>
+    <p class="muted">Tags appear here once a playlist has one; add tags from a playlist page.</p>
+  </section>
+  {% endif %}
+  {% if renamed_tags %}
+  <h2 class="section-title">Renamed tags</h2>
+  <ul class="tag-manage-list">
+    {% for key, old_label, new_label in renamed_tags %}
+    <li class="tag-manage-row">
+      <span>{{ old_label }} → {{ new_label }}</span>
+      {% if can_edit_tags %}
+      <form action="/tags/{{ tag_library.id }}/rename" method="post" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="key" value="{{ key }}">
+        <input type="hidden" name="label" value="">
+        <button type="submit" class="btn ghost tiny" aria-label="Undo renaming {{ old_label }} to {{ new_label }}">Undo</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if hidden_tags %}
+  <h2 class="section-title">Hidden tags</h2>
+  <ul class="tag-manage-list">
+    {% for key, label in hidden_tags %}
+    <li class="tag-manage-row">
+      <span class="chip">{{ label }}</span>
+      {% if can_edit_tags %}
+      <form action="/tags/{{ tag_library.id }}/unhide" method="post" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="key" value="{{ key }}">
+        <button type="submit" class="btn ghost tiny" aria-label="Unhide {{ label }}">Unhide</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

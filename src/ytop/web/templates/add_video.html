@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Add a video · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Add a single video</h1>
+    <p class="muted">
+      Paste one YouTube video link. It is probed and downloaded like a
+      one-item playlist, then added to the playlist you choose. Videos with no
+      destination go to <strong>Un-grouped</strong>.
+    </p>
+  </div>
+</section>
+
+{% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+
+<form class="add-video-form" action="/add/video" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="field">
+    <span>Video link or id</span>
+    <input type="text" name="url" required autofocus autocomplete="off"
+           placeholder="https://www.youtube.com/watch?v=…">
+  </label>
+  <label class="field">
+    <span>Add to playlist</span>
+    <select name="playlist">
+      <option value="" {% if not selected %}selected{% endif %}>Un-grouped (single videos){% if multi_library and default_library %} — {{ default_library.label }}{% endif %}</option>
+      {% if multi_library %}
+        {% for ref in libraries if not default_library or ref.id != default_library.id %}
+        <option value="library:{{ ref.id }}" {% if selected == "library:" ~ ref.id %}selected{% endif %}>Un-grouped — {{ ref.label }}</option>
+        {% endfor %}
+      {% endif %}
+      {% for item in playlists %}
+        {% if not item.is_ungrouped %}
+        <option value="{{ item.key }}" {% if item.key == selected %}selected{% endif %}>{{ item.title }}{% if multi_library %} — {{ item.library_label }}{% endif %}</option>
+        {% endif %}
+      {% endfor %}
+    </select>
+  </label>
+  <label class="check-row">
+    <input type="checkbox" name="preserve_audio" value="1">
+    <span>Keep high-quality audio <small class="muted">(music)</small></span>
+  </label>
+  <div class="hero-actions">
+    <button type="submit" class="btn primary">Review video</button>
+    <a class="btn ghost" href="/storage">Storage</a>
+  </div>
+</form>
+{% endblock %}

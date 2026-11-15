@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_bar, job_state %}
+{% block title %}Downloads · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Downloads</h1>
+    <p class="muted">Playlist probes and downloads running on this machine. Completed jobs stay here until you clear them. Clearing a job keeps its videos. Each job is stored with its destination library.</p>
+  </div>
+</section>
+
+<p class="sr-only" id="downloads-announcer" role="status" aria-live="polite"></p>
+
+<div id="downloads-content">
+{% if jobs %}
+<ol class="job-list">
+  {% for job in jobs %}
+  <li class="job-card" data-job-id="{{ job.id }}"
+      data-status="{{ job.status }}"
+      data-active="{{ '1' if job.active else '0' }}">
+    <div class="job-main">
+      <a href="{% if job.kind == 'move' %}/move/{{ job.id }}{% elif job.kind == 'make_stick' %}/make-stick/{{ job.id }}{% elif job.kind == 'update' %}/storage{% else %}/add/{{ job.id }}{% endif %}" class="job-body">
+        <strong>{{ job.title or job.url }}</strong>
+        <span class="muted small">
+          <span data-job-state>{{ job_state(job) }}</span>
+          {% if job.kind == "update" %}
+            {% if job.library_label %} · {{ job.library_label }}{% endif %}
+          {% elif job.kind == "move" %}
+            · {{ job.video_count or 0 }} videos
+            · {{ job.source_library_label }} → {{ job.library_label }}
+          {% elif job.kind == "make_stick" %}
+            · {{ job.target_path }}
+            · {{ job.stick_platforms|length }} platform{% if job.stick_platforms|length != 1 %}s{% endif %}
+            {% if job.video_count %} · {{ job.video_count }} playlist{% if job.video_count != 1 %}s{% endif %}{% endif %}
+          {% else %}
+            {% if job.kind == "video" %} · 1 video{% else %} · {{ job.video_count or "?" }} videos{% endif %}
+            {% if job.kind == "video" and job.target_playlist_title %} · to {{ job.target_playlist_title }}{% endif %}
+            {% if job.library_label %} · {{ job.library_label }}{% endif %}
+            {% if job.status == "ready" %}
+              · efficient {{ job.estimate_label }} · native {{ job.estimate_native_label }}
+            {% elif job.status == "done" %}
+              · {{ job.bytes_label }} on disk · {{ job.policy_label }}
+            {% elif job.status in ["queued", "running"] %}
+              · {{ job.policy_label }}
+            {% elif job.estimate_bytes %}
+              · {{ job.estimate_label }} estimated
+            {% endif %}
+          {% endif %}
+          {% if not job.active and job.finished_at %}
+            · {{ "finished" if job.status == "done" else "ended" }} {{ job.finished_at|finished }}
+          {% endif %}
+        </span>
+        {% if job.kind == "update" %}
+          <span class="muted tiny" data-job-metrics>
+            {%- if job.active %}{{ job.current_title or "" }}
+            {%- else %}{{ job.notice }}{% if job.notice and job.error %} · {% endif %}{{ job.error|truncate(140) if job.error else "" }}{% endif -%}
+          </span>
+        {% elif job.kind in ["move", "make_stick"] %}
+          {{ progress_bar(job.percent if (job.active or job.status == "done") else 0, "Copy progress", job_hooks=true) }}
+          <span class="muted tiny" data-job-metrics>
+            {% if job.status == "done" and job.kind == "make_stick" %}
+              {{ job.move_total_label }} written
+              {% if job.move_total_files %} · {{ job.move_total_files }} files{% endif %}
+              {% if job.notice %} · {{ job.notice }}{% endif %}
+            {% elif job.status == "done" %}
+              {{ job.move_total_label }} moved to {{ job.library_label }}
+              {% if job.move_total_files %} · {{ job.move_total_files }} files{% endif %}
+            {% elif job.active %}
+              {{ job.moved_label }} of {{ job.move_total_label }}
+              {% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}
+              {% if job.current_title %} · {{ job.current_title }}{% endif %}
+            {% else %}{{ job.error|truncate(140) if job.error else "" }}{% endif %}
+          </span>
+        {% else %}
+          {{ progress_bar(job.percent if (job.active or job.status == "done") else 0, "Download progress", job_hooks=true) }}
+          <span class="muted tiny" data-job-metrics>
+            {% if job.status == "running" %}
+              {{ job.downloaded }} new · {{ job.skipped }} on disk
+              {% if job.failed %} · {{ job.failed }} failed{% endif %}
+              · {{ job.bytes_label }}
+            {% elif job.status == "done" %}
+              {{ job.downloaded }} new · {{ job.skipped }} already on disk
+              {% if job.failed %} · {{ job.failed }} failed{% endif %}
+            {% elif job.status in ["cancelled", "failed", "paused_offline"] and job.error %}
+              {{ job.error|truncate(140) }}
+            {% endif %}
+            {% if job.notice %} · {{ job.notice }}{% endif %}
+          </span>
+        {% endif %}
+      </a>
+      <div class="job-side">
+        <span class="job-time muted tiny">{{ job.created_at[:16].replace("T", " ") }}</span>
+        {% if job.active and job.kind == "update" %}
+          <span class="muted tiny">Can't be stopped</span>
+        {% elif job.active %}
+          {% if job.cancel_requested %}
+            <span class="muted tiny">Cancelling…</span>
+          {% else %}
+            <form action="/jobs/{{ job.id }}/cancel" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="next" value="/downloads">
+              <button type="submit" class="btn tiny ghost">Cancel</button>
+            </form>
+          {% endif %}
+        {% else %}
+          <form action="/jobs/{{ job.id }}/remove" method="post"
+        data-confirm="Clear this from the downloads list? Nothing already downloaded or copied is deleted."
+        data-confirm-action="Clear">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="next" value="/downloads">
+            <button type="submit" class="btn tiny ghost">Clear</button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<section class="empty-state">
+  <h2>No downloads yet</h2>
+  <p class="muted">Probe a playlist to see both its efficient and native sizes before downloading it.</p>
+  <p><a class="btn primary" href="/add">Add playlist</a></p>
+</section>
+{% endif %}
+</div>
+{% endblock %}

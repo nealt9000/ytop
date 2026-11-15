@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Not found · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="empty-state">
+  <h1>Not found</h1>
+  <p>{{ message }}</p>
+  <p><a class="btn primary" href="/">Back to the library</a></p>
+</section>
+{% endblock %}

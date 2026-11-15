@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}{{ video.title }} · {{ playlist.title }}{% endblock %}
+{% block body_class %}watch-body{% endblock %}
+{% block content %}
+<div class="watch-layout">
+  <section class="watch-main">
+    <div class="player-wrap" id="player-wrap">
+      {% if video.has_media %}
+      <video id="player" preload="metadata" playsinline
+             {% if video.thumb_url %}poster="{{ video.thumb_url }}"{% endif %}
+             data-video-id="{{ video.entry.id }}"
+             data-duration="{{ video.duration or '' }}">
+        <source src="{{ video.media_url }}" type="{{ video.media_type }}">
+        Your browser cannot play this file.
+      </video>
+      <audio id="alternate-audio" preload="auto"></audio>
+      <div class="captions" id="captions" aria-live="polite" hidden></div>
+      <button type="button" class="player-big-play" id="player-big-play"
+              aria-label="Play video">
+        <span class="big-play-glyph" aria-hidden="true"></span>
+      </button>
+      <div class="player-controls" id="player-controls">
+        <div class="timeline" id="timeline" role="slider" tabindex="0"
+             aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="timeline-chapters" id="timeline-chapters"></div>
+          <div class="timeline-buffer" id="timeline-buffer"></div>
+          <div class="timeline-played" id="timeline-played"></div>
+          <div class="timeline-handle" id="timeline-handle"></div>
+          <div class="timeline-tooltip" id="timeline-tooltip" role="tooltip" hidden>
+            <img class="timeline-tip-thumb" id="timeline-tip-thumb" alt="" loading="lazy">
+            <div class="timeline-tip-body">
+              <span class="timeline-tip-time" id="timeline-tip-time"></span>
+              <span class="timeline-tip-chapter" id="timeline-tip-chapter"></span>
+              <span class="timeline-tip-range" id="timeline-tip-range"></span>
+            </div>
+          </div>
+        </div>
+        <div class="control-row">
+          <button type="button" class="control-btn" id="play-toggle" aria-label="Play">
+            <svg class="icon icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="icon icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          </button>
+          <button type="button" class="control-btn" id="mute-toggle" aria-label="Mute">
+            <svg class="icon icon-volume" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4zm12.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+            <svg class="icon icon-muted" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4zm12.6 1.4L15.2 12l1.4 1.4 1.4-1.4 1.4 1.4 1.4-1.4-1.4-1.4 1.4-1.4-1.4-1.4-1.4 1.4-1.4-1.4-1.4 1.4z"/></svg>
+          </button>
+          <input class="volume" id="volume" type="range" min="0" max="1"
+                 step="0.01" value="1" aria-label="Volume">
+          <span class="time-readout" id="time-readout">0:00 / 0:00</span>
+          <span class="control-spacer"></span>
+          {% if video.audio_tracks|length > 1 %}
+          <div class="audio-menu" id="audio-menu">
+            <button type="button" class="control-btn audio-btn" id="audio-toggle"
+                    aria-haspopup="true" aria-expanded="false"
+                    title="Audio track">
+              <span class="audio-glyph" aria-hidden="true"></span>
+              <span id="audio-current">{{ video.audio_tracks[0].display_label }}</span>
+            </button>
+            <div class="audio-panel" id="audio-panel" hidden>
+              <p class="audio-panel-title">Audio track</p>
+              {% for track in video.audio_tracks %}
+              <button type="button" class="audio-option{% if loop.first %} active{% endif %}"
+                      data-audio-index="{{ loop.index0 }}"
+                      aria-pressed="{{ 'true' if loop.first else 'false' }}">
+                <span class="audio-option-main">{{ track.display_label }}</span>
+                <span class="audio-option-meta">
+                  {{ track.detail_label }}{% if track.auto_dubbed %} · AI dub{% elif not track.original %} · alternate{% endif %}
+                </span>
+              </button>
+              {% endfor %}
+            </div>
+          </div>
+          {% endif %}
+          {% if video.transcript %}
+          <button type="button" class="control-btn cc-btn" id="cc-toggle"
+                  aria-label="Toggle closed captions" aria-pressed="true"
+                  title="Closed captions (c)">CC</button>
+          {% endif %}
+          <label class="speed-control">
+            <span class="sr-only">Playback speed</span>
+            <select id="speed-select" aria-label="Playback speed">
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="1.75">1.75×</option>
+              <option value="2">2×</option>
+            </select>
+          </label>
+          <button type="button" class="control-btn" id="fullscreen-toggle"
+                  aria-label="Fullscreen" title="Fullscreen (f)">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v2H7v3H5V5zm9 0h5v5h-2V7h-3V5zM5 14h2v3h3v2H5v-5zm12 0h2v5h-5v-2h3v-3z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="resume-note" class="resume-note" hidden>
+        <span id="resume-text"></span>
+        <button type="button" class="btn tiny" id="resume-start-over">Start over</button>
+        <button type="button" class="btn tiny ghost" id="resume-dismiss">Dismiss</button>
+      </div>
+      {% else %}
+      <div class="media-missing">
+        <strong>Media file missing</strong>
+        <p class="muted">Re-run the fetch for this playlist on the machine that stores the library.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <h1 class="watch-title">{{ video.title }}</h1>
+    <div class="watch-meta">
+      {% if video.channel_url %}
+        <a class="channel-link" href="{{ video.channel_url }}" target="_blank" rel="noopener noreferrer">{{ video.channel }}</a>
+      {% else %}
+        <span class="channel">{{ video.channel }}</span>
+      {% endif %}
+      {% if video.upload_date %}<span class="dot">·</span><span>{{ video.upload_date }}</span>{% endif %}
+      <span class="dot">·</span><span>{{ video.duration_label }}</span>
+      {% if video.quality_detail %}<span class="dot">·</span><span class="quality">{{ video.quality_detail }}</span>{% endif %}
+      {% if video.audio_detail %}<span class="dot">·</span><span class="quality audio-quality"{% if video.audio_label %} title="{{ video.audio_label }}"{% endif %}>{{ video.audio_detail }}</span>{% endif %}
+      {% if video.media_size_label %}<span class="dot">·</span><span class="quality">{{ video.media_size_label }}</span>{% endif %}
+      <span class="dot">·</span><span>#{{ video.entry.index }} in playlist</span>
+      {% if video.transcript %}<span class="tag">transcript</span>{% endif %}
+    </div>
+    <details class="rename-menu">
+      <summary class="link-button">Edit title</summary>
+      <form action="/playlist/{{ playlist.key }}/videos/{{ video.entry.id }}/title" method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="text" name="title" value="{{ video.title }}" maxlength="300" required aria-label="Video title">
+        <button type="submit" class="btn tiny primary">Save</button>
+      </form>
+    </details>
+
+    <div class="watch-actions">
+      <a class="btn ghost{% if not video.prev_entry %} disabled{% endif %}"
+         {% if video.prev_entry %}href="/watch/{{ playlist.key }}/{{ video.prev_entry.id }}?autoplay={{ autoplay_param }}"{% endif %}>
+        Previous
+      </a>
+      <button type="button" class="btn ghost{% if video.progress.watched %} is-watched{% endif %}" id="mark-watched">
+        {% if video.progress.watched %}Watched{% else %}Mark watched{% endif %}
+      </button>
+      <a class="btn ghost{% if not video.next_entry %} disabled{% endif %}"
+         {% if video.next_entry %}href="/watch/{{ playlist.key }}/{{ video.next_entry.id }}?autoplay={{ autoplay_param }}"{% endif %}
+         id="next-link">
+        Next
+      </a>
+      <label class="toggle" title="Play the next video automatically">
+        <input type="checkbox" id="autoplay-toggle" {% if autoplay %}checked{% endif %}>
+        <span>Autoplay next</span>
+      </label>
+      <span class="watch-progress muted tiny" id="watch-progress"></span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Video details">
+      <button type="button" class="tab active" id="tab-description" data-tab="description" role="tab" aria-selected="true" aria-controls="panel-description" tabindex="0">Description</button>
+      <button type="button" class="tab" id="tab-chapters" data-tab="chapters" role="tab" aria-selected="false" aria-controls="panel-chapters" tabindex="-1">
+        Chapters{% if video.chapters %} <span class="count">{{ video.chapters|length }}</span>{% endif %}
+      </button>
+      <button type="button" class="tab" id="tab-transcript" data-tab="transcript" role="tab" aria-selected="false" aria-controls="panel-transcript" tabindex="-1">
+        Transcript{% if video.transcript %} <span class="count">{{ video.transcript_segments|length }}</span>{% endif %}
+      </button>
+    </div>
+
+    <section class="tab-panel" id="panel-description" data-panel="description" role="tabpanel" aria-labelledby="tab-description" tabindex="0">
+      <div class="description">{{ video.description_html|safe }}</div>
+      {% if video.meta.files and video.meta.files.thumbnail_url %}
+        <p class="muted tiny source-note">Original description stored from YouTube. Links open only if you are online.</p>
+      {% endif %}
+    </section>
+
+    <section class="tab-panel" id="panel-chapters" data-panel="chapters" role="tabpanel" aria-labelledby="tab-chapters" tabindex="0" hidden>
+      {% if video.chapters %}
+      <ol class="chapter-list" id="chapter-list">
+        {% for chapter in video.chapters %}
+        <li data-start="{{ chapter.start }}">
+          <button type="button" class="chapter-button" data-seek="{{ chapter.start }}">
+            <span class="chapter-time">{{ chapter.time_label }}</span>
+            <span class="chapter-title">{{ chapter.title }}</span>
+            {% if chapter.duration_label %}<span class="chapter-duration muted tiny">{{ chapter.duration_label }}</span>{% endif %}
+          </button>
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <p class="muted">YouTube did not provide chapters for this video. Timestamps in the description are still clickable when present.</p>
+      {% endif %}
+    </section>
+
+    <section class="tab-panel transcript-panel" id="panel-transcript" data-panel="transcript" role="tabpanel" aria-labelledby="tab-transcript" tabindex="0" hidden>
+      {% if video.transcript %}
+      <div class="transcript-tools">
+        <input type="search" id="transcript-filter" placeholder="Find in this transcript…" autocomplete="off">
+        <span class="muted tiny" id="transcript-count">{{ video.transcript_segments|length }} lines</span>
+      </div>
+      <div class="transcript-scroll" id="transcript-scroll">
+        <ol class="transcript" id="transcript">
+          {% for segment in video.transcript_segments %}
+          <li data-start="{{ segment.start }}" data-end="{{ segment.end }}" data-text="{{ segment.text|lower }}">
+            <button type="button" class="ts-button" data-seek="{{ segment.start }}">{{ segment.start|timestamp }}</button>
+            <span class="segment-text">{{ segment.text }}</span>
+          </li>
+          {% endfor %}
+        </ol>
+      </div>
+      <p class="muted tiny transcript-source">
+        {{ video.transcript.language }} · {{ video.transcript.kind }} captions
+      </p>
+      {% else %}
+      <p class="muted">No transcript is stored for this video. Captions may be unavailable or the fetch was rate-limited; run <code>ytop transcripts</code> again later.</p>
+      {% endif %}
+    </section>
+  </section>
+
+  <aside class="watch-side">
+    <div class="queue-head">
+      <div>
+        <h2>Playlist</h2>
+        <a href="/playlist/{{ playlist.key }}" class="muted tiny">{{ playlist.title }}</a>
+      </div>
+      <span class="muted tiny" id="queue-position">{{ video.entry.index }}/{{ playlist.video_count }}</span>
+    </div>
+    <ol class="queue" id="queue">
+      {% for item in video.queue %}
+      <li class="queue-item {% if item.id == video.entry.id %}current{% endif %} {% if item.watched %}watched{% endif %} {% if not item.available %}unavailable{% endif %}">
+        <a href="{{ item.url }}?autoplay={{ autoplay_param }}" data-video-id="{{ item.id }}">
+          <span class="queue-thumb">
+            <img src="{{ item.thumb_url }}" alt="" loading="lazy"
+                 onerror="this.classList.add('missing'); this.removeAttribute('src')">
+            <span class="duration-badge small">{{ item.duration_label }}</span>
+            {% if item.fraction > 0 %}<span class="thumb-progress"><span style="width: {{ (item.fraction * 100)|round(1) }}%"></span></span>{% endif %}
+          </span>
+          <span class="queue-text">
+            <strong>{{ item.title }}</strong>
+            <small>{{ item.channel }}</small>
+          </span>
+          {% if item.watched %}<span class="queue-check" aria-label="watched">✓</span>{% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ol>
+  </aside>
+</div>
+
+<script id="watch-data" type="application/json">{{ watch_json|safe }}</script>
+{% endblock %}

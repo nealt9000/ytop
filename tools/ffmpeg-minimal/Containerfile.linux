@@ -1,0 +1,10 @@
+# Native static Linux build (linux-x86_64 locally, linux-aarch64 on an arm runner).
+#   podman build -t ytop-ffmpeg-linux -f Containerfile.linux .
+#   podman run --rm -v "$PWD/dist:/out:Z" ytop-ffmpeg-linux linux-x86_64 /out
+FROM docker.io/library/debian:bookworm
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential nasm meson ninja-build pkg-config git ca-certificates libc-bin file \
+ && rm -rf /var/lib/apt/lists/*
+COPY build.sh /usr/local/bin/build.sh
+ENTRYPOINT ["/usr/local/bin/build.sh"]

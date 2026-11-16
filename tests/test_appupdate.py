@@ -811,7 +811,8 @@ def test_self_update_never_rewrites_the_running_windows_launcher(
 
 def test_start_up_app_check_runs_once_a_day(stick: Path):
     """The start-up check waits a day once it found nothing ("Check now"
-    does not); an offer is looked for again at every start."""
+    does not); an offer that cannot be kept (this fake's release has no
+    verified ytop-release.json) is looked for again at every start."""
     from datetime import UTC, datetime, timedelta
 
     now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
@@ -837,7 +838,7 @@ def test_start_up_app_check_runs_once_a_day(stick: Path):
     now[0] += timedelta(days=1)
     updates.on_start_outcome("up to date")
     updates.on_start_outcome("up to date")
-    assert fake.checks == 5  # an offer: checked at every start
+    assert fake.checks == 5  # an offer not kept: checked at every start
 
 
 def test_cleanup_ignores_an_unverifiable_lock_after_an_hour(stick: Path, monkeypatch):
@@ -1191,3 +1192,134 @@ def test_page_says_no_release_published(stick: Path):
         page = client.get("/app-update").text
         assert "No YTOP release has been published yet" in page
         assert "Couldn&#39;t check" not in page and "Couldn't check" not in page
+
+
+# --- edge cases (#12) ----------------------------------------------------------------
+
+
+def test_tidy_drops_a_crashed_rollback_copy_and_keeps_a_valid_one(stick: Path, server):
+    yt = stick / ".ytop"
+    assert appupdate.tidy_previous(yt) is False  # nothing to tidy
+    # What a crash after the commit point can leave: a half-made previous/
+    # (no mark: never offered) and a previous.del.
+    (yt / ms.PREVIOUS).mkdir()
+    (yt / ms.PREVIOUS / "half.txt").write_text("half\n")
+    (yt / ms.PREVIOUS_DROP / "sub").mkdir(parents=True)
+    (yt / ms.PREVIOUS_DROP / "sub/older.txt").write_text("older\n")
+    assert appupdate.tidy_previous(yt) is True
+    assert not (yt / ms.PREVIOUS).exists() and not (yt / ms.PREVIOUS_DROP).exists()
+    assert not (stick / ms.LOCK).exists()
+    # A valid copy stays; only the leftover beside it goes.
+    assert _install(stick, server).status == "updated"
+    found = appupdate.previous_version(yt)
+    assert found is not None
+    (yt / ms.PREVIOUS_DROP).mkdir()
+    assert appupdate.tidy_previous(yt) is True
+    assert appupdate.previous_version(yt) == found
+    assert not (yt / ms.PREVIOUS_DROP).exists()
+
+
+def test_tidy_never_runs_under_a_live_lock_or_a_switch_to_repair(
+    stick: Path, monkeypatch,
+):
+    yt = stick / ".ytop"
+    (yt / ms.PREVIOUS_DROP).mkdir()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:  # another live YTOP holds the stick
+        (stick / ms.LOCK).write_text(json.dumps(
+            {"pid": other.pid, "started": boot.process_start_time(other.pid)}
+        ))
+        assert appupdate.tidy_previous(yt) is False
+        assert (yt / ms.PREVIOUS_DROP).exists() and (stick / ms.LOCK).exists()
+    finally:
+        other.kill()
+        other.wait()
+    (stick / ms.LOCK).unlink()
+    monkeypatch.setattr(appupdate, "switch_interrupted", lambda target: True)
+    assert appupdate.tidy_previous(yt) is False
+    assert (yt / ms.PREVIOUS_DROP).exists()
+
+
+def test_tidy_runs_at_start_on_a_stick(stick: Path, monkeypatch):
+    yt = stick / ".ytop"
+    (yt / ms.PREVIOUS_DROP).mkdir()
+    monkeypatch.setattr(appupdate, "stick_image", lambda: yt)
+    appupdate.AppUpdates.for_runtime(lambda: load_config(stick), stick)
+    _wait(lambda: not (yt / ms.PREVIOUS_DROP).exists())
+
+
+def test_page_warns_when_an_update_keeps_no_rollback_copy(stick: Path):
+    yt = stick / ".ytop"
+    updates = appupdate.AppUpdates(yt, lambda: load_config(stick), stick,
+                                   check=FakeUpdater(_release()).check)
+    _app, client = _client(stick, updates)
+    with client:
+        client.post("/app-update/check", follow_redirects=False)
+        assert updates.status()["revertible"] is True
+        assert "data-not-revertible" not in client.get("/app-update").text
+        _set_build(yt, manifest_sha256="0" * 64)  # a file list it can't trust
+        assert updates.status()["revertible"] is False
+        page = client.get("/app-update").text
+        page = " ".join(page.split())
+        assert "data-not-revertible" in page and "update can't be reverted" in page
+
+
+def _latest_requests(fake: FakeReleases) -> int:
+    return sum(1 for r in fake.requests if r.path.endswith("/releases/latest"))
+
+
+def test_an_offer_is_kept_between_starts_for_a_day(stick: Path, server):
+    from datetime import UTC, datetime, timedelta
+
+    from ytop.config import set_updates_option
+
+    set_updates_option(stick, "check_app", True)
+    set_updates_option(stick, "repo", GH_REPO)
+    set_updates_option(stick, "api_base", server.base + "/api")
+    now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
+
+    def start() -> appupdate.AppUpdates:
+        updates = appupdate.AppUpdates(stick / ".ytop", lambda: load_config(stick), stick,
+                                       clock=lambda: now[0])
+        updates.on_start_outcome("up to date")
+        return updates
+
+    first = start()
+    assert first.offer is not None and _latest_requests(server) == 1
+    # A start five hours later shows it again without asking GitHub.
+    now[0] += timedelta(hours=5)
+    again = start()
+    assert _latest_requests(server) == 1
+    assert again.offer is not None and again.offer.build_id == first.offer.build_id
+    assert again.offer.doc == first.offer.doc and again.offer.notes == "Faster pages."
+    assert again.status()["last_status"] == "available"
+    # After a day it is looked for again.
+    now[0] += timedelta(hours=20)
+    assert start().offer is not None and _latest_requests(server) == 2
+    # A kept offer for another build of the stick (it was updated or
+    # reverted since) is not used.
+    now[0] += timedelta(hours=1)
+    _set_build(stick / ".ytop", build_id="202601010000-other00")
+    start()
+    assert _latest_requests(server) == 3
+    # "Check now" finding nothing forgets it.
+    path = appupdate._offer_path(stick)
+    assert path.is_file()
+    server.add(f"/api/repos/{GH_REPO}/releases/latest", {"message": "Not Found"}, 404)
+    server.add(f"/api/repos/{GH_REPO}/releases", [])
+    first.check()
+    assert not path.exists()
+
+
+def test_a_damaged_kept_offer_is_ignored(stick: Path):
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 11, 14, 9, 0, tzinfo=UTC)
+    path = appupdate._offer_path(stick)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for content in ("not json", "{}", json.dumps({
+        "checked_at": now.isoformat(), "stick_build_id": OLD_ID, "doc": {"version": "9"},
+        "assets": {},
+    })):
+        path.write_text(content)
+        assert appupdate.load_offer(stick, stick / ".ytop", now) is None

@@ -627,8 +627,8 @@ class JobManager:
     def _move_paths(self, job: Job) -> tuple[Path, Path, Path | None]:
         """A move's recorded folders, re-rooted where each library is
         mounted now: a stick that comes back under another mount point or
-        drive letter still reconciles.  Unconnected libraries keep the
-        recorded path."""
+        drive letter still reconciles.  Libraries this manager does not know
+        keep the recorded path."""
 
         def name(raw: str) -> str:
             return re.split(r"[\\/]", raw.rstrip("\\/"))[-1]
@@ -636,11 +636,10 @@ class JobManager:
         source = Path(job.source_path)
         target = Path(job.target_path)
         staging = Path(job.temp_path) if job.temp_path else None
-        source_ref = (
-            self._lib.libraries.get(job.source_library_id)
-            if job.source_library_id else None
-        )
-        dest_ref = self._lib.libraries.get(job.library_id) if job.library_id else None
+        # The manager's own map: listing libraries here could run a new
+        # library's recovery hook while this thread holds the job lock.
+        source_ref = self._refs.get(job.source_library_id)
+        dest_ref = self._refs.get(job.library_id)
         if source_ref is not None:
             source = source_ref.layout.meta_root / name(job.source_path)
         if dest_ref is not None:

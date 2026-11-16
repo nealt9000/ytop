@@ -52,7 +52,7 @@
 <div class="job-progress">
   {{ progress_bar(job.percent, "Move progress", "wide", live_hooks=true) }}
   <p class="muted small">
-    <span data-live-progress>{{ job.moved_label }} of {{ job.move_total_label }}{% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}{% if job.current_title %} · {{ job.current_title }}{% endif %}</span>
+    <span data-live-progress>{{ job.copy_progress_label }}</span>
   </p>
   <p class="muted tiny">
     Moves within one filesystem rename the folder instantly. Moving to another

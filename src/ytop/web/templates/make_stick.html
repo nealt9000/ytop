@@ -61,7 +61,7 @@
 <div class="job-progress">
   {{ progress_bar(job.percent, "Stick progress", "wide", live_hooks=true) }}
   <p class="muted small">
-    <span data-live-progress>{{ job.moved_label }} of {{ job.move_total_label }}{% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}{% if job.current_title %} · {{ job.current_title }}{% endif %}</span>
+    <span data-live-progress>{{ job.copy_progress_label }}</span>
   </p>
   <p class="unplug unplug-busy">❌ Not safe to unplug yet — the stick is being written</p>
   <p class="muted tiny">

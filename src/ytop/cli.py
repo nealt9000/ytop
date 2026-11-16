@@ -655,7 +655,7 @@ def cmd_init(args) -> int:
     from .layout import init_library
 
     root = Path(args.path).expanduser()
-    label = args.label if args.label is not None else (root.name or "Library")
+    label = (args.label or "").strip() or root.name or "Library"
     try:
         info = init_library(root, label, args.description or "")
     except OSError as exc:

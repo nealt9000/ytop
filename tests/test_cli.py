@@ -196,3 +196,18 @@ def test_cli_index_rebuilds_both(tmp_path: Path, capsys):
     assert out["playlists"] == 2
     assert out["videos"] == 6
     assert out["database"].endswith("index.sqlite3")
+
+
+def test_init_empty_label_defaults_to_folder_name(tmp_path: Path, capsys):
+    root = tmp_path / "MyStick"
+    assert main(["init", str(root), "--label", "  "]) == 0
+    info = read_library(root)
+    assert info is not None and info.label == "MyStick"
+
+
+def test_init_corrupt_marker_fails(tmp_path: Path, capsys):
+    root = tmp_path / "lib"
+    assert main(["init", str(root)]) == 0
+    (root / ".ytop" / "library.json").write_text("garbage", encoding="utf-8")
+    assert main(["init", str(root)]) == 1
+    assert "init failed" in capsys.readouterr().err

@@ -67,3 +67,13 @@ def test_layout_dirs_reject_empty_ids(tmp_path: Path) -> None:
         layout.playlist_meta_dir("///")
     with pytest.raises(ValueError):
         layout.partial_dir("")
+
+
+def test_init_library_refuses_corrupt_marker(tmp_path: Path) -> None:
+    root = tmp_path / "lib"
+    init_library(root, "A")
+    marker = LibraryLayout(root).marker
+    marker.write_text("{not json", encoding="utf-8")
+    with pytest.raises(layout_mod.CorruptMarkerError):
+        init_library(root, "B")
+    assert marker.read_text(encoding="utf-8") == "{not json"

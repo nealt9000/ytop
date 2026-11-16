@@ -31,6 +31,10 @@ def safe_id(value: str) -> str:
     return result
 
 
+class CorruptMarkerError(OSError):
+    """A library marker exists but cannot be read; never silently replaced."""
+
+
 @dataclass(frozen=True)
 class LibraryInfo:
     id: str
@@ -152,6 +156,13 @@ def init_library(root: Path, label: str, description: str = "") -> LibraryInfo:
     existing = read_library(layout.root)
     if existing is not None:
         return existing
+    if layout.marker.exists() or layout.marker.is_symlink():
+        # Re-iding would orphan every reference to this library (registry,
+        # jobs, browser bookmarks); the owner has to repair the file.
+        raise CorruptMarkerError(
+            f"{layout.marker} exists but is not a valid library marker; "
+            "repair or remove it first"
+        )
     for directory in (
         layout.media_root,
         layout.data_dir,

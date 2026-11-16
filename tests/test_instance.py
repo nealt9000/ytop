@@ -179,10 +179,13 @@ def test_no_takeover_when_jobs_active(portable_root, opened):
 def test_offer_switch_banner(tmp_path: Path):
     root = lib_root(tmp_path)
     client = TestClient(create_app(root, libraries=library_set(root)))
+    assert "A newer YTOP" not in client.get("/").text
     page = client.get("/", params={"offer_switch": "1", "offer_from": "BLUE"}).text
     assert ("A newer YTOP is available on BLUE; switch when downloads finish"
             in page)
-    assert "A newer YTOP" not in client.get("/").text
+    # Every later page keeps the offer, not only the one the launcher opened.
+    for path in ("/", "/videos", "/downloads"):
+        assert "A newer YTOP is available on BLUE" in client.get(path).text, path
 
 
 def test_stale_instance_file_ignored(portable_root, opened):

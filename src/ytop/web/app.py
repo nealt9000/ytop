@@ -493,6 +493,9 @@ def create_app(
     app.state.library = lib
     app.state.config = cfg
     app.state.csrf_token = csrf_token
+    # A newer YTOP on another stick (``?offer_switch=1`` from its launcher):
+    # remembered so every page keeps saying so, not only the first one.
+    app.state.switch_offer = ""
     # The running uvicorn.Server (set by ``serve``) and the one graceful stop
     # path: the instance shutdown endpoint (and Quit/idle exit) call
     # ``app.state.request_stop()``.
@@ -672,6 +675,10 @@ def create_app(
         }
 
     def render(request: Request, template: str, **context):
+        if request.query_params.get("offer_switch") == "1":
+            app.state.switch_offer = (
+                request.query_params.get("offer_from") or "another stick"
+            )
         base = {
             "request": request,
             "q": "",
@@ -681,6 +688,7 @@ def create_app(
             "live_job": None,
             "job_by_playlist": {},
             "csrf_token": csrf_token,
+            "switch_offer": app.state.switch_offer,
             # The one-time question and the offer (any page).
             "ask_app_updates": releases.asking(),
             "app_offer": releases.offer if releases.phase in ("idle", "failed") else None,

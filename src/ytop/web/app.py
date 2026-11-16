@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -120,6 +121,16 @@ AMBIGUOUS_MESSAGE = (
     "This playlist now exists in more than one library — reload the page."
 )
 # Portable mode exits when no page has been open for this long.
+# A stick name shown in the offer-switch banner: a short folder or drive
+# name, else a generic wording.
+OFFER_LABEL_RE = re.compile(r"[\w .()'&+-]{1,40}")
+
+
+def offer_label(value: str | None) -> str:
+    text = (value or "").strip()
+    return text if OFFER_LABEL_RE.fullmatch(text) else "another stick"
+
+
 # The unfiltered Videos page shows at most this many; a tag, category or
 # channel narrows it.
 UNFILTERED_VIDEO_LIMIT = 500
@@ -496,8 +507,10 @@ def create_app(
     app.state.library = lib
     app.state.config = cfg
     app.state.csrf_token = csrf_token
-    # A newer YTOP on another stick (``?offer_switch=1`` from its launcher):
-    # remembered so every page keeps saying so, not only the first one.
+    # A newer YTOP on another stick.  Its launcher says so over the
+    # token-checked rescan call, and only that is remembered for every page;
+    # a plain ``?offer_switch=1`` link (anyone can make one) shows the banner
+    # on that one page.  Either way the stick name must look like one.
     app.state.switch_offer = ""
     # The running uvicorn.Server (set by ``serve``) and the one graceful stop
     # path: the instance shutdown endpoint (and Quit/idle exit) call
@@ -678,10 +691,9 @@ def create_app(
         }
 
     def render(request: Request, template: str, **context):
-        if request.query_params.get("offer_switch") == "1":
-            app.state.switch_offer = (
-                request.query_params.get("offer_from") or "another stick"
-            )
+        switch_offer = app.state.switch_offer
+        if not switch_offer and request.query_params.get("offer_switch") == "1":
+            switch_offer = offer_label(request.query_params.get("offer_from"))
         base = {
             "request": request,
             "q": "",
@@ -691,7 +703,7 @@ def create_app(
             "live_job": None,
             "job_by_playlist": {},
             "csrf_token": csrf_token,
-            "switch_offer": app.state.switch_offer,
+            "switch_offer": switch_offer,
             # The one-time question and the offer (any page).
             "ask_app_updates": releases.asking(),
             "app_offer": releases.offer if releases.phase in ("idle", "failed") else None,
@@ -1903,8 +1915,12 @@ def create_app(
 
     @app.post("/api/instance/rescan", dependencies=[Depends(require_token)],
               status_code=204)
-    def instance_rescan() -> Response:
+    def instance_rescan(
+        offer_from: str | None = Query(default=None, max_length=200),
+    ) -> Response:
         libs.refresh()
+        if offer_from is not None:  # a launcher with a newer YTOP
+            app.state.switch_offer = offer_label(offer_from)
         return Response(status_code=204)
 
     @app.post("/api/instance/shutdown", dependencies=[Depends(require_token)])

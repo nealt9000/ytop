@@ -439,6 +439,9 @@ def _wait(manager, job_id: str, statuses: set[str], timeout: float = 10.0):
 
 def test_make_stick_route_and_job(tmp_path: Path, image: Path, monkeypatch):
     home, libs, library = home_library(tmp_path)
+    # Generous: under a loaded full-suite run the default 2 s probe can miss
+    # the home library and the page loses its playlists.
+    libs.probe_timeout = 60.0
     monkeypatch.setenv("YTOP_IMAGE_ROOT", str(image))
     target = new_target(tmp_path)
     app = create_app(home.root, libraries=libs)

@@ -1529,7 +1529,9 @@ def create_app(
             except OSError as exc:
                 error = error or makestick.drive_problem(_make_target(raw_target), exc)
         if info is None:
-            candidates = makestick.candidate_targets(libs, image)
+            candidates = makestick.candidate_targets(
+                libs, image, timeout=libs.probe_timeout
+            )
         sizes = (build or {}).get("sizes") or {}
         playlists = (
             lib.playlists_and_bytes()[0]

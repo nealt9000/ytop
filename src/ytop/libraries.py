@@ -254,6 +254,7 @@ class LibrarySet:
         launch_root: Path | None,
         registry_path: Path | None = None,
         detect: bool = True,
+        probe_timeout: float = PROBE_TIMEOUT_S,
     ):
         self.launch_root = Path(launch_root).expanduser() if launch_root else None
         self.registry_path = (
@@ -261,6 +262,8 @@ class LibrarySet:
             else registry_path_default()
         )
         self.detect = detect
+        # How long one scan waits for a drive to answer before skipping it.
+        self.probe_timeout = probe_timeout
         self._lock = threading.Lock()
         self._cache: list[LibraryRef] = []
         self._cached_at = 0.0
@@ -308,7 +311,7 @@ class LibrarySet:
         candidates = self._candidates()
         refs: list[LibraryRef] = []
         seen_ids: set[str] = set()
-        for ref in _probe_all(candidates):
+        for ref in _probe_all(candidates, self.probe_timeout):
             if ref is None or ref.id in seen_ids:
                 continue
             seen_ids.add(ref.id)

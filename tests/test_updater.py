@@ -817,3 +817,112 @@ def test_pins_match_any_spelling_of_the_version(ytop: Path, fake: FakeReleases):
     current = comp.read_current(ytop)
     assert current.pinned_bad["yt-dlp"] == ["2026.11.01", "2026.10.26.0"]
     assert "yt-dlp" not in current.current  # lib/common's copy
+
+
+# --- edge cases (#12) -------------------------------------------------------------
+
+
+def test_check_reports_a_server_out_of_step_with_its_plugin(ytop: Path, fake: FakeReleases):
+    """After a plugin rollback the newer server stays; the check says it
+    needs to go back in step, though no newer plugin is offered."""
+    publish(fake)
+    publish_plugin(fake)
+    fake.server_archive("2.0.2")
+    result = run_update(ytop, fake, ["bgutil-plugin"])
+    for name in list(result.updated):
+        up.rollback(ytop, name)
+    found = run_check(ytop, fake)
+    assert found.status == "ok"
+    servers = [a for a in found.available if a.name == BGUTIL]
+    assert servers == [up.Available(BGUTIL, "2.1.0", "2.0.2")], found.available
+    assert "bgutil-plugin" not in {a.name for a in found.available}
+
+
+def test_check_reports_a_missing_server_once(ytop: Path, fake: FakeReleases):
+    """A store that names a server whose folder is gone; and a newer plugin
+    lists its server only once."""
+    shutil.rmtree(ytop / "components" / BGUTIL)
+    publish(fake)
+    found = run_check(ytop, fake)
+    assert [a for a in found.available if a.name == BGUTIL] == [
+        up.Available(BGUTIL, None, "2.0.2"),
+    ]
+    publish_plugin(fake)
+    found = run_check(ytop, fake)
+    assert [a for a in found.available if a.name == BGUTIL] == [
+        up.Available(BGUTIL, None, "2.1.0"),
+    ]
+
+
+def test_check_is_quiet_about_a_server_in_step(ytop: Path, fake: FakeReleases):
+    publish(fake)
+    found = run_check(ytop, fake)
+    assert BGUTIL not in {a.name for a in found.available}
+
+
+def test_a_rate_limit_at_the_server_step_keeps_what_was_staged(
+    ytop: Path, fake: FakeReleases,
+):
+    publish(fake)
+    publish_plugin(fake)
+    fake.add("/api/repos/Brainicism/bgutil-ytdlp-pot-provider/releases/tags/2.1.0",
+             {"message": "API rate limit exceeded"}, 403, {"X-RateLimit-Remaining": "0"})
+    result = run_update(ytop, fake)
+    assert result.status == "updated", result
+    assert result.updated["yt-dlp"] == ("2026.10.26", "2026.11.1")
+    # The plugin waits for its server; the rest is not fetched any more.
+    assert "bgutil-plugin" not in result.updated
+    assert "rate limited" in result.failed[BGUTIL]
+    assert "bgutil-plugin" in result.failed
+    current = comp.read_current(ytop).current
+    assert current["yt-dlp"] == "2026.11.1" and current["bgutil-plugin"] == "2.0.2"
+
+
+def test_a_dropped_connection_after_staging_skips_the_remaining_steps(
+    ytop: Path, fake: FakeReleases, monkeypatch,
+):
+    publish(fake)
+    real = up.SOURCES["youtube-transcript-api"]
+
+    class Gone(up.Source):
+        def latest(self, *args, **kwargs):
+            raise up.Offline("the connection was cut off")
+
+    monkeypatch.setitem(up.SOURCES, "youtube-transcript-api", Gone(real.name))
+    result = run_update(ytop, fake, ["yt-dlp", "youtube-transcript-api", "deno"])
+    assert result.status == "updated", result
+    assert "yt-dlp" in result.updated
+    assert "cut off" in result.failed["youtube-transcript-api"]
+    assert "cut off" in result.failed["deno"]  # never fetched once offline
+
+
+def test_a_network_failure_before_anything_was_staged_is_still_offline(
+    ytop: Path, fake: FakeReleases,
+):
+    publish(fake)
+    fake.add("/api/repos/yt-dlp/yt-dlp/releases", {"message": "API rate limit exceeded"},
+             403, {"X-RateLimit-Remaining": "0"})
+    assert run_update(ytop, fake, ["yt-dlp"]).status == "rate_limited"
+
+
+def test_a_stick_whose_server_cannot_be_built_is_up_to_date(
+    ytop: Path, fake: FakeReleases,
+):
+    """No server, and none can be built here: with nothing newer, "Update
+    now" says up to date, not "failed: bgutil-server"."""
+    shutil.rmtree(ytop / "components" / BGUTIL)
+    current = comp.read_current(ytop)
+    del current.current[BGUTIL]
+    comp.write_current(ytop, current)
+    fake.ytdlp_release(OLD["yt-dlp"])
+    fake.pypi_release("yt-dlp-ejs", OLD["yt-dlp-ejs"])
+    fake.pypi_release("bgutil-ytdlp-pot-provider", OLD["bgutil-plugin"])
+    fake.pypi_release("youtube-transcript-api", OLD["youtube-transcript-api"])
+    # no server archive: it cannot be had
+    result = run_update(ytop, fake)
+    assert result.status == "up_to_date", result
+    assert not result.updated
+    assert BGUTIL in result.message  # still said, as a note
+    # Asked for by name, it is a failure.
+    result = run_update(ytop, fake, [BGUTIL])
+    assert result.status == "failed" and BGUTIL in result.failed

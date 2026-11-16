@@ -1176,3 +1176,34 @@ def test_storage_page_shows_components(tmp_path: Path):
     assert 'action="/storage/components/update"' not in page
     client.app.state.jobs.close()
     bare.app.state.jobs.close()
+
+
+def test_create_playlist_and_add_video_on_read_only_library_give_409(
+    tmp_path: Path,
+):
+    home, usb, libs, usb_ref = two_libraries(tmp_path)
+    marker = json.loads(usb.marker.read_text())
+    marker["schema"] = 99
+    usb.marker.write_text(json.dumps(marker))
+    libs.refresh()
+    client = TestClient(create_app(home.root, libraries=libs))
+    token = client.app.state.csrf_token
+    try:
+        response = client.post(
+            "/playlist/new",
+            data={"title": "Nope", "location": usb_ref.id, "csrf_token": token},
+            follow_redirects=False,
+        )
+        assert response.status_code == 409
+        response = client.post(
+            "/add/video",
+            data={"url": "jNQXAC9IVRw", "playlist": f"library:{usb_ref.id}",
+                  "csrf_token": token},
+            follow_redirects=False,
+        )
+        # The job layer refuses a read-only destination with its own
+        # (form-level) message before anything is written.
+        assert "made by a newer YTOP" in response.text
+        assert client.app.state.jobs.list() == []
+    finally:
+        client.app.state.jobs.close()

@@ -25,6 +25,18 @@ if [ -d "$STICK/.ytop.old" ] && [ ! -e "$YT/app" ]; then
     esac
     TMP=
     PY=
+    # Interrupted here, take the temp copy away too (the shell runs this once
+    # boot.py has exited, so a repair under way is never cut short by it).
+    repair_cleanup() {
+        AFTER=$(build_id)
+        # A cache staged around the interruption may mix two builds.
+        for b in "$BEFORE" "$AFTER"; do
+            [ -n "$b" ] && rm -f "$ROOT/$b/.complete"
+        done
+        [ -n "$TMP" ] && rm -rf "$TMP"
+        TMP=
+    }
+    trap 'repair_cleanup; exit 1' INT TERM HUP
     if [ -n "$RP" ] && [ -f "$YT/boot.py" ] && mkdir -p "$ROOT" 2>/dev/null; then
         for d in "$ROOT"/*; do
             [ -f "$d/.complete" ] && [ -x "$d/runtime/$RP/python/bin/python3" ] || continue
@@ -45,12 +57,7 @@ if [ -d "$STICK/.ytop.old" ] && [ ! -e "$YT/app" ]; then
         mkdir -p "$TMP/root"
         (cd / && "$PY" -s -E "$YT/boot.py" --home "$STICK" --runtime-root "$TMP/root")
         CODE=$?
-        # A cache staged around the interruption may mix two builds.
-        AFTER=$(build_id)
-        for b in "$BEFORE" "$AFTER"; do
-            [ -n "$b" ] && rm -f "$ROOT/$b/.complete"
-        done
-        rm -rf "$TMP"
+        repair_cleanup
         exit "$CODE"
     fi
     [ -n "$TMP" ] && rm -rf "$TMP"
@@ -233,5 +240,12 @@ done
 
 # Leave the stick: a cwd on it keeps it "busy" and blocks ejecting it.
 cd / || exit 1
-exec "$CACHE/runtime/$PLAT/python/bin/python3" -s -E "$CACHE/boot.py" \
+PYTHON="$CACHE/runtime/$PLAT/python/bin/python3"
+[ -x "$PYTHON" ] || chmod +x "$PYTHON" 2>/dev/null
+if [ ! -x "$PYTHON" ]; then
+    # Typically a home or cache disk mounted noexec: exec would only say 126.
+    echo "Couldn't start YTOP from $CACHE: that disk doesn't allow running programs (mounted noexec?). Set XDG_CACHE_HOME to a folder on another disk and start YTOP again."
+    exit 126
+fi
+exec "$PYTHON" -s -E "$CACHE/boot.py" \
     --home "$STICK" --runtime-root "$CACHE"

@@ -120,6 +120,9 @@ AMBIGUOUS_MESSAGE = (
     "This playlist now exists in more than one library — reload the page."
 )
 # Portable mode exits when no page has been open for this long.
+# The unfiltered Videos page shows at most this many; a tag, category or
+# channel narrows it.
+UNFILTERED_VIDEO_LIMIT = 500
 IDLE_TIMEOUT_S = 300.0
 IDLE_CHECK_S = 30.0
 # How long a second Quit waits for a flush already under way.
@@ -819,6 +822,17 @@ def create_app(
         else:
             heading = "All videos"
         library_label = next((ref.label for ref in refs if ref.id == active), "")
+        video_total = sum(len(videos) for _card, videos in groups)
+        shown_total, playlist_total = video_total, len(groups)
+        if not (tag or category or channel) and video_total > UNFILTERED_VIDEO_LIMIT:
+            # Unfiltered, a big library would be one enormous page.
+            capped, room = [], UNFILTERED_VIDEO_LIMIT
+            for card, videos in groups:
+                if room <= 0:
+                    break
+                capped.append((card, videos[:room]))
+                room -= len(videos[:room])
+            groups, shown_total = capped, UNFILTERED_VIDEO_LIMIT
         return render(
             request,
             "videos.html",
@@ -826,7 +840,9 @@ def create_app(
             heading=heading,
             active_library=active,
             library_label=library_label,
-            video_total=sum(len(videos) for _card, videos in groups),
+            video_total=video_total,
+            shown_total=shown_total,
+            playlist_total=playlist_total,
         )
 
     @app.get("/playlist/new")

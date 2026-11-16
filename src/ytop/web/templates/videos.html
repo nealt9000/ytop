@@ -7,9 +7,12 @@
   <h1>{{ heading }}</h1>
   <p class="muted">
     {{ video_total }} video{% if video_total != 1 %}s{% endif %}
-    {%- if groups %} in {{ groups|length }} playlist{% if groups|length != 1 %}s{% endif %}{% endif %}
+    {%- if playlist_total %} in {{ playlist_total }} playlist{% if playlist_total != 1 %}s{% endif %}{% endif %}
     {%- if library_label %} on {{ library_label }}{% endif %}
   </p>
+  {% if shown_total < video_total %}
+  <p class="muted small">Showing the first {{ shown_total }}. Pick a tag, category or channel on the <a href="/{% if active_library %}?library={{ active_library|urlencode }}{% endif %}#browse">library page</a> to narrow the list.</p>
+  {% endif %}
 </section>
 
 {% if not groups %}

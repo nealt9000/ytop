@@ -499,13 +499,13 @@ def test_sync_commits_each_batch(
     real = LibraryIndex._index_playlist
     committed: list[set[str]] = []
 
-    def spy(self, conn, meta_dir, doc, stat):
+    def spy(self, conn, meta_dir, doc, stat, digest):
         if layout.index_db.exists():
             with contextlib.closing(sqlite3.connect(layout.index_db, timeout=0)) as other:
                 committed.append(
                     {r[0] for r in other.execute("SELECT playlist_id FROM idx_playlists")}
                 )
-        return real(self, conn, meta_dir, doc, stat)
+        return real(self, conn, meta_dir, doc, stat, digest)
 
     monkeypatch.setattr(LibraryIndex, "_index_playlist", spy)
     assert index.ensure_fresh() == 3
@@ -590,13 +590,13 @@ def test_transient_open_failure_does_not_latch_memory(
     real = LibraryIndex._open
     failures = [1]
 
-    def flaky(self):
+    def flaky(self, *args):
         if failures:
             failures.pop()
             if error == "sqlite":
                 raise sqlite3.OperationalError("unable to open database file")
             raise PermissionError(errno.EACCES, "Permission denied")
-        return real(self)
+        return real(self, *args)
 
     monkeypatch.setattr(LibraryIndex, "_open", flaky)
     assert index.ensure_fresh() == 0  # busy this time: nothing indexed
@@ -605,3 +605,281 @@ def test_transient_open_failure_does_not_latch_memory(
     assert not index._memory_fallback
     assert {p.playlist_id for p in index.playlists()} == {"P1", "P2"}
     assert _flag(layout) == "0"  # written to the file, not to memory
+
+
+# -- issue #13 -------------------------------------------------------------------
+
+
+def _locked(layout: LibraryLayout):
+    """Another connection holding the database's write lock."""
+    import sqlite3
+
+    other = sqlite3.connect(layout.index_db, timeout=0, isolation_level=None)
+    other.execute("BEGIN EXCLUSIVE")
+    return other
+
+
+def test_reads_do_not_wait_out_the_write_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    import ytop.index as index_mod
+
+    layout = _library(tmp_path)
+    index = index_for(layout)
+    index.ensure_fresh()
+    assert len(index.playlists()) == 2
+    monkeypatch.setattr(index_mod, "WRITE_TIMEOUT_S", 30.0)
+    monkeypatch.setattr(index_mod, "READ_TIMEOUT_S", 0.2)
+    other = _locked(layout)
+    try:
+        start = time.monotonic()
+        rows = index.playlists()
+        waited = time.monotonic() - start
+    finally:
+        other.close()
+    assert len(rows) == 2  # the last good answer
+    assert waited < 5, waited
+
+
+def test_refresh_skipped_while_locked_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ytop.index as index_mod
+
+    layout = _library(tmp_path)
+    index = index_for(layout)
+    index.ensure_fresh()
+    path = layout.video_meta_dir("P1", "a2") / "meta.json"
+    meta = read_json(path) or {}
+    meta["title"] = "Downloaded"
+    write_json(path, meta)
+    monkeypatch.setattr(index_mod, "WRITE_TIMEOUT_S", 0.05)
+    other = _locked(layout)
+    try:
+        index.refresh_video("P1", "a2")  # locked: skipped for now
+    finally:
+        other.close()
+    assert index._pending_refresh
+    # playlist.json did not change, yet the next sync applies the refresh.
+    index.ensure_fresh()
+    row = next(p for p in index.playlists() if p.playlist_id == "P1")
+    assert [v.title for v in row.videos] == ["A One", "Downloaded", "A Three"]
+    assert index._pending_refresh == {}
+
+
+def test_refresh_video_matches_a_full_build(tmp_path: Path) -> None:
+    import sqlite3
+
+    from PIL import Image
+
+    layout = make_library(tmp_path)
+    meta_dir = add_playlist(layout, "P1", "", [("v1", "One")], folder="P1")
+    (meta_dir / "playlist-thumb.jpg").unlink()
+    index = index_for(layout)
+    index.ensure_fresh()
+    before = index.playlists()[0]
+    assert not before.has_thumb
+
+    Image.new("RGB", (64, 64)).save(meta_dir / "playlist-thumb.jpg")
+    index.refresh_video("P1", "v1")
+    after = index.playlists()[0]
+    assert after.has_thumb
+    assert after.meta_bytes > before.meta_bytes
+    with contextlib.closing(sqlite3.connect(layout.index_db)) as conn:
+        titles = {r[0] for r in conn.execute("SELECT playlist_title FROM idx_video_fts")}
+    assert titles == {"P1"}  # the untitled playlist's id, as a full build uses
+
+
+def test_rebuild_of_a_damaged_index_runs_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ytop.index import LibraryIndex
+
+    layout = _library(tmp_path)
+    layout.index_db.write_bytes(b"garbage" * 100)
+    index = index_for(layout)
+    calls: list[int] = []
+    real = LibraryIndex._rebuild
+
+    def spy(self, conn):
+        calls.append(1)
+        return real(self, conn)
+
+    monkeypatch.setattr(LibraryIndex, "_rebuild", spy)
+    assert index.rebuild() == 2
+    assert len(calls) == 1
+    assert layout.index_db.with_name("index.sqlite3.corrupt").exists()
+
+
+def test_unmovable_journal_leaves_the_damaged_index_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    layout = _library(tmp_path)
+    layout.index_db.write_bytes(b"garbage" * 100)
+    journal = layout.index_db.with_name("index.sqlite3-journal")
+    journal.write_bytes(b"stale journal")
+    real_replace = os.replace
+
+    def locked(src: object, dst: object) -> None:
+        if Path(str(src)) == journal:
+            raise PermissionError("in use by another process")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", locked)
+    index = index_for(layout)
+    index._recover(sqlite3.DatabaseError("file is not a database"))
+    # Neither half of the pair moved, so a fresh file never meets the journal.
+    assert layout.index_db.read_bytes() == b"garbage" * 100
+    assert journal.read_bytes() == b"stale journal"
+    assert not layout.index_db.with_name("index.sqlite3.corrupt").exists()
+    assert index._memory_fallback
+    assert len(index.playlists()) == 2
+
+
+def test_unmovable_database_puts_its_journal_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    layout = _library(tmp_path)
+    layout.index_db.write_bytes(b"garbage" * 100)
+    journal = layout.index_db.with_name("index.sqlite3-journal")
+    journal.write_bytes(b"stale journal")
+    real_replace = os.replace
+
+    def locked(src: object, dst: object) -> None:
+        if Path(str(src)) == layout.index_db:
+            raise PermissionError("in use by another process")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", locked)
+    index = index_for(layout)
+    index._recover(sqlite3.DatabaseError("file is not a database"))
+    assert journal.read_bytes() == b"stale journal"
+    assert not journal.with_name("index.sqlite3-journal.corrupt").exists()
+    assert index._memory_fallback
+
+
+def test_backfill_carries_on_past_videos_without_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ytop.index as index_mod
+    from ytop.index import LibraryIndex
+
+    layout = make_library(tmp_path)
+    add_playlist(layout, "P1", "First", [(f"v{i:02d}", f"V{i}") for i in range(10)])
+    for i in range(10):
+        write_json(layout.video_meta_dir("P1", f"v{i:02d}") / "raw.json", {"id": "x"})
+    index = index_for(layout)
+    index.ensure_fresh()
+    monkeypatch.setattr(LibraryIndex, "BACKFILL_BATCH", 2)
+    stats: list[str] = []
+    real = index_mod._source_stat
+
+    def spy(path: Path):
+        if path.name == "raw.json":
+            stats.append(path.parent.name)
+        return real(path)
+
+    monkeypatch.setattr(index_mod, "_source_stat", spy)
+    assert index.backfill_tags() == 10  # read, even though none had tags
+    assert not index.backfill_pending
+    # Each raw.json is looked at once, not again by every later batch.
+    assert sorted(stats) == [f"v{i:02d}" for i in range(10)]
+
+
+def test_startup_backfill_does_not_stop_at_a_slice_without_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from factories import library_set
+    from ytop.index import LibraryIndex
+    from ytop.web.app import _index_libraries
+
+    layout = make_library(tmp_path)
+    add_playlist(layout, "P1", "First", [(f"v{i:02d}", f"V{i}") for i in range(6)])
+    for i in range(5):
+        write_json(layout.video_meta_dir("P1", f"v{i:02d}") / "raw.json", {"id": "x"})
+    write_json(layout.video_meta_dir("P1", "v05") / "raw.json", {"tags": ["Fugue"]})
+    real = LibraryIndex.backfill_tags
+    calls: list[int] = []
+
+    def one_video_per_call(self, budget_s=None):
+        calls.append(1)
+        return real(self, budget_s=1e-9)  # about one video per slice
+
+    monkeypatch.setattr(LibraryIndex, "backfill_tags", one_video_per_call)
+    _index_libraries(library_set(layout), threading.Event())
+    assert len(calls) > 1
+    row = index_for(layout).playlists()[0]
+    assert row.videos[-1].yt_tags == ("Fugue",)
+
+
+def test_startup_thread_indexes_writable_libraries(tmp_path: Path) -> None:
+    import threading
+
+    from factories import library_set
+    from ytop.web.app import _index_libraries
+
+    layout = _raw_video(tmp_path)
+    _index_libraries(library_set(layout), threading.Event())
+    index = index_for(layout)
+    assert {p.playlist_id for p in index.playlists()} == {"P1", "P2"}
+    assert "fugue" in {t.key for d in index.derived().values() for t in d.tags}
+
+
+def test_playlist_bytes_and_hash_come_from_one_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _library(tmp_path)
+    path = layout.playlist_meta_dir("P1") / "playlist.json"
+    real_text, real_bytes = Path.read_text, Path.read_bytes
+    rewritten: list[bool] = []
+
+    def rewrite_after_first_read() -> None:
+        if not rewritten:
+            rewritten.append(True)
+            _same_size_rewrite(path, "Fresh")
+
+    def read_text(self: Path, *args, **kwargs):
+        out = real_text(self, *args, **kwargs)
+        if self == path:
+            rewrite_after_first_read()
+        return out
+
+    def read_bytes(self: Path):
+        out = real_bytes(self)
+        if self == path:
+            rewrite_after_first_read()
+        return out
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    index = index_for(layout)
+    index.ensure_fresh()  # a write lands while P1 is being indexed
+    monkeypatch.undo()
+    assert {p.playlist_id: p.title for p in index.playlists()}["P1"] == "First"
+    # The next sync sees the new bytes (same size and mtime, other hash).
+    assert index.ensure_fresh() == 1
+    assert {p.playlist_id: p.title for p in index.playlists()}["P1"] == "Fresh"
+
+
+def test_playlist_in_the_wrong_folder_is_not_listed(tmp_path: Path) -> None:
+    from factories import library_set
+    from ytop.web.library import Library
+
+    layout = _library(tmp_path)
+    stray = layout.meta_root / "Stray"
+    stray.mkdir()
+    write_json(stray / "playlist.json", {"id": "P9", "title": "Stray", "entries": []})
+    index = index_for(layout)
+    index.ensure_fresh()
+    assert {p.playlist_id for p in index.playlists()} == {"P1", "P2"}
+    lib = Library(library_set(layout))
+    assert {view.id for view in lib.playlists()} == {"P1", "P2"}
+    assert lib.resolve_playlist("P9") is None

@@ -259,8 +259,12 @@ def _index_libraries(libs: LibrarySet, stop: threading.Event) -> None:
         try:
             index = index_for(ref.layout)
             index.ensure_fresh()
-            while not stop.is_set() and index.backfill_tags(budget_s=2.0):
-                pass
+            # A slice that finds no tags (videos without any) is still
+            # progress: carry on until the backfill says it is done.
+            while not stop.is_set():
+                index.backfill_tags(budget_s=2.0)
+                if not index.backfill_pending:
+                    break
         except Exception as exc:  # noqa: BLE001 - the index is disposable
             if not warned:
                 warned = True

@@ -42,6 +42,12 @@ INDEX_SCHEMA = 2
 # a row is re-checked against the file's hash (the "racy git" rule).
 MTIME_SLACK_NS = 2_000_000_000
 
+# How long a call waits for another process's lock on the database.  Writes
+# wait long (a skipped write is retried, but later); reads answer from their
+# last result instead of holding a page up.
+WRITE_TIMEOUT_S = 30.0
+READ_TIMEOUT_S = 2.0
+
 # OSError numbers that mean "this place cannot be written".
 _UNWRITABLE_ERRNOS = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 
@@ -184,11 +190,30 @@ def index_for(layout: LibraryLayout, *, read_only: bool = False) -> LibraryIndex
         return index
 
 
+def refresh_video_quietly(
+    layout: LibraryLayout, playlist_id: str, video_id: str
+) -> None:
+    """Bring one video's index rows up to date after its files changed.
+
+    The index is disposable, so this never fails its caller (a download or
+    a transcript fetch).
+    """
+    try:
+        index_for(layout).refresh_video(playlist_id, video_id)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("library index refresh of %s/%s failed: %s",
+                  playlist_id, video_id, exc)
+
+
 # -- small helpers --------------------------------------------------------------
 
 
 def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _playlist_title(doc: dict, playlist_id: str) -> str:
+    return _text(doc.get("title")) or playlist_id
 
 
 def _str_tuple(value: object) -> tuple[str, ...]:
@@ -225,6 +250,22 @@ def _file_hash(path: Path) -> str:
         return hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
     except OSError:
         return ""
+
+
+def _read_playlist(path: Path) -> tuple[dict | None, str]:
+    """``playlist.json`` parsed, with the hash of the very bytes parsed (a
+    write between two separate reads could pair one version's rows with the
+    other's hash, and the racy-mtime check would then trust stale rows)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None, ""
+    digest = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None, digest
+    return (doc if isinstance(doc, dict) else None), digest
 
 
 def _racy(mtime_ns: int | None, indexed_ns: int | None) -> bool:
@@ -293,6 +334,15 @@ class LibraryIndex:
         self._memory_fallback = False
         self._last_playlists: list[PlaylistRow] = []
         self._last_derived: dict[str, Derived] = {}
+        # Refreshes a locked database refused, in the order asked for.
+        self._pending_refresh: dict[tuple[str, str | None], None] = {}
+        # Where the raw.json backfill carries on from, and whether the last
+        # backfill_tags() call stopped (at its budget) with videos left.
+        self._backfill_after: tuple[str, str] | None = None
+        self.backfill_pending = False
+        # Completed full rebuilds, and how many playlists the last one found.
+        self._rebuilds = 0
+        self._rebuilt_count = 0
 
     # -- connections ----------------------------------------------------------
 
@@ -300,7 +350,7 @@ class LibraryIndex:
     def _in_memory(self) -> bool:
         return self.read_only or self._memory_fallback
 
-    def _open(self) -> sqlite3.Connection:
+    def _open(self, timeout: float | None = None) -> sqlite3.Connection:
         if self._in_memory:
             if self._memory is None:
                 conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -310,7 +360,9 @@ class LibraryIndex:
             return self._memory
         path = self.layout.index_db
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, timeout=30)
+        conn = sqlite3.connect(
+            path, timeout=WRITE_TIMEOUT_S if timeout is None else timeout
+        )
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=DELETE")
@@ -321,10 +373,12 @@ class LibraryIndex:
         return conn
 
     @contextlib.contextmanager
-    def _session(self) -> Iterator[sqlite3.Connection]:
+    def _session(
+        self, timeout: float | None = None
+    ) -> Iterator[sqlite3.Connection]:
         """The lock plus a connection whose schema is current."""
         with self._lock:
-            conn = self._open()
+            conn = self._open(timeout)
             try:
                 yield conn
             finally:
@@ -332,7 +386,11 @@ class LibraryIndex:
                     conn.close()
 
     def _guarded(
-        self, op: Callable[[sqlite3.Connection], T], default: Callable[[], T]
+        self,
+        op: Callable[[sqlite3.Connection], T],
+        default: Callable[[], T],
+        *,
+        timeout: float | None = None,
     ) -> T:
         """Run ``op`` in a session.
 
@@ -345,7 +403,7 @@ class LibraryIndex:
         with self._lock:
             for attempt in (1, 2):
                 try:
-                    with self._session() as conn:
+                    with self._session(timeout) as conn:
                         return op(conn)
                 except (sqlite3.DatabaseError, OSError) as exc:
                     if attempt == 1 and not self._in_memory and self._unwritable(exc):
@@ -428,27 +486,43 @@ class LibraryIndex:
         path = self.layout.index_db
         log.warning("library index %s is damaged (%s); rebuilding it", path, exc)
         journal = path.with_name(path.name + "-journal")
+        journal_aside = journal.with_name(journal.name + CORRUPT_SUFFIX)
+        # The journal goes first: a hot journal must never be paired with
+        # the fresh file, so the database moves only once its journal has.
+        moved_journal = False
+        try:
+            os.replace(journal, journal_aside)
+            moved_journal = True
+        except FileNotFoundError:
+            pass
+        except OSError as move_error:
+            self._recover_in_memory(path, move_error)
+            return
         try:
             os.replace(path, path.with_name(path.name + CORRUPT_SUFFIX))
         except FileNotFoundError:
             pass
         except OSError as move_error:
-            log.warning(
-                "cannot move %s aside (%s); indexing in memory until restart",
-                path, move_error,
-            )
-            self._memory_fallback = True
-            with self._session() as conn:
-                self._rebuild(conn)
+            if moved_journal:
+                # Keep the pair together for whoever opens the file next.
+                with contextlib.suppress(OSError):
+                    os.replace(journal_aside, journal)
+            self._recover_in_memory(path, move_error)
             return
-        # A hot journal must never be paired with the fresh file.
-        with contextlib.suppress(FileNotFoundError):
-            os.replace(journal, journal.with_name(journal.name + CORRUPT_SUFFIX))
         with self._session() as conn:
             self._rebuild(conn)
         from .transcripts.store import index_library  # lazy: layout -> yt -> store
 
         index_library(self.layout)
+
+    def _recover_in_memory(self, path: Path, move_error: OSError) -> None:
+        log.warning(
+            "cannot move %s aside (%s); indexing in memory until restart",
+            path, move_error,
+        )
+        self._memory_fallback = True
+        with self._session() as conn:
+            self._rebuild(conn)
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -480,6 +554,7 @@ class LibraryIndex:
         transaction with the lock released in between, so a first build of a
         large library never holds up pages or download hooks for long.
         """
+        self._retry_pending()
         dirs = self._playlist_dirs()
         changed = 0
         seen: set[str] = set()
@@ -501,15 +576,57 @@ class LibraryIndex:
 
     def rebuild(self) -> int:
         """Re-index every playlist from scratch; returns how many."""
-        return self._guarded(self._rebuild, lambda: 0)
+        generation = self._rebuilds
+
+        def op(conn: sqlite3.Connection) -> int:
+            if self._rebuilds != generation:
+                # Recovering from a damaged (or unwritable) file has just
+                # rebuilt everything: once is enough.
+                return self._rebuilt_count
+            return self._rebuild(conn)
+
+        return self._guarded(op, lambda: 0)
 
     def refresh_playlist(self, playlist_id: str) -> None:
-        self._guarded(lambda conn: self._refresh_playlist(conn, playlist_id), _none)
+        self._refresh(playlist_id, None)
 
     def refresh_video(self, playlist_id: str, video_id: str) -> None:
-        self._guarded(
-            lambda conn: self._refresh_video(conn, playlist_id, video_id), _none
-        )
+        self._refresh(playlist_id, video_id)
+
+    def _refresh(self, playlist_id: str, video_id: str | None) -> None:
+        """Refresh now, or (if the database is locked or unusable) remember
+        it for the next write or sync.  Only ``playlist.json`` changes are
+        found by a sync, so a skipped refresh would otherwise leave a
+        downloaded video looking missing until its playlist next changed."""
+        with self._lock:
+            if self._retry_pending() and self._run_refresh(playlist_id, video_id):
+                return
+            self._pending_refresh[(playlist_id, video_id)] = None
+
+    def _run_refresh(self, playlist_id: str, video_id: str | None) -> bool:
+        def op(conn: sqlite3.Connection) -> bool:
+            if video_id is None:
+                self._refresh_playlist(conn, playlist_id)
+            else:
+                self._refresh_video(conn, playlist_id, video_id)
+            return True
+
+        return self._guarded(op, lambda: False)
+
+    def _retry_pending(self) -> bool:
+        """Run refreshes skipped earlier; False while the database is still
+        unavailable (the rest are kept for later)."""
+        with self._lock:
+            for key in list(self._pending_refresh):
+                try:
+                    done = self._run_refresh(*key)
+                except Exception as exc:  # noqa: BLE001 - never retry a bug forever
+                    log.warning("library index refresh of %s failed: %s", key, exc)
+                    done = True
+                if not done:
+                    return False
+                self._pending_refresh.pop(key, None)
+            return True
 
     def drop_playlist(self, playlist_id: str) -> None:
         self._guarded(lambda conn: self._drop_playlist(conn, playlist_id), _none)
@@ -529,38 +646,89 @@ class LibraryIndex:
         megabytes, too slow to re-read for every video at each launch.
         """
         if self._in_memory:
+            self.backfill_pending = False
             return 0
         deadline = None if budget_s is None else time.monotonic() + budget_s
         total = 0
-        while deadline is None or time.monotonic() < deadline:
-            processed, changed = self._guarded(
-                lambda conn: self._backfill_batch(conn, deadline), lambda: (0, 0)
+        self.backfill_pending = True
+        # A positive budget always gets one batch (of at least one video),
+        # so a caller looping on backfill_pending always progresses.
+        first = budget_s is None or budget_s > 0
+        while first or deadline is None or time.monotonic() < deadline:
+            first = False
+            changed, more = self._guarded(
+                lambda conn: self._backfill_batch(conn, deadline), lambda: (0, False)
             )
             total += changed
-            if processed == 0 or self._in_memory:
+            if not more or self._in_memory:
+                # Finished (or the database is unavailable: try next launch).
+                self.backfill_pending = False
                 break
             time.sleep(0.01)  # an RLock is not fair: let waiting callers in
         return total
 
+    BACKFILL_SCAN = 256
+
     def _backfill_batch(
         self, conn: sqlite3.Connection, deadline: float | None
-    ) -> tuple[int, int]:
-        """One batch: (videos looked at, videos whose tags were read)."""
+    ) -> tuple[int, bool]:
+        """One batch: (videos whose tags were read, whether any are left).
+
+        Carries on from where the last batch stopped, so a call reads the
+        list of untagged videos once, not once per batch.
+        """
         stop = time.monotonic() + self.BACKFILL_BATCH_S
         if deadline is not None:
             stop = min(stop, deadline)
-        # Only videos the index shows without tags can need a backfill; the
-        # raw.json mtime then says whether it was already looked at.
-        rows = conn.execute(
-            "SELECT v.playlist_id, v.video_id, e.raw_mtime_ns FROM idx_videos v "
-            "LEFT JOIN idx_video_extra e ON e.playlist_id = v.playlist_id "
-            "AND e.video_id = v.video_id "
-            "WHERE v.yt_tags IS NULL OR v.yt_tags IN ('', '[]')"
-        ).fetchall()
         processed = changed = 0
+        more = first = True
+        while more and processed < self.BACKFILL_BATCH and (
+            first or time.monotonic() < stop
+        ):
+            first = False
+            # Only videos the index shows without tags can need a backfill;
+            # the raw.json mtime then says whether it was already looked at.
+            after = self._backfill_after or ("", "")
+            rows = conn.execute(
+                "SELECT v.playlist_id, v.video_id, e.raw_mtime_ns "
+                "FROM idx_videos v "
+                "LEFT JOIN idx_video_extra e ON e.playlist_id = v.playlist_id "
+                "AND e.video_id = v.video_id "
+                "WHERE (v.yt_tags IS NULL OR v.yt_tags IN ('', '[]')) "
+                "AND (v.playlist_id, v.video_id) > (?, ?) "
+                "ORDER BY v.playlist_id, v.video_id LIMIT ?",
+                (*after, self.BACKFILL_SCAN),
+            ).fetchall()
+            if len(rows) < self.BACKFILL_SCAN:
+                more = False
+            done, found, last = self._backfill_rows(conn, rows, stop)
+            processed += done
+            changed += found
+            if rows and last != (rows[-1][0], rows[-1][1]):
+                more = True  # stopped part-way through this chunk
+            if last is not None:
+                self._backfill_after = last
+        if not more:
+            self._backfill_after = None  # the next call starts over
+        if changed:
+            self._set_dirty(conn)
+        conn.commit()
+        return changed, more
+
+    def _backfill_rows(
+        self, conn: sqlite3.Connection, rows: list, stop: float
+    ) -> tuple[int, int, tuple[str, str] | None]:
+        """Backfill ``rows`` until the batch is full or its time is up:
+        (videos looked at, videos whose tags were read, last row handled)."""
+        processed = changed = 0
+        last: tuple[str, str] | None = None
         for playlist_id, video_id, done_mtime in rows:
-            if processed >= self.BACKFILL_BATCH or time.monotonic() >= stop:
+            if processed >= self.BACKFILL_BATCH:
                 break
+            # At least one video per batch, so even a tiny budget progresses.
+            if processed and time.monotonic() >= stop:
+                break
+            last = (playlist_id, video_id)
             try:
                 video_dir = self.layout.video_meta_dir(playlist_id, video_id)
             except ValueError:
@@ -594,10 +762,7 @@ class LibraryIndex:
                     (json.dumps(categories), json.dumps(yt_tags),
                      playlist_id, video_id),
                 )
-        if changed:
-            self._set_dirty(conn)
-        conn.commit()
-        return processed, changed
+        return processed, changed, last
 
     def _derive_if_needed(self, conn: sqlite3.Connection, changed: int) -> None:
         if changed or self._tags_dirty(conn):
@@ -608,10 +773,10 @@ class LibraryIndex:
         meta_dir = self.layout.playlist_meta_dir(playlist_id)
         path = meta_dir / PLAYLIST_FILE
         stat = _source_stat(path)
-        doc = read_json(path)
+        doc, digest = _read_playlist(path)
         self._delete_playlist(conn, playlist_id)
         if stat is not None and doc is not None:
-            self._index_playlist(conn, meta_dir, doc, stat)
+            self._index_playlist(conn, meta_dir, doc, stat, digest)
         self._set_dirty(conn)
         conn.commit()
 
@@ -640,7 +805,14 @@ class LibraryIndex:
             extra = self._extras(conn, playlist_id)
             row = self._video_row(playlist_id, playlist, entry, position, extra)
             if row is not None:
-                self._insert_videos(conn, [row], _text(playlist.get("title")))
+                self._insert_videos(conn, [row], _playlist_title(playlist, playlist_id))
+        # A download adds a thumbnail and metadata bytes to the playlist's
+        # folder; keep those columns as a full build would set them.
+        conn.execute(
+            "UPDATE idx_playlists SET has_thumb = ?, meta_bytes = ? "
+            "WHERE playlist_id = ?",
+            (int(_has_thumb(meta_dir, playlist)), _tree_bytes(meta_dir), playlist_id),
+        )
         self._set_dirty(conn)
         conn.commit()
 
@@ -656,13 +828,16 @@ class LibraryIndex:
         for meta_dir in self._playlist_dirs() or []:
             path = meta_dir / PLAYLIST_FILE
             stat = _source_stat(path)
-            doc = read_json(path)
+            doc, digest = _read_playlist(path)
             if stat is None or doc is None:
                 continue
-            if self._index_playlist(conn, meta_dir, doc, stat):
+            if self._index_playlist(conn, meta_dir, doc, stat, digest):
                 count += 1
         self._derive(conn)
         conn.commit()
+        self._rebuilds += 1
+        self._rebuilt_count = count
+        self._pending_refresh.clear()  # everything was just read afresh
         return count
 
     def _playlist_dirs(self) -> list[Path] | None:
@@ -747,14 +922,14 @@ class LibraryIndex:
                     (time.time_ns(), old[0]),
                 )
                 return 0
-        doc = read_json(path)
+        doc, digest = _read_playlist(path)
         if old is not None:
             self._delete_playlist(conn, old[0])
         if doc is None:
             # Unreadable now: drop the old rows once, then wait for a valid
             # rewrite (counted only if something was dropped).
             return 1 if old is not None else 0
-        return 1 if self._index_playlist(conn, meta_dir, doc, stat) else 0
+        return 1 if self._index_playlist(conn, meta_dir, doc, stat, digest) else 0
 
     def _drop_missing(self, conn: sqlite3.Connection, seen: set[str]) -> int:
         """Drop rows whose playlist folder is gone (checked again now: the
@@ -780,6 +955,7 @@ class LibraryIndex:
         meta_dir: Path,
         doc: dict,
         stat: tuple[int, int],
+        source_hash: str,
     ) -> bool:
         playlist_id = str(doc.get("id") or meta_dir.name)
         if _folder_for(playlist_id) != meta_dir.name:
@@ -797,7 +973,7 @@ class LibraryIndex:
             """,
             (
                 playlist_id,
-                _text(doc.get("title")) or playlist_id,
+                _playlist_title(doc, playlist_id),
                 _text(doc.get("channel")),
                 _text(doc.get("description")),
                 _text(doc.get("kind")) or "youtube",
@@ -806,7 +982,7 @@ class LibraryIndex:
                 _tree_bytes(meta_dir),
                 stat[0],
                 stat[1],
-                _file_hash(meta_dir / PLAYLIST_FILE),
+                source_hash,
                 time.time_ns(),
             ),
         )
@@ -820,7 +996,7 @@ class LibraryIndex:
                 continue
             seen.add(row.video_id)
             rows.append(row)
-        self._insert_videos(conn, rows, _text(doc.get("title")) or playlist_id)
+        self._insert_videos(conn, rows, _playlist_title(doc, playlist_id))
         self._set_dirty(conn)
         return True
 
@@ -1006,7 +1182,9 @@ class LibraryIndex:
         A locked (or unrecoverable) database returns the rows from the last
         successful read, or an empty list.
         """
-        result = self._guarded(self._read_playlists, lambda: None)
+        result = self._guarded(
+            self._read_playlists, lambda: None, timeout=READ_TIMEOUT_S
+        )
         if result is None:
             return list(self._last_playlists)
         self._last_playlists = result
@@ -1014,7 +1192,9 @@ class LibraryIndex:
 
     def derived(self) -> dict[str, Derived]:
         """Each playlist's derived category and tags (recomputed if stale)."""
-        result = self._guarded(self._read_derived, lambda: None)
+        result = self._guarded(
+            self._read_derived, lambda: None, timeout=READ_TIMEOUT_S
+        )
         if result is None:
             return dict(self._last_derived)
         self._last_derived = result
@@ -1033,7 +1213,9 @@ class LibraryIndex:
             return []
         limit = max(1, min(int(limit), 1000))
         result = self._guarded(
-            lambda conn: self._search_meta(conn, expression, limit), lambda: []
+            lambda conn: self._search_meta(conn, expression, limit),
+            lambda: [],
+            timeout=READ_TIMEOUT_S,
         )
         return list(result)
 

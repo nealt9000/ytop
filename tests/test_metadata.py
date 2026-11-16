@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from factories import add_playlist, make_library
 from ytop.yt.formats import Selection
 from ytop.yt.metadata import (
@@ -288,3 +290,38 @@ def test_normalize_video_keeps_categories_and_tags() -> None:
     )
     assert doc["categories"] == ["Music"]
     assert doc["tags"] == ["a"]
+
+
+def test_legacy_tmp_lock_dir_is_pruned_but_held_files_stay(tmp_path, monkeypatch):
+    """Old builds kept sidecars in ``<tmp>/ytop-locks``; it goes once nobody
+    holds them (an old YTOP still running keeps its lock) (#9)."""
+    import tempfile
+
+    from ytop.yt import metadata as md
+
+    fcntl = pytest.importorskip("fcntl")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    legacy = tmp_path / md.LEGACY_LOCK_DIR
+    assert md.prune_legacy_lock_dir()  # nothing there
+    legacy.mkdir()
+    held, free = legacy / ("a" * 40 + ".lock"), legacy / ("b" * 40 + ".lock")
+    other = legacy / "notes.txt"
+    for path in (held, free, other):
+        path.write_text("")
+    fd = os.open(held, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert not md.prune_legacy_lock_dir()
+        assert held.exists() and not free.exists() and other.exists()
+    finally:
+        os.close(fd)
+    other.unlink()
+    assert md.prune_legacy_lock_dir()
+    assert not legacy.exists()
+    # Never through a symlink.
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / ("c" * 40 + ".lock")).write_text("")
+    legacy.symlink_to(target)
+    assert not md.prune_legacy_lock_dir()
+    assert (target / ("c" * 40 + ".lock")).exists()

@@ -245,11 +245,56 @@ def prune_lock_sidecars() -> int:
     while this process holds its lock, and a waiter that then gets the lock
     on the removed file notices (``_same_file``) and starts over.
     """
-    removed = 0
     try:
         paths = sorted(lock_dir().glob("*.lock"))
     except OSError:
         return 0
+    return _prune_unheld(paths)
+
+
+# Where builds before the per-user instance dir kept their sidecars.
+LEGACY_LOCK_DIR = "ytop-locks"
+_SIDECAR_NAME = re.compile(r"[0-9a-f]{40}\.lock")
+
+
+def prune_legacy_lock_dir() -> bool:
+    """Delete ``<tmp>/ytop-locks`` (old builds' sidecars) as far as it is
+    ours and nobody holds its files; True if it is gone.
+
+    Only a real directory owned by this user, only sidecar-named files in
+    it, each only while we hold its lock (an old YTOP still running keeps
+    its own), and the directory only once empty."""
+    import stat as stat_mod
+
+    legacy = Path(tempfile.gettempdir()) / LEGACY_LOCK_DIR
+    try:
+        st = os.lstat(legacy)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat_mod.S_ISDIR(st.st_mode):
+        return False
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and st.st_uid != getuid():
+        return False
+    try:
+        paths = sorted(
+            p for p in legacy.iterdir()
+            if _SIDECAR_NAME.fullmatch(p.name) and not p.is_symlink()
+        )
+    except OSError:
+        return False
+    _prune_unheld(paths)
+    try:
+        legacy.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _prune_unheld(paths: list[Path]) -> int:
+    removed = 0
     for path in paths:
         try:
             fd = os.open(path, os.O_RDWR)

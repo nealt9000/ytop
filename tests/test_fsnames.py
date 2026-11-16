@@ -36,3 +36,22 @@ def test_plan_names_numbered():
         "a": "01 - X",
         "b": "02 - Y",
     }
+
+
+def test_safe_name_truncation_never_lands_on_reserved():
+    from ytop.fsnames import _RESERVED
+
+    for value, limit in [("CONSOLE", 3), ("COM1 port", 4), ("NULL.txt", 3),
+                         ("AUXILIARY", 3), ("LPT12", 4)]:
+        out = safe_name(value, limit=limit)
+        assert len(out) <= limit
+        assert out.partition(".")[0].strip().upper() not in _RESERVED, out
+
+
+def test_plan_names_collision_suffix_fits_limit():
+    long_title = "x" * 150
+    names = plan_names([("aaaaaaaaaaa", long_title), ("bbbbbbbbbbb", long_title)], False)
+    assert all(len(n) <= 100 for n in names.values())
+    assert names["bbbbbbbbbbb"].endswith(" [bbbbbbbbbbb]")
+    numbered = plan_names([("a1", "Same"), ("b2", "Same")], True)
+    assert numbered["a1"] != numbered["b2"]

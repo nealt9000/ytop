@@ -110,3 +110,23 @@ def test_refused_root_follows_sys_platform(monkeypatch):
     assert fsinfo.refused_root(PureWindowsPath("C:\\"))
     monkeypatch.setattr(fsinfo.sys, "platform", "linux")
     assert fsinfo.refused_root(Path("/"))
+
+
+def test_fs_info_duplicate_mount_prefers_last(monkeypatch):
+    monkeypatch.setattr(
+        fsinfo,
+        "_read_mounts",
+        lambda: "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/st ext4 rw 0 0\n"
+        "/dev/sdc1 /mnt/st vfat rw 0 0\n",
+    )
+    assert fs_info(Path("/mnt/st/lib")).fstype == "vfat"
+
+
+def test_fs_info_linux_msdos_is_fat(monkeypatch):
+    monkeypatch.setattr(
+        fsinfo,
+        "_read_mounts",
+        lambda: "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/st msdos rw 0 0\n",
+    )
+    info = fs_info(Path("/mnt/st/lib"))
+    assert (info.fstype, info.max_file_bytes) == ("vfat", FAT32_MAX_FILE)

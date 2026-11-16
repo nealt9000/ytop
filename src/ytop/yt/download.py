@@ -736,18 +736,27 @@ def download_probe(
             row["index"] = position
         return rows
 
+    def current_folder() -> None:
+        # The folder may be renamed while we download (rename_folder holds
+        # PUBLISH_LOCK); take the one on disk, never our cached copy.
+        on_disk = read_json(pdir / "playlist.json") or {}
+        if on_disk.get("folder"):
+            existing_doc["folder"] = on_disk["folder"]
+
     def write_partial() -> None:
-        doc = normalize_playlist(
-            probe.playlist,
-            entries=ordered_entries(),
-            thumbnail_file=thumb_name,
-            existing=existing_doc,
-            options=playlist_options,
-        )
-        if limit is not None:
-            doc["partial"] = True
-            doc["limit"] = limit
-        write_json(pdir / "playlist.json", doc)
+        with PUBLISH_LOCK:
+            current_folder()
+            doc = normalize_playlist(
+                probe.playlist,
+                entries=ordered_entries(),
+                thumbnail_file=thumb_name,
+                existing=existing_doc,
+                options=playlist_options,
+            )
+            if limit is not None:
+                doc["partial"] = True
+                doc["limit"] = limit
+            write_json(pdir / "playlist.json", doc)
 
     if cancel is not None and cancel():
         raise JobCancelled("cancelled by the user")
@@ -862,17 +871,19 @@ def download_probe(
             fetch_thumbnail(thumb_source, playlist_thumb)
         thumb_name = PLAYLIST_THUMB_NAME if playlist_thumb.exists() else None
 
-    playlist_doc = normalize_playlist(
-        probe.playlist,
-        entries=entries,
-        thumbnail_file=thumb_name,
-        existing=existing_doc,
-        options=playlist_options,
-    )
-    if limit is not None:
-        playlist_doc["partial"] = True
-        playlist_doc["limit"] = limit
-    write_json(pdir / "playlist.json", playlist_doc)
+    with PUBLISH_LOCK:
+        current_folder()
+        playlist_doc = normalize_playlist(
+            probe.playlist,
+            entries=entries,
+            thumbnail_file=thumb_name,
+            existing=existing_doc,
+            options=playlist_options,
+        )
+        if limit is not None:
+            playlist_doc["partial"] = True
+            playlist_doc["limit"] = limit
+        write_json(pdir / "playlist.json", playlist_doc)
 
     transcript_results = [
         item.transcript for item in items

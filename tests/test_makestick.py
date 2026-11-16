@@ -494,6 +494,39 @@ def test_make_stick_route_and_job(tmp_path: Path, image: Path, monkeypatch):
     assert bad.status_code == 400
 
 
+def test_make_stick_upgrade_summary_counts_the_ticked_platforms(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    """The upgrade page ticks the platforms the stick already has and counts
+    its summary for those, not for every platform the image can give."""
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    make(target, image, library, platforms=["linux-x86_64"], label="Old")
+    newer = second_image(tmp_path)
+    monkeypatch.setenv("YTOP_IMAGE_ROOT", str(newer))
+    client = TestClient(create_app(home.root, libraries=libs))
+
+    def summary(platforms: list[str]) -> str:
+        return ms.upgrade_summary(ms.plan_make(
+            target, newer, library, mode="upgrade", platforms=platforms,
+        ))
+
+    assert summary(["linux-x86_64"]) != summary(PLATS)
+    page = client.get("/make-stick", params={"target": str(target)}).text
+    assert 'value="linux-x86_64" checked' in page
+    assert 'value="macos-arm64">' in page and 'value="windows-x86_64">' in page
+    assert summary(["linux-x86_64"]) in page
+    assert summary(PLATS) not in page
+    assert "Counted for linux-x86_64," in page
+
+    page = client.get("/make-stick", params={
+        "target": str(target), "platforms": ["windows-x86_64", "linux-x86_64"],
+    }).text
+    assert summary(["linux-x86_64", "windows-x86_64"]) in page
+    assert 'value="windows-x86_64" checked' in page
+    assert "Counted for linux-x86_64, windows-x86_64," in page
+
+
 @pytest.mark.parametrize("recover_crash_at", [1, 2, 3, 5, 7, 8])
 def test_interrupted_recovery_still_restores_old(
     tmp_path: Path, image: Path, monkeypatch, recover_crash_at: int,

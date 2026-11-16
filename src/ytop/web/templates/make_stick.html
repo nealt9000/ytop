@@ -190,7 +190,7 @@
     <strong>{{ build.build_id }}</strong>. It won’t change the library:
     playlists, videos, watch history and settings stay exactly as they are.
   </p>
-  {% if upgrade_line %}<p class="muted small">{{ upgrade_line }}</p>{% endif %}
+  {% if upgrade_line %}<p class="muted small">{{ upgrade_line }} Counted for {{ checked_platforms|join(", ") }}, the platforms ticked below.</p>{% endif %}
   {% else %}
   <p>
     This makes a new {{ product_name }} stick here: the app for the computers you pick, start
@@ -212,7 +212,7 @@
     <legend>Starts on</legend>
     {% for plat, size in platform_sizes.items() %}
     <label class="check-row">
-      <input type="checkbox" name="platforms" value="{{ plat }}" checked>
+      <input type="checkbox" name="platforms" value="{{ plat }}"{% if plat in checked_platforms %} checked{% endif %}>
       <span>{{ plat }}{% if size %} <small class="muted">{{ size|bytes }}</small>{% endif %}</span>
     </label><br>
     {% endfor %}

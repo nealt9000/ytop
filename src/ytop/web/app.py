@@ -1509,7 +1509,7 @@ def create_app(
 
     def _render_make_stick(
         request: Request, raw_target: str = "", error: str = "",
-        status_code: int = 200,
+        status_code: int = 200, platforms: list[str] | None = None,
     ):
         try:
             image: Path | None = makestick.source_image()
@@ -1535,11 +1535,21 @@ def create_app(
             lib.playlists_and_bytes()[0]
             if info is not None and info.mode == "new" else []
         )
+        available = [str(plat) for plat in (build or {}).get("platforms") or []]
+        # Ticked platforms: the ones asked for, else (upgrading) the ones the
+        # stick already starts on, else all of them.  The upgrade summary is
+        # counted for exactly these, not for every platform the image has.
+        checked = [plat for plat in available if plat in set(platforms or [])]
+        if not checked and info is not None and info.mode == "upgrade":
+            have = (info.image_build or {}).get("platforms") or []
+            checked = [plat for plat in available if plat in set(map(str, have))]
+        if not checked:
+            checked = available
         upgrade_line = ""
         if info is not None and info.mode == "upgrade" and image is not None:
             try:
                 upgrade_line = makestick.upgrade_summary(makestick.plan_make(
-                    info.path, image, lib, mode="upgrade",
+                    info.path, image, lib, mode="upgrade", platforms=checked,
                 ))
             except (makestick.MakeStickError, OSError):
                 upgrade_line = ""
@@ -1548,6 +1558,7 @@ def create_app(
             "make_stick.html",
             job=None,
             upgrade_line=upgrade_line,
+            checked_platforms=checked,
             image_error=image_error,
             build=build,
             platform_sizes={
@@ -1567,8 +1578,9 @@ def create_app(
     @app.get("/make-stick")
     def make_stick_page(
         request: Request, target: str = Query(default="", max_length=1000),
+        platforms: list[str] = Query(default=[]),
     ):
-        return _render_make_stick(request, target)
+        return _render_make_stick(request, target, platforms=platforms)
 
     @app.post("/make-stick")
     async def make_stick_submit(request: Request):
@@ -1588,16 +1600,21 @@ def create_app(
         try:
             image, stick_plan = await run_in_threadpool(plan)
         except ValueError as exc:
-            return _render_make_stick(request, raw_target, str(exc), 400)
+            return _render_make_stick(
+                request, raw_target, str(exc), 400, platforms=platforms,
+            )
         except OSError as exc:
             return _render_make_stick(
                 request, raw_target,
                 makestick.drive_problem(_make_target(raw_target), exc), 400,
+                platforms=platforms,
             )
         try:
             job = app.state.jobs.make_stick(stick_plan, image)
         except ValueError as exc:  # a busy target or playlist
-            return _render_make_stick(request, raw_target, str(exc), 409)
+            return _render_make_stick(
+                request, raw_target, str(exc), 409, platforms=platforms,
+            )
         return RedirectResponse(f"/make-stick/{job.id}", status_code=303)
 
     @app.get("/make-stick/{job_id}")

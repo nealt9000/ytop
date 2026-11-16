@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ytop.layout import (
+    SCHEMA_VERSION,
     UNGROUPED_FOLDER,
     UNGROUPED_ID,
     LibraryLayout,
@@ -348,8 +349,23 @@ def plan_migration(old_root: Path, target: Path) -> MigrationPlan:
     playlists: list[OldPlaylist] = []
     seen: dict[str, Path] = {}
     for location in locations:
-        for playlist_dir in sorted((location / "playlists").iterdir()):
-            if not playlist_dir.is_dir() or playlist_dir.name.startswith("."):
+        try:
+            children = sorted((location / "playlists").iterdir())
+        except OSError as exc:
+            if location == old_root:
+                raise
+            unscanned.append((location, f"storage location is unreadable ({exc})"))
+            warnings.append(
+                f"storage location {location} could not be read ({exc}); its "
+                "playlists were skipped"
+            )
+            continue
+        for playlist_dir in children:
+            if playlist_dir.name.startswith("."):
+                continue
+            if not playlist_dir.is_dir():
+                # Never migrated, so listed with what is left behind.
+                unscanned.append((playlist_dir, "not a playlist folder"))
                 continue
             playlist = _scan_playlist(playlist_dir, location)
             if playlist is None:
@@ -797,10 +813,16 @@ def run_migration(
     from ytop.transcripts.store import index_library
 
     target = Path(target).expanduser()
+    existing = read_library(target)
+    if existing is not None and existing.schema > SCHEMA_VERSION:
+        raise ValueError(
+            f"{target} was made by a newer YTOP (schema {existing.schema}); "
+            "update this app before migrating into it"
+        )
     old_root = plan.old_root
     # Read (and validate) the old state before anything is written.
     progress, titles = _read_state(old_root)
-    info = read_library(target) or init_library(target, target.name or "Library")
+    info = existing or init_library(target, target.name or "Library")
     layout = LibraryLayout(target)
     report = MigrationReport(target=target, warnings=list(plan.warnings))
     ctx = _Context(

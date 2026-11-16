@@ -692,7 +692,7 @@ def cmd_migrate(args) -> int:
     for path in plan.dropped_partials:
         print(f"  {path}")
     if plan.unscanned:
-        print(f"not readable, will not be migrated: {len(plan.unscanned)}")
+        print(f"will not be migrated (left behind): {len(plan.unscanned)}")
         for path, reason in plan.unscanned:
             print(f"  {path}  ({reason})")
     for warning in plan.warnings:

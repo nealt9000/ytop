@@ -1832,15 +1832,24 @@ def create_app(
     async def quit_api(request: Request):
         form = await request.form()
         force = str(form.get("force") or "") == "1"
+        # The Quit form posted without JavaScript carries its token as a
+        # field; the script sends it as a header and wants JSON back.
+        plain_form = "csrf_token" in form and "x-csrf-token" not in request.headers
+
+        def busy(count: int):
+            if plain_form:
+                response = render(request, "quit_busy.html", active_jobs=count)
+                response.status_code = 409
+                return response
+            return JSONResponse({"active_jobs": count}, status_code=409)
+
         count = active_job_count()
         if count and not force:
-            return JSONResponse({"active_jobs": count}, status_code=409)
+            return busy(count)
         # Rendered before anything stops: the page needs nothing afterwards.
         page = templates.get_template("stopped.html").render()
         if not await run_in_threadpool(quit_now, force):
-            return JSONResponse(
-                {"active_jobs": max(active_job_count(), 1)}, status_code=409
-            )
+            return busy(max(active_job_count(), 1))
         return Response(page, media_type="text/html")
 
     @app.get("/api/instance", dependencies=[Depends(require_token)])

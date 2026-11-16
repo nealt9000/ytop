@@ -259,8 +259,12 @@ def _index_libraries(libs: LibrarySet, stop: threading.Event) -> None:
         try:
             index = index_for(ref.layout)
             index.ensure_fresh()
-            while not stop.is_set() and index.backfill_tags(budget_s=2.0):
-                pass
+            # A slice that finds no tags (videos without any) is still
+            # progress: carry on until the backfill says it is done.
+            while not stop.is_set():
+                index.backfill_tags(budget_s=2.0)
+                if not index.backfill_pending:
+                    break
         except Exception as exc:  # noqa: BLE001 - the index is disposable
             if not warned:
                 warned = True
@@ -895,9 +899,12 @@ def create_app(
             row = derived.get(pid)
             effective_tags = apply_edits(pid, list(row.tags) if row else [], edits)
             effective_cat = effective_category(pid, row.category if row else "", edits)
+            # Suggest every tag the library shows, as shown: derived and
+            # user-added ones, renamed, without hidden ones.
             seen: dict = {}
-            for item in derived.values():
-                for tag in item.tags:
+            for other in set(derived) | set(edits.playlists):
+                item = derived.get(other)
+                for tag in apply_edits(other, list(item.tags) if item else [], edits):
                     seen.setdefault(tag.key, tag)
             vocabulary = sorted(seen.values(), key=lambda tag: tag.label.casefold())
             category_names = sorted(
@@ -956,16 +963,17 @@ def create_app(
     @app.post("/playlist/{playlist_id}/tags")
     async def playlist_tags(request: Request, playlist_id: str):
         ref, pid = tag_target(playlist_id)
-        store = tag_store_for(ref)
         form = await request.form()
         action = str(form.get("action") or "")
         tag = str(form.get("tag") or "")
+        # A malformed request is refused as such, whatever the library.
+        if action not in ("add", "remove"):
+            raise HTTPException(status_code=400, detail="unknown tag action")
+        store = tag_store_for(ref)
         if action == "add":
             edit_tags(lambda: store.add(pid, tag))
-        elif action == "remove":
-            edit_tags(lambda: store.remove(pid, tag))
         else:
-            raise HTTPException(status_code=400, detail="unknown tag action")
+            edit_tags(lambda: store.remove(pid, tag))
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/category")
@@ -997,15 +1005,18 @@ def create_app(
         )
         vocabulary = index_for(ref.layout, read_only=ref.read_only).vocabulary()
         edits = TagStore(ref.layout).read()
-        hidden = [
-            (key, vocabulary[key].label if key in vocabulary else key)
-            for key in sorted(edits.hidden)
-        ]
         # A tag's own name before its rename: derived, or as the user added it.
         names = {key: tag.label for key, tag in vocabulary.items()}
         for row in edits.playlists.values():
             for added in row.add:
                 names.setdefault(normalize_tag(added), added)
+        # A hidden tag by the name it was shown with: a rename's label, else
+        # its own (a user-added tag has no derived label).
+        shown = {normalize_tag(label): label for label in edits.renames.values()}
+        hidden = [
+            (key, shown.get(key) or names.get(key, key))
+            for key in sorted(edits.hidden)
+        ]
         renamed = [
             (key, names.get(key, key), label)
             for key, label in sorted(edits.renames.items())

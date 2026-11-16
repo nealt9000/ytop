@@ -226,6 +226,66 @@ def test_rename_cycle_through_a_chain_is_broken(tmp_path):
         assert apply_edits("P", [Tag(key, key)], edits)[0].key == "a1"
 
 
+def test_derived_label_is_trimmed_like_its_key():
+    long_label = "#" + "Word " * 5 + "!!"
+    a = TagInput("P1", "", "", "", (("#Physics!!", long_label),) * 2)
+    tags = {t.key: t.label for t in derive_tags([a])["P1"]}
+    assert tags["physics"] == "Physics"
+    assert all(len(label) <= 32 for label in tags.values())
+    assert all(not label.startswith("#") for label in tags.values())
+
+
+def test_control_characters_part_words():
+    assert normalize_tag("linear\nalgebra") == "linear algebra"
+    assert normalize_tag("linear\talgebra") == "linear algebra"
+    a = TagInput("P1", "", "", "", (("Linear\nAlgebra",),) * 2)
+    assert derive_tags([a])["P1"] == [Tag("linear algebra", "Linear Algebra")]
+
+
+def test_title_plural_counts_for_the_merged_tag():
+    a = TagInput("P1", "", "", "", (("fugue",), ("fugue",)))
+    b = TagInput("P2", "Bach fugues", "", "", ((), (), (), ()))
+    assert Tag("fugue", "fugue") in derive_tags([a, b])["P2"]
+    # A word that only looks like a plural is not merged ("bas" is not "bass").
+    c = TagInput("P3", "", "", "", (("bas",), ("bas",)))
+    d = TagInput("P4", "Electric bass", "", "", ((), (), (), ()))
+    assert "bas" not in {t.key for t in derive_tags([c, d])["P4"]}
+
+
+def test_equal_scores_and_label_counts_break_ties_alphabetically():
+    a = TagInput("P1", "", "", "", (("Zeta", "alpha", "Mid"), ("zeta", "Alpha", "mid")))
+    tags = derive_tags([a])["P1"]
+    assert [t.key for t in tags] == ["alpha", "mid", "zeta"]
+    # Each spelling was seen once: the alphabetically first wins.
+    assert [t.label for t in tags] == ["Alpha", "Mid", "Zeta"]
+
+
+def test_rename_normalizes_its_key(tmp_path):
+    store = TagStore(make_library(tmp_path))
+    store.rename("  #Fugue! ", "Counterpoint")
+    assert store.read().renames == {"fugue": "Counterpoint"}
+    store.rename("!!!", "Anything")
+    assert store.read().renames == {"fugue": "Counterpoint"}
+
+
+def test_unknown_playlist_row_fields_survive_a_rewrite(tmp_path):
+    import json
+
+    layout = make_library(tmp_path)
+    layout.tags_file.write_text(json.dumps({
+        "schema": 1,
+        "playlists": {
+            "P1": {"add": ["Fugue"], "remove": [], "pinned": True},
+            "P2": {"add": [], "remove": [], "note": "keep me"},
+        },
+    }))
+    TagStore(layout).add("P1", "Baroque")
+    rows = json.loads(layout.tags_file.read_text())["playlists"]
+    assert rows["P1"]["pinned"] is True
+    assert rows["P1"]["add"] == ["Fugue", "Baroque"]
+    assert rows["P2"] == {"note": "keep me", "add": [], "remove": []}
+
+
 def test_empty_label_undoes_a_rename(tmp_path):
     store = TagStore(make_library(tmp_path))
     store.rename("fugue", "Counterpoint")

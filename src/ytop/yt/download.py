@@ -20,7 +20,7 @@ from yt_dlp.utils import DownloadError
 
 from ..config import Config
 from ..fsinfo import fits_on
-from ..index import index_for
+from ..index import refresh_video_quietly
 from ..layout import LibraryLayout, read_library
 from ..publish import PUBLISH_LOCK, playlist_folder, publish_download
 from ..toolchain import ffmpeg_path
@@ -552,10 +552,7 @@ def _process_item(
             media = current
         meta["files"]["media"] = layout.relative_media(media) if media else None
         write_json(vdir / "meta.json", meta)
-    try:
-        index_for(layout).refresh_video(playlist_id, item.id)
-    except Exception:  # noqa: BLE001 - the index is disposable
-        pass
+    refresh_video_quietly(layout, playlist_id, item.id)
 
     transcript: TranscriptResult | None = None
     if fetch_transcripts and media is not None and not error:

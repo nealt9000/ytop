@@ -932,6 +932,28 @@ def test_search_transcript_hit_for_a_missing_video_has_no_watch_link(
     client.app.state.jobs.close()
 
 
+def test_search_ignores_the_stored_title_of_a_custom_titled_playlist(
+    tmp_path: Path,
+):
+    from ytop.web.library import TitleStore
+
+    layout = make_library(tmp_path)
+    TitleStore(layout).set_playlist_title(PLAYLIST_ID, "Zebra Course")
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    # "Playlist" is only in the stored title now: no match under "Zebra Course".
+    hidden = client.get("/search", params={"q": "Playlist"}).text
+    assert "Zebra Course" not in hidden.split("</header>", 1)[1]
+    assert "Playlist Two" in hidden  # no custom title: its stored one counts
+    # A video hit still lists, without counting the playlist as matched.
+    video = client.get("/search", params={"q": "One"}).text
+    assert "1 match for" in video
+    assert "Video <mark>One</mark>" in video
+    # The custom title itself matches.
+    custom = client.get("/search", params={"q": "zebra"}).text
+    assert "1 match for" in custom and "Zebra Course" in custom
+    client.app.state.jobs.close()
+
+
 def test_search_box_label(client: TestClient):
     assert 'placeholder="Search titles, tags, transcripts"' in client.get("/").text
 

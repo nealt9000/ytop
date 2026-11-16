@@ -534,8 +534,12 @@ def search_library(
             found = group(item.ref.id, hit.playlist_id)
             if found is None:
                 continue
+            if hit.field == "playlist" and item.playlist_titles.get(hit.playlist_id):
+                # Matched only the stored title of a playlist shown under a
+                # custom one: not a match for what the page displays.
+                continue
             found.rank = min(found.rank, hit.rank)
-            if hit.playlist_match:
+            if hit.playlist_match and not item.playlist_titles.get(hit.playlist_id):
                 found.playlist_matched = True
             if hit.field == "playlist":
                 continue

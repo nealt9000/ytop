@@ -569,3 +569,99 @@ def test_linux_launcher_restores_a_lost_exec_bit(tmp_path):
     r = run(stick, tmp_path)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (tmp_path / "argv.txt").exists()
+
+
+# --- the staging lock (#9) ---------------------------------------------------
+
+
+def _fakebin(tmp_path: Path, **scripts: str) -> dict:
+    """``PATH`` with these commands replaced (each a sh script body)."""
+    import shutil
+
+    fake = tmp_path / "fakebin"
+    fake.mkdir(exist_ok=True)
+    for name, body in scripts.items():
+        real = shutil.which(name)
+        (fake / name).write_text(f'#!/bin/sh\nREAL="{real}"\n{body}\n')
+        (fake / name).chmod(0o755)
+    return {"PATH": f"{fake}:{os.environ['PATH']}"}
+
+
+def _my_owner() -> str:
+    """This (live) process as a launcher's lock owner: pid and start ticks."""
+    text = Path("/proc/self/stat").read_text()
+    return f"{os.getpid()} {text[text.rindex(')') + 2:].split()[19]}"
+
+
+def _lock_path(tmp_path: Path) -> Path:
+    return Path(str(cache_dir(tmp_path)) + ".lock")
+
+
+def test_linux_launcher_interrupted_just_after_taking_the_lock_lets_go(tmp_path):
+    """INT between ``mkdir`` and recording the lock as ours: it used to be
+    orphaned (ten minutes of exit-4 retries for the next launch)."""
+    stick = make_stick(tmp_path)
+    env = _fakebin(tmp_path, mkdir=(
+        '"$REAL" "$@"; rc=$?\n'
+        'case "$1" in *.lock) kill -INT "$PPID" ;; esac\n'
+        'exit $rc'
+    ))
+    r = run(stick, tmp_path, env)
+    assert r.returncode == 1, r.stderr + r.stdout
+    root = tmp_path / "cache/ytop/runtime"
+    assert list(root.glob("*.lock*")) == []
+    assert list(root.glob("*partial*")) == []
+
+
+def test_linux_launcher_never_breaks_a_live_launchers_old_lock(tmp_path):
+    """A copy may take longer than ten minutes: while its launcher lives
+    (pid and start ticks match) the lock holds however old it is."""
+    stick = make_stick(tmp_path)
+    lock = _lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(_my_owner() + "\n")
+    subprocess.run(["touch", "-d", "1 hour ago", str(lock)], check=True)
+    r = run(stick, tmp_path, _fakebin(tmp_path, sleep="exit 0"))
+    assert r.returncode == 4, r.stderr + r.stdout
+    assert "still copying" in r.stdout
+    assert (lock / "owner").read_text().strip() == _my_owner()
+
+
+def test_linux_launcher_breaks_a_fresh_lock_whose_launcher_is_gone(tmp_path):
+    """A recycled pid (start ticks differ) or a dead one: stale at once."""
+    stick = make_stick(tmp_path)
+    lock = _lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(f"{os.getpid()} 1\n")
+    r = run(stick, tmp_path, _fakebin(tmp_path, sleep="exit 9"))  # never waits
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (cache_dir(tmp_path) / ".complete").exists()
+    assert not lock.exists()
+    assert list(lock.parent.glob("*.lock*")) == []
+
+
+def test_linux_launcher_two_waiters_never_both_break_one_stale_lock(tmp_path):
+    """Another waiter breaks the stale lock first and takes it, just before
+    ours renames it: ours finds a live lock, puts it back and waits."""
+    stick = make_stick(tmp_path)
+    lock = _lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(f"{os.getpid()} 1\n")  # stale
+    done = tmp_path / "rival-done"
+    env = _fakebin(
+        tmp_path,
+        sleep="exit 0",
+        mv=(
+            f'if [ "$1" = "{lock}" ] && [ ! -e "{done}" ]; then\n'
+            f'    touch "{done}"\n'
+            f'    rm -rf "{lock}"\n'
+            f'    mkdir "{lock}" && printf "%s\\n" "{_my_owner()}" > "{lock}/owner"\n'
+            'fi\n'
+            'exec "$REAL" "$@"'
+        ),
+    )
+    r = run(stick, tmp_path, env)
+    assert done.exists()
+    assert r.returncode == 4, r.stderr + r.stdout  # waited for the rival
+    assert (lock / "owner").read_text().strip() == _my_owner()
+    assert list(lock.parent.glob("*.lock.stale.*")) == []

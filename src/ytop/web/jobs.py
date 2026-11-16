@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import threading
 import time
 import uuid
@@ -623,6 +624,31 @@ class JobManager:
             self._reconcile_moves(touching)
             self._save(force=True)
 
+    def _move_paths(self, job: Job) -> tuple[Path, Path, Path | None]:
+        """A move's recorded folders, re-rooted where each library is
+        mounted now: a stick that comes back under another mount point or
+        drive letter still reconciles.  Unconnected libraries keep the
+        recorded path."""
+
+        def name(raw: str) -> str:
+            return re.split(r"[\\/]", raw.rstrip("\\/"))[-1]
+
+        source = Path(job.source_path)
+        target = Path(job.target_path)
+        staging = Path(job.temp_path) if job.temp_path else None
+        source_ref = (
+            self._lib.libraries.get(job.source_library_id)
+            if job.source_library_id else None
+        )
+        dest_ref = self._lib.libraries.get(job.library_id) if job.library_id else None
+        if source_ref is not None:
+            source = source_ref.layout.meta_root / name(job.source_path)
+        if dest_ref is not None:
+            target = dest_ref.layout.meta_root / name(job.target_path)
+            if job.temp_path:
+                staging = dest_ref.layout.meta_root / name(job.temp_path)
+        return source, target, staging
+
     def _reconcile_moves(self, only: set[str] | None = None) -> None:
         """Finish or honestly report moves interrupted by a restart."""
         changed = False
@@ -640,10 +666,9 @@ class JobManager:
                 job.finished_at = job.finished_at or now_iso()
                 changed = True
                 continue
+            source, target, staging = self._move_paths(job)
             result = fsops.reconcile_move(
-                source=Path(job.source_path),
-                target=Path(job.target_path),
-                staging=Path(job.temp_path) if job.temp_path else None,
+                source=source, target=target, staging=staging,
             )
             job.move_phase = result.phase
             job.source_cleanup_complete = result.cleanup_complete

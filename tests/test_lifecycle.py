@@ -773,6 +773,57 @@ def test_late_plugged_library_move_job_reconciled(tmp_path):
         assert not staging.exists()
 
 
+def _seen_usb(tmp_path, libs, client):
+    usb = _usb(tmp_path)
+    write_json(libs.registry_path, {"schema": 1, "libraries": [str(usb.root)]})
+    libs.refresh()
+    client.get("/")
+    ref = next(r for r in libs.libraries() if r.root == usb.root)
+    return usb, ref
+
+
+def test_recovering_a_known_library_rereads_its_jobs(tmp_path):
+    """A stick unplugged and plugged back in before the job manager noticed
+    is recovered again: its jobs file (changed elsewhere) is read (#10)."""
+    app, _home, libs = _app(tmp_path)
+    with TestClient(app) as client:
+        usb, ref = _seen_usb(tmp_path, libs, client)
+        manager = app.state.jobs
+        assert ref.id in manager._refs
+        write_json(usb.jobs_file, {"schema": 1, "jobs": [{
+            "id": "elsewhere1", "kind": "playlist", "status": "done",
+            "playlist_id": "PLX", "library_id": ref.id,
+        }]})
+        manager.recover_library(ref)
+        assert manager.get("elsewhere1") is not None
+
+
+def test_a_library_finishing_recovery_mid_look_is_not_paused(
+    tmp_path, monkeypatch,
+):
+    """A library that finishes recovery between the job manager's listing
+    (which hides it) and its recovery check is still online: its waiting
+    jobs are not paused (#10)."""
+    app, _home, libs = _app(tmp_path)
+    with TestClient(app) as client:
+        usb, ref = _seen_usb(tmp_path, libs, client)
+        job = _add_job(app, ref.id, status="queued")
+        listed: list[bool] = []
+        real_libraries = libs.libraries
+
+        def libraries(refresh: bool = False):
+            listed.append(True)
+            return [r for r in real_libraries() if r.id != ref.id]  # hidden
+
+        # Recovering until the listing returns, then done.
+        monkeypatch.setattr(libs, "libraries", libraries)
+        monkeypatch.setattr(
+            libs, "recovering", lambda: set() if listed else {ref.id}
+        )
+        app.state.jobs._load_new_libraries()
+        assert app.state.jobs._jobs[job.id].status == "queued"
+
+
 # -- durability --------------------------------------------------------------
 def test_fsync_dir_called_in_batch(tmp_path, monkeypatch):
     layout = make_library(tmp_path)

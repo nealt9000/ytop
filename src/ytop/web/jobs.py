@@ -510,6 +510,10 @@ class JobManager:
         """Pick up libraries plugged in since the last look, and pause the
         waiting jobs of libraries that were unplugged."""
         try:
+            # Taken before the listing too: a library that finishes its
+            # recovery in between is hidden from the listing and gone from
+            # the later snapshot, yet online.
+            was_recovering = self._lib.libraries.recovering()
             every = self._lib.libraries.libraries()
         except Exception:  # noqa: BLE001 - discovery must never break a page
             log.exception("library discovery failed")
@@ -520,7 +524,7 @@ class JobManager:
             if self._closed:
                 return
             # Hidden while recover_library runs for it, but not unplugged.
-            recovering = self._lib.libraries.recovering()
+            recovering = was_recovering | self._lib.libraries.recovering()
             online |= recovering
             for library_id in [key for key in self._refs if key not in online]:
                 self._refs.pop(library_id, None)
@@ -609,8 +613,12 @@ class JobManager:
         if ref.read_only:
             return
         with self._lock:
-            if self._closed or ref.id in self._refs:
+            if self._closed:
                 return
+            # Known but unplugged and back before a look noticed: it may
+            # have changed elsewhere, so read it again like a new one.
+            self._refs.pop(ref.id, None)
+            self._written.pop(ref.id, None)
             before = set(self._jobs)
             self._merge_libraries([ref])
             touching = {

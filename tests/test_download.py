@@ -543,3 +543,32 @@ def test_folder_rename_during_download_is_kept(tmp_path: Path, fake_network):
     assert doc["folder"] == "Renamed"
     assert (layout.media_root / "Renamed" / "02 - Video vid2.webm").exists()
     assert not (layout.media_root / "Test List").exists()
+
+
+def test_force_redownload_clears_stale_alternate_audio(
+    tmp_path: Path, fake_network,
+):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    stale = layout.video_meta_dir("PL1", "vid1") / "audio" / "140.m4a"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"old track")
+
+    download_mod.fetch_playlist("PL1", Config(), library_root=layout.root, force=True)
+
+    assert not stale.exists()
+
+
+def test_skipped_item_drops_a_stale_partial_dir(tmp_path: Path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    partial = layout.partial_dir("vid1")
+    partial.mkdir(parents=True)
+    (partial / "video.webm.part").write_bytes(b"stale")
+
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+
+    assert [i.status for i in result.items] == ["skipped"]
+    assert not partial.exists()

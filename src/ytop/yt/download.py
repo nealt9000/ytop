@@ -206,6 +206,8 @@ def _download_media(
     if not force:
         existing = find_media(layout, video_dir)
         if existing is not None:
+            # A partial left by an earlier interrupted attempt is now moot.
+            shutil.rmtree(layout.partial_dir(item.id), ignore_errors=True)
             return existing, "skipped"
 
     assert item.selection is not None
@@ -306,9 +308,18 @@ def _download_alternate_audio(
     standalone files so the browser can switch tracks without a transcode.
     A failure here must not lose the video that already downloaded.
     """
+    audio_dir = Path(video_dir) / "audio"
+    if force and audio_dir.is_dir():
+        # A forced re-download replaces the tracks; drop ones no longer selected.
+        keep = {
+            str(fmt.get("format_id") or "")
+            for fmt in (item.selection.alternates if item.selection else [])
+        }
+        for path in audio_dir.iterdir():
+            if path.is_file() and path.name.partition(".")[0] not in keep:
+                path.unlink(missing_ok=True)
     if item.selection is None or not item.selection.alternates:
         return []
-    audio_dir = Path(video_dir) / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     saved: list[tuple[dict, Path]] = []
     for fmt in item.selection.alternates:

@@ -816,6 +816,28 @@ def test_add_playlist_url_does_not_create_a_video_job(
     assert client.get(f"/api/jobs/{job_id}").json()["kind"] == "playlist"
 
 
+def test_add_video_playlist_link_says_the_destination_is_not_used(
+    client: TestClient, monkeypatch,
+):
+    """Choosing a destination and then pasting a playlist link adds the
+    playlist as its own; the page says so instead of dropping the choice."""
+    monkeypatch.setattr(jobs_module, "probe_playlist", lambda *a, **k: None)
+    response = client.post(
+        "/add/video",
+        data={
+            "url": "https://www.youtube.com/playlist?list=PLabc123456",
+            "playlist": PLAYLIST_ID,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = response.headers["location"].rsplit("/", 1)[-1]
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["kind"] == "playlist"
+    assert "not into Playlist One" in job["notice"]
+    assert "not into Playlist One" in client.get(f"/add/{job_id}").text
+
+
 def test_add_rejects_an_invalid_target(client: TestClient):
     response = client.post("/add", data={"url": "not a link"})
     assert response.status_code == 400

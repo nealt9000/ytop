@@ -1673,7 +1673,20 @@ def create_app(
         if playlist_id.startswith("library:"):
             library_id, playlist_id = playlist_id[len("library:"):], ""
         if target.kind != "video":
-            # A pure playlist link: add the whole playlist, as /add does.
+            # A pure playlist link: add the whole playlist, as /add does.  A
+            # chosen destination playlist can't hold it; say so instead of
+            # dropping the choice silently, and keep to its library.
+            notice = PLAYLIST_LINK_NOTICE
+            if playlist_id:
+                refuse_ambiguous(playlist_id)
+                chosen = lib.resolve_playlist(playlist_id)
+                if chosen is not None:
+                    library_id = library_id or chosen[0].id
+                    title = lib.playlist_titles().get(playlist_id, playlist_id)
+                    notice = (
+                        "That was a playlist link, so the whole playlist is "
+                        f"being added as its own playlist, not into {title}."
+                    )
             try:
                 job = start_playlist_probe(
                     url, preserve,
@@ -1681,7 +1694,7 @@ def create_app(
                 )
             except Exception as exc:  # noqa: BLE001 - shown on the page
                 return reject(f"Could not start the probe: {exc}")
-            app.state.jobs.set_notice(job.id, PLAYLIST_LINK_NOTICE)
+            app.state.jobs.set_notice(job.id, notice)
             return RedirectResponse(f"/add/{job.id}", status_code=303)
         elif playlist_id:
             refuse_ambiguous(playlist_id)

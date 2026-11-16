@@ -229,6 +229,62 @@ def test_search_playlist_title_match_sorts_first_even_when_video_title_matches(
     assert [h["video_id"] for h in groups[0].video_hits] == ["b1"]
 
 
+def test_search_many_hits_in_one_playlist_do_not_crowd_out_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ytop.web.browse as browse
+    from ytop.transcripts.captions import Segment
+    from ytop.transcripts.store import index_video_dir, write_transcript
+
+    layout = make_library(tmp_path)
+    # Stronger matches (the word twice, short titles) all in one playlist.
+    add_playlist(layout, "P1", "Big", [(f"a{n:02d}", "Fugue fugue") for n in range(30)])
+    add_playlist(layout, "P2", "Small", [("b1", "A long talk that mentions a fugue once")])
+    for pid, vid, text in (
+        *(("P1", f"a{n:02d}", "fugue fugue fugue") for n in range(30)),
+        ("P2", "b1", "and then, much later, a fugue appears in this talk"),
+    ):
+        vdir = layout.video_meta_dir(pid, vid)
+        write_transcript(vdir, video_id=vid, title=vid, language="en", kind="auto",
+                         segments=[Segment(0.0, 4.0, text)], raw_file=None)
+        index_video_dir(layout, vdir, playlist_id=pid, title=vid)
+    monkeypatch.setattr(browse, "META_FETCH", 5)
+    monkeypatch.setattr(browse, "TRANSCRIPT_FETCH", 5)
+    groups = search_library(Library(library_set(layout)), "fugue")
+    small = next(g for g in groups if g.card.playlist_id == "P2")
+    assert [h["video_id"] for h in small.video_hits] == ["b1"]
+    assert [h["video_id"] for h in small.transcript_hits] == ["b1"]
+
+
+def test_search_ranks_are_normalised_per_library(tmp_path: Path) -> None:
+    from ytop.transcripts.captions import Segment
+    from ytop.transcripts.store import index_video_dir, search, write_transcript
+
+    layouts = []
+    # The same matching line, in an index where the word is rare and in one
+    # where every line has it.
+    for name, others in (("a", ["sonata", "rondo", "minuet"]), ("b", ["fugue"] * 3)):
+        layout = make_library(tmp_path / name)
+        add_playlist(layout, "P1", "One", [("v1", "V")])
+        vdir = layout.video_meta_dir("P1", "v1")
+        lines = ["a fugue in four voices", *others]
+        write_transcript(vdir, video_id="v1", title="V", language="en", kind="auto",
+                         segments=[Segment(n * 4.0, n * 4.0 + 4, text)
+                                   for n, text in enumerate(lines)],
+                         raw_file=None)
+        index_video_dir(layout, vdir, playlist_id="P1", title="V")
+        layouts.append(layout)
+    def best(hits: list[dict]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for hit in hits:
+            out[hit["library_id"]] = min(out.get(hit["library_id"], 0.0), hit["rank"])
+        return out
+
+    raw = best(search(layouts, "fugue", 10))
+    assert len(set(raw.values())) == 2  # each index scores its own way
+    assert set(best(search(layouts, "fugue", 10, normalize=True)).values()) == {-1.0}
+
+
 def test_continue_resumes_the_video_left_part_way(tmp_path: Path) -> None:
     layout = make_library(tmp_path)
     add_playlist(layout, "P1", "One", [(f"v{n}", f"V{n}") for n in range(1, 7)])

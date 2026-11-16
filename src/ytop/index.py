@@ -1200,20 +1200,24 @@ class LibraryIndex:
         self._last_derived = result
         return dict(result)
 
-    def search_meta(self, query: str, limit: int = 100) -> list[MetaHit]:
+    def search_meta(
+        self, query: str, limit: int = 100, *, per_playlist: int | None = None
+    ) -> list[MetaHit]:
         """Videos whose title, description, channel or playlist title match.
 
-        Best matches first (title weighs most).  A locked or damaged index
-        returns an empty list.
+        Best matches first (title weighs most).  With ``per_playlist``, at
+        most that many per playlist, and each playlist's best hit comes
+        before any playlist's next one (so ``limit`` cuts the least useful).
+        A locked or damaged index returns an empty list.
         """
         from .transcripts.store import fts_query
 
         expression = fts_query(query)
         if not expression:
             return []
-        limit = max(1, min(int(limit), 1000))
+        limit = max(1, min(int(limit), 5000))
         result = self._guarded(
-            lambda conn: self._search_meta(conn, expression, limit),
+            lambda conn: self._search_meta(conn, expression, limit, per_playlist),
             lambda: [],
             timeout=READ_TIMEOUT_S,
         )
@@ -1221,27 +1225,78 @@ class LibraryIndex:
 
     @staticmethod
     def _search_meta(
-        conn: sqlite3.Connection, expression: str, limit: int
+        conn: sqlite3.Connection,
+        expression: str,
+        limit: int,
+        per_playlist: int | None = None,
     ) -> list[MetaHit]:
         from .transcripts.store import SNIPPET_END, SNIPPET_START
 
-        rows = conn.execute(
-            """
-            SELECT video_id, playlist_id,
-                   bm25(idx_video_fts, 10.0, 1.0, 3.0, 4.0) AS rank,
-                   snippet(idx_video_fts, 0, ?1, ?2, '…', 18) AS s_title,
-                   snippet(idx_video_fts, 1, ?1, ?2, '…', 18) AS s_desc,
-                   snippet(idx_video_fts, 2, ?1, ?2, '…', 18) AS s_channel,
-                   snippet(idx_video_fts, 3, ?1, ?2, '…', 18) AS s_playlist
-            FROM idx_video_fts
-            WHERE idx_video_fts MATCH ?3
-            ORDER BY rank
-            LIMIT ?4
-            """,
-            (SNIPPET_START, SNIPPET_END, expression, limit),
-        ).fetchall()
+        columns = """
+            video_id, playlist_id,
+            snippet(idx_video_fts, 0, ?1, ?2, '…', 18) AS s_title,
+            snippet(idx_video_fts, 1, ?1, ?2, '…', 18) AS s_desc,
+            snippet(idx_video_fts, 2, ?1, ?2, '…', 18) AS s_channel,
+            snippet(idx_video_fts, 3, ?1, ?2, '…', 18) AS s_playlist
+        """
+        rows: list = []
+        ranks: list[float] = []
+        if per_playlist is None:
+            rows = conn.execute(
+                f"""
+                SELECT {columns},
+                       bm25(idx_video_fts, 10.0, 1.0, 3.0, 4.0) AS rank
+                FROM idx_video_fts
+                WHERE idx_video_fts MATCH ?3
+                ORDER BY rank
+                LIMIT ?4
+                """,
+                (SNIPPET_START, SNIPPET_END, expression, limit),
+            ).fetchall()
+            ranks = [float(row["rank"]) for row in rows]
+        else:
+            # Each playlist's best few, every playlist's best hit before any
+            # playlist's second: one playlist's many matches cannot crowd
+            # the others out of ``limit``.  Snippets are made only for the
+            # rows picked.
+            picked = conn.execute(
+                """
+                SELECT rid, rank FROM (
+                    SELECT rid, rank, row_number() OVER (
+                        PARTITION BY playlist_id ORDER BY rank
+                    ) AS n
+                    FROM (
+                        SELECT rowid AS rid, playlist_id,
+                               bm25(idx_video_fts, 10.0, 1.0, 3.0, 4.0) AS rank
+                        FROM idx_video_fts
+                        WHERE idx_video_fts MATCH ?1
+                        ORDER BY rank
+                    )
+                )
+                WHERE n <= ?2
+                ORDER BY n, rank
+                LIMIT ?3
+                """,
+                (expression, max(1, int(per_playlist)), limit),
+            ).fetchall()
+            if picked:
+                marks = ",".join("?" for _ in picked)
+                by_rowid = {
+                    row["rid"]: row
+                    for row in conn.execute(
+                        f"SELECT rowid AS rid, {columns} FROM idx_video_fts "
+                        f"WHERE idx_video_fts MATCH ?3 AND rowid IN ({marks})",
+                        (SNIPPET_START, SNIPPET_END, expression,
+                         *(row["rid"] for row in picked)),
+                    )
+                }
+                for row in picked:
+                    found = by_rowid.get(row["rid"])
+                    if found is not None:
+                        rows.append(found)
+                        ranks.append(float(row["rank"]))
         hits = []
-        for row in rows:
+        for row, rank in zip(rows, ranks):
             field, raw = "title", str(row["s_title"] or "")
             for name, column in (
                 ("title", "s_title"), ("description", "s_desc"),
@@ -1259,7 +1314,7 @@ class LibraryIndex:
                 html=escaped.replace(SNIPPET_START, "<mark>").replace(
                     SNIPPET_END, "</mark>"
                 ),
-                rank=float(row["rank"]),
+                rank=rank,
                 playlist_match=SNIPPET_START in str(row["s_playlist"] or ""),
             ))
         return hits

@@ -90,6 +90,9 @@ log = logging.getLogger(__name__)
 
 
 TAGS_READ_ONLY_MESSAGE = "This library is read-only, so its tags can't be changed."
+# A tag edit refused with EACCES/EPERM is tried again after these pauses: on
+# Windows a virus scanner or indexer briefly holding tags.json looks the same.
+TAG_EDIT_RETRY_S = (0.1, 0.25)
 TAGS_DAMAGED_MESSAGE = "The tags file on this library is damaged; nothing was changed."
 
 
@@ -178,6 +181,21 @@ def _recover_libraries(refs: list[LibraryRef]) -> None:
             recover_rename_journal(ref.layout)
         except OSError as exc:
             log.warning("could not recover %s: %s", ref.root, exc)
+
+
+def _tags_writable(ref: LibraryRef) -> bool:
+    """Tag edits can be saved: not a newer-schema library, and its data
+    folder (where tags.json is replaced) is writable as far as the OS says.
+    A locked stick or read-only mount hides the tag controls."""
+    if ref.read_only:
+        return False
+    data_dir = ref.layout.data_dir
+    try:
+        if not data_dir.is_dir():
+            return os.access(ref.layout.ytop_dir, os.W_OK)
+        return os.access(data_dir, os.W_OK)
+    except OSError:
+        return False
 
 
 def _unplug_needs_quit() -> bool:
@@ -913,7 +931,7 @@ def create_app(
             effective_category=effective_cat,
             tag_vocabulary=vocabulary,
             category_names=category_names,
-            can_edit_tags=ref is not None and not ref.read_only,
+            can_edit_tags=ref is not None and _tags_writable(ref),
         )
 
     @app.post("/playlist/{playlist_id}/title")
@@ -932,18 +950,29 @@ def create_app(
         return TagStore(ref.layout)
 
     def edit_tags(change: Callable[[], None]) -> None:
-        try:
-            change()
-        except CorruptDocumentError as exc:
-            raise HTTPException(status_code=409, detail=TAGS_DAMAGED_MESSAGE) from exc
-        except OSError as exc:
-            # A locked stick, a read-only mount or a folder without write
-            # permission: the same answer as a newer-schema library.
-            if exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+        # Every tag edit is idempotent and saved atomically, so a refused
+        # attempt can simply be repeated.
+        for pause in (*TAG_EDIT_RETRY_S, None):
+            try:
+                change()
+                return
+            except CorruptDocumentError as exc:
                 raise HTTPException(
-                    status_code=409, detail=TAGS_READ_ONLY_MESSAGE
+                    status_code=409, detail=TAGS_DAMAGED_MESSAGE
                 ) from exc
-            raise
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM) and pause is not None:
+                    # Perhaps a brief lock (Windows), not a locked stick.
+                    time.sleep(pause)
+                    continue
+                # A locked stick, a read-only mount or a folder without
+                # write permission: the same answer as a newer-schema
+                # library.
+                if exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+                    raise HTTPException(
+                        status_code=409, detail=TAGS_READ_ONLY_MESSAGE
+                    ) from exc
+                raise
 
     def tag_target(playlist_id: str) -> tuple[LibraryRef, str]:
         refuse_ambiguous(playlist_id)
@@ -1018,7 +1047,7 @@ def create_app(
             tags=tags,
             hidden_tags=hidden,
             renamed_tags=renamed,
-            can_edit_tags=not ref.read_only,
+            can_edit_tags=_tags_writable(ref),
         )
 
     @app.post("/tags/{library_id}/{action}")

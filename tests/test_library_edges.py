@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -11,12 +12,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
-from factories import lib_root
+from factories import add_playlist, lib_root, library_set, make_library
 from test_jobs import _manager, _two_libraries, fake_probe, wait_for
 from ytop.layout import LibraryLayout
 from ytop.libraries import RecoveryDeferred
+from ytop.tags import TagStore
 from ytop.web import jobs as jobs_module
+from ytop.web.app import create_app
 from ytop.web.jobs import PAUSED, JobManager
 from ytop.yt.download import FetchResult
 from ytop.yt.metadata import write_json
@@ -249,4 +253,73 @@ def test_resume_recovers_a_deferred_library_first(tmp_path: Path, monkeypatch):
     assert resumed.status == "queued"
     assert wait_for(manager, job.id, {"done", "failed"}).status == "done"
     manager.close()
+
+
+# -- tag edits -------------------------------------------------------------
+def _post(client: TestClient, path: str, **data: str):
+    data["csrf_token"] = client.app.state.csrf_token
+    return client.post(path, data=data, follow_redirects=False)
+
+
+@posix_perms
+def test_unwritable_library_hides_tag_controls(tmp_path: Path):
+    layout = make_library(tmp_path, "Locked")
+    add_playlist(layout, "P1", "Zebra lectures", [("v1", "Stripes")])
+    libs = library_set(layout)
+    client = TestClient(create_app(layout.root, libraries=libs))
+    try:
+        assert "Add a tag" in client.get("/playlist/P1").text
+        mode = layout.data_dir.stat().st_mode
+        layout.data_dir.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        try:
+            page = client.get("/playlist/P1").text
+            tags = client.get("/tags").text
+        finally:
+            layout.data_dir.chmod(mode)
+        assert "Add a tag" not in page
+        assert 'action="/tags/' not in tags
+    finally:
+        client.app.state.jobs.close()
+
+
+def test_tag_edit_retries_a_brief_lock(tmp_path: Path, monkeypatch):
+    layout = make_library(tmp_path, "Shared")
+    add_playlist(layout, "P1", "Zebra lectures", [("v1", "Stripes")])
+    real_add = TagStore.add
+    calls = {"n": 0}
+
+    def flaky(self, pid, tag):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError(errno.EACCES, "locked by another process")
+        return real_add(self, pid, tag)
+
+    monkeypatch.setattr(TagStore, "add", flaky)
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    try:
+        response = _post(client, "/playlist/P1/tags", action="add", tag="maths")
+        assert response.status_code == 303
+        assert calls["n"] == 2
+        assert "maths" in layout.tags_file.read_text()
+    finally:
+        client.app.state.jobs.close()
+
+
+def test_tag_edit_on_a_read_only_mount_does_not_retry(tmp_path: Path, monkeypatch):
+    layout = make_library(tmp_path, "Mounted")
+    add_playlist(layout, "P1", "Zebra lectures", [("v1", "Stripes")])
+    calls = {"n": 0}
+
+    def readonly(self, pid, tag):
+        calls["n"] += 1
+        raise OSError(errno.EROFS, "read-only file system")
+
+    monkeypatch.setattr(TagStore, "add", readonly)
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    try:
+        response = _post(client, "/playlist/P1/tags", action="add", tag="maths")
+        assert response.status_code == 409
+        assert calls["n"] == 1
+    finally:
+        client.app.state.jobs.close()
 

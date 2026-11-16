@@ -22,8 +22,13 @@
 </head>
 <body>
   <main>
+    {% if saving %}
+    <h1>{{ product_name }} is still saving to the drive. Don't unplug it yet.</h1>
+    <p>Wait a minute, then reload this page. If it no longer loads, {{ product_name }} has finished and the drive can be unplugged; otherwise choose Quit again.</p>
+    {% else %}
     <h1>{{ product_name }} has stopped. It's safe to unplug.</h1>
     <p>You can close this tab. Start {{ product_name }} again from the stick to keep watching.</p>
+    {% endif %}
   </main>
 </body>
 </html>

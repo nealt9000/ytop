@@ -22,12 +22,18 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ytop.fsnames import plan_names, safe_name
 from ytop.layout import UNGROUPED_FOLDER, UNGROUPED_ID, LibraryLayout
 from ytop.transcripts.store import read_transcript, segments_from_doc
-from ytop.yt.metadata import fsync_dir, read_json, write_json
+from ytop.yt.metadata import (
+    fsync_dir,
+    quarantine_document,
+    read_json,
+    read_json_document,
+    write_json,
+)
 
 log = logging.getLogger(__name__)
 
@@ -192,10 +198,31 @@ def _fsync_dirs(dirs: set[Path]) -> None:
         fsync_dir(directory)
 
 
+def _safe_relative(value: object) -> bool:
+    """A non-empty media-relative path that cannot leave the media root."""
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _valid_ops(journal: dict) -> list[dict]:
+    ops = []
+    raw = journal.get("ops")
+    for op in raw if isinstance(raw, list) else []:
+        if isinstance(op, dict) and all(
+            _safe_relative(op.get(key)) for key in ("src", "tmp", "dst")
+        ):
+            ops.append(op)
+        else:
+            log.warning("ignoring invalid rename journal entry %r", op)
+    return ops
+
+
 def _finish_journal(layout: LibraryLayout, journal: dict) -> int:
     """Run the remaining phases of a journal; returns renames completed."""
     base = layout.media_root
-    ops = [op for op in journal.get("ops") or [] if isinstance(op, dict)]
+    ops = _valid_ops(journal)
     if journal.get("phase") == 1:
         touched: set[Path] = set()
         for op in ops:
@@ -270,10 +297,13 @@ def _run_batch(
 
 
 def _finish_pending(layout: LibraryLayout) -> int:
-    journal = read_json(layout.rename_journal)
-    if journal is None:
+    doc = read_json_document(layout.rename_journal)
+    if doc.data is None:
+        # Keep an unreadable journal for the owner instead of letting the
+        # next batch overwrite it.
+        quarantine_document(layout.rename_journal, doc)
         return 0
-    return _finish_journal(layout, journal)
+    return _finish_journal(layout, doc.data)
 
 
 def _referenced_media(
@@ -344,7 +374,10 @@ def _sweep_publish_orphans(layout: LibraryLayout) -> None:
         if _is_referenced(layout.relative_media(path), referenced, stems):
             continue
         target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(path, target_dir / path.name)
+        target = target_dir / path.name
+        while os.path.lexists(target):
+            target = target_dir / f"{uuid.uuid4().hex[:8]}-{path.name}"
+        shutil.move(path, target)
         log.warning("moved orphaned download %s to %s", path, target_dir)
 
 

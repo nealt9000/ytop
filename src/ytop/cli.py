@@ -550,31 +550,43 @@ def _portable_instance(args, root: Path, serve_kwargs: dict) -> int | None:
     )
     claim_timeout = 0.0
     live = instance.read_live()
-    if live is not None:
-        decision = instance.decide(mine, live)
-        if decision == "takeover":
-            status = instance.post(live, "/api/instance/shutdown")
-            if status == 409:  # a download started meanwhile
-                decision = "open_and_offer"
-            else:
-                print(f"Replacing the older YTOP {live.version} that was running "
-                      "(it finishes writing to its drive first)…", flush=True)
-                # It flushes its drives before letting go, and a slow stick's
-                # final sync can take many seconds; both waits end early.
-                instance.wait_port_free(live.port, TAKEOVER_WAIT_S)
-                claim_timeout = TAKEOVER_WAIT_S
-        if decision == "open":
-            return _open_existing(args, live)
-        if decision == "open_and_offer":
-            return _open_existing(args, live, offer_from=_stick_name(root))
-    if not instance.claim_wait(info, claim_timeout):
+    # A launch that loses the lock to a concurrent one waits for it to come
+    # up and then decides again (it may be older and idle: take it over).
+    claimed = False
+    for _round in range(3):
+        if live is not None:
+            decision = instance.decide(mine, live)
+            if decision == "takeover":
+                status = instance.post(live, "/api/instance/shutdown")
+                if status == 409:  # a download started meanwhile
+                    decision = "open_and_offer"
+                else:
+                    print(f"Replacing the older YTOP {live.version} that was running "
+                          "(it finishes writing to its drive first)…", flush=True)
+                    # It flushes its drives before letting go, and a slow stick's
+                    # final sync can take many seconds; both waits end early.
+                    instance.wait_port_free(live.port, TAKEOVER_WAIT_S)
+                    claim_timeout = TAKEOVER_WAIT_S
+            if decision == "open":
+                return _open_existing(args, live)
+            if decision == "open_and_offer":
+                return _open_existing(args, live, offer_from=_stick_name(root))
+        if instance.claim_wait(info, claim_timeout):
+            claimed = True
+            break
         # Another launch holds the lock; give it a moment to come up.
+        live = None
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             live = instance.read_live()
             if live is not None:
-                return _open_existing(args, live)
+                break
             time.sleep(0.2)
+        if live is None:
+            break
+    if not claimed and live is not None:  # rounds used up: just show it
+        return _open_existing(args, live)
+    if not claimed:
         print("serve failed: another YTOP is starting; try again",
               file=sys.stderr)
         return 1

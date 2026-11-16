@@ -695,6 +695,9 @@ def _publish_staging(plan: MovePlan) -> None:
     moved_media = False
     if media_stage.is_dir():
         _owner_marker(media_stage, plan.staging).touch()
+        # The marker must reach the disk before the folder is published:
+        # without it a crash leaves an orphan reconcile won't remove.
+        _synced(media_stage)
         plan.dest_media.parent.mkdir(parents=True, exist_ok=True)
         os.rename(media_stage, plan.dest_media)
         _synced(plan.staging, plan.dest_media.parent)
@@ -706,6 +709,7 @@ def _publish_staging(plan: MovePlan) -> None:
     except Exception:
         if moved_media:
             os.rename(plan.dest_media, media_stage)
+            _synced(plan.dest_media.parent, plan.staging)
         raise
     _owner_marker(plan.dest_media, plan.staging).unlink(missing_ok=True)
 
@@ -789,6 +793,7 @@ def _rename_move(
             except Exception:
                 if moved_media and owned_dir is not None:
                     os.rename(plan.dest_media, owned_dir)
+                    _synced(plan.dest_media.parent, owned_dir.parent)
                 raise
         except Exception:
             _drop_staging(plan.staging, meta_root)

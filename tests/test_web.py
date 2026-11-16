@@ -888,21 +888,38 @@ def test_search_across_libraries(tmp_path: Path):
 
     client = TestClient(create_app(first.root, libraries=libs))
     page = client.get("/search", params={"q": "isomorphism"}).text
-    # The same playlist id lives in both libraries, so links use keys.
-    assert f"/watch/{PLAYLIST_ID}@{first_id[:8]}/vid1?t=" in page
-    assert f"/watch/{PLAYLIST_ID}@{second_id[:8]}/vid1?t=" in page
+    # The same playlist id lives in both libraries, so links use keys,
+    # quoted like the video result links ("@" -> "%40").
+    assert f"/watch/{PLAYLIST_ID}%40{first_id[:8]}/vid1?t=" in page
+    assert f"/watch/{PLAYLIST_ID}%40{second_id[:8]}/vid1?t=" in page
     only = client.get(
         "/search",
         params={"q": "isomorphism", "playlist": f"{PLAYLIST_ID}@{second_id[:8]}"},
     ).text
-    assert f"/watch/{PLAYLIST_ID}@{second_id[:8]}/vid1?t=" in only
-    assert f"@{first_id[:8]}/vid1?t=" not in only
+    assert f"/watch/{PLAYLIST_ID}%40{second_id[:8]}/vid1?t=" in only
+    assert f"%40{first_id[:8]}/vid1?t=" not in only
     client.app.state.jobs.close()
 
 
 def test_search_transcript_hit_keeps_timestamp_url(client: TestClient):
     text = client.get("/search", params={"q": "isomorphism"}).text
     assert f"/watch/{PLAYLIST_ID}/vid1?t=0.000#transcript" in text
+
+
+def test_search_transcript_hit_for_a_missing_video_has_no_watch_link(
+    tmp_path: Path,
+):
+    layout = make_library(tmp_path)
+    make_video(
+        layout, PLAYLIST_ID, "vid2", title="Video Two", index=2, total=2,
+        folder="Playlist One", chapters=False, media=False, duration=50,
+    )
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    text = client.get("/search", params={"q": "isomorphism"}).text
+    assert f"/watch/{PLAYLIST_ID}/vid1?t=0.000#transcript" in text
+    assert "/vid2?t=" not in text
+    assert "Not downloaded" in text
+    client.app.state.jobs.close()
 
 
 def test_search_box_label(client: TestClient):

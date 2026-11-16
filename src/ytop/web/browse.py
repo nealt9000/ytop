@@ -493,6 +493,7 @@ def search_library(
             return None
         return f"/watch/{quote(card.key)}/{quote(video_id)}"
 
+    downloaded: dict[str, set[tuple[str, str]]] = {}
     for item in loaded:
         if not any(key[0] == item.ref.id for key in cards):
             continue
@@ -501,7 +502,7 @@ def search_library(
             (row.playlist_id, v.video_id): v.title
             for row in item.rows for v in row.videos
         }
-        available = {
+        available = downloaded[item.ref.id] = {
             (row.playlist_id, v.video_id)
             for row in item.rows for v in row.videos if v.available
         }
@@ -570,10 +571,12 @@ def search_library(
         trow["title"] = item.video_titles.get(trow["video_id"]) or trow["title"]
         trow["playlist_id"] = found.card.key
         trow["playlist_title"] = found.card.title
-        trow["url"] = (
-            f"/watch/{found.card.key}/{trow['video_id']}"
-            f"?t={trow['start']:.3f}#transcript"
+        watch = url(
+            found.card, trow["video_id"],
+            (found.card.playlist_id, trow["video_id"])
+            in downloaded.get(trow["library_id"], set()),
         )
+        trow["url"] = f"{watch}?t={trow['start']:.3f}#transcript" if watch else None
         trow["time_label"] = format_timestamp(trow["start"])
         found.transcript_hits.append(trow)
         found.rank = min(found.rank, float(trow["rank"]))

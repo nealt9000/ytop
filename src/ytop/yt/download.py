@@ -63,6 +63,7 @@ from .probe import (
     extract_video_info,
     probe_playlist,
 )
+from .rawinfo import trim_raw_info
 
 
 @dataclass
@@ -466,8 +467,9 @@ def _process_item(
     vdir.mkdir(parents=True, exist_ok=True)
     existing_meta = read_json(vdir / "meta.json") or {}
 
-    # Keep the raw extractor snapshot before doing anything expensive.
-    write_json(vdir / "raw.json", item.info)
+    # Keep the raw extractor snapshot before doing anything expensive,
+    # without the stream URLs and caption bulk nothing reads back (#5).
+    write_json(vdir / "raw.json", trim_raw_info(item.info))
 
     if not quiet:
         with lock:

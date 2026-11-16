@@ -204,6 +204,16 @@ def test_library_page_lists_playlists(client: TestClient):
     assert "Opus audio" in playlist
 
 
+def test_playlist_card_total_time_counts_every_video(client: TestClient):
+    """Like the library summary hours and the playlist page: vid2 (50 s) is
+    not downloaded but still counts toward the card's total time."""
+    home = client.get("/").text
+    start = home.index(f'data-key="{PLAYLIST_ID}"')
+    card = home[start:home.index("</article>", start)]
+    assert 'data-length="150.0"' in card
+    assert 'data-remaining="100.0"' in card
+
+
 def test_playlist_page_keeps_youtube_order(client: TestClient):
     response = client.get(f"/playlist/{PLAYLIST_ID}")
     assert response.status_code == 200

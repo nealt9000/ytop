@@ -175,10 +175,12 @@ def _card(item: _Loaded, row: PlaylistRow, key: str) -> PlaylistCard:
         position, done, stamp = _state(item.progress, video.video_id)
         if stamp > last:
             last = stamp
-        if not video.available:
-            continue
+        # The total counts every video, as the card's video count, the
+        # playlist page and the library summary hours do.
         duration = video.duration or 0.0
         total_duration += duration
+        if not video.available:
+            continue
         if done:
             watched += 1
             continue

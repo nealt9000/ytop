@@ -1966,7 +1966,7 @@ def test_lock_never_names_the_computer(tmp_path: Path):
         doc = json.loads(text)
     finally:
         ms._release_lock(target)
-    assert set(doc) == {"pid", "started"} and doc["pid"] == os.getpid()
+    assert set(doc) == {"pid", "started", "ticks"} and doc["pid"] == os.getpid()
     assert socket.gethostname() not in text
 
 
@@ -1988,6 +1988,144 @@ def test_lock_with_a_recycled_pid_is_stale(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(ms, "_pid_alive", lambda pid: False)
     monkeypatch.setattr(boot, "pid_alive", lambda pid: False)
     assert not ms._lock_live(target) and not boot.lock_live(target)
+
+
+def test_leftover_lock_with_our_own_recycled_pid_is_stale(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    """A crashed make's lock whose pid is now ours (no start to compare, as
+    on macOS) neither blocks a make nor counts as live (#9)."""
+    from ytop.stick import boot
+
+    monkeypatch.setattr(boot, "process_start_time", lambda pid=None: None)
+    monkeypatch.setattr(boot, "process_start_ticks", lambda pid=None: None)
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    lock = target / ms.LOCK
+    lock.write_text(json.dumps({"pid": os.getpid(), "started": None}))
+    assert not ms._lock_live(target)
+    plan = ms.plan_make(target, image, library, platforms=["linux-x86_64"])
+    ms.run_make(plan, image, library, lambda update: None)
+    assert not lock.exists()
+    assert read_library(target) is not None
+    # Our own lock, taken by this process, is live (an app update holds it).
+    ms._acquire_lock(target)
+    try:
+        assert ms._lock_live(target)
+        with pytest.raises(ms.MakeStickError, match="another YTOP"):
+            ms._acquire_lock(target)
+    finally:
+        ms._release_lock(target)
+    assert not lock.exists()
+
+
+def test_two_breakers_of_one_stale_lock_never_both_win(tmp_path: Path, monkeypatch):
+    """Another process breaks the same stale lock first and takes it: ours
+    must not delete its fresh lock, and must report the stick busy (#9)."""
+    target = new_target(tmp_path)
+    lock = target / ms.LOCK
+    lock.write_text(json.dumps({"pid": 4242, "started": None}))
+    old = time.time() - 120
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(ms, "_pid_alive", lambda pid: pid == 5151)
+    theirs = json.dumps({"pid": 5151, "started": None})
+
+    def rival_breaks_first() -> None:
+        lock.unlink()  # it broke the stale lock...
+        lock.write_text(theirs)  # ...and took its own
+
+    with pytest.raises(ms.MakeStickError, match="another YTOP"):
+        ms._acquire_lock(target, before_break=rival_breaks_first)
+    assert lock.read_text() == theirs  # put back, untouched
+    assert sorted(p.name for p in target.iterdir()) == [ms.LOCK]  # nothing aside
+
+    # Without a rival, the stale lock is broken and taken.
+    lock.write_text(json.dumps({"pid": 4242, "started": None}))
+    ms._acquire_lock(target)
+    try:
+        assert json.loads(lock.read_text())["pid"] == os.getpid()
+    finally:
+        ms._release_lock(target)
+
+
+def test_release_leaves_a_lock_another_process_took(tmp_path: Path):
+    target = new_target(tmp_path)
+    ms._acquire_lock(target)
+    theirs = json.dumps({"pid": 5151, "started": None})
+    (target / ms.LOCK).write_text(theirs)  # ours was broken and retaken
+    ms._release_lock(target)
+    assert (target / ms.LOCK).read_text() == theirs
+
+
+def test_an_unreadable_lock_is_held_while_it_may_be_being_written(tmp_path: Path):
+    """A torn (or half-written) lock: held at first, stale once old (#9)."""
+    target = new_target(tmp_path)
+    lock = target / ms.LOCK
+    lock.write_text("")  # another process between O_EXCL and its write
+    assert ms._lock_live(target)
+    with pytest.raises(ms.MakeStickError, match="another YTOP"):
+        ms._acquire_lock(target)
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    assert not ms._lock_live(target)
+    ms._acquire_lock(target)
+    ms._release_lock(target)
+    assert not lock.exists()
+
+
+def test_lock_liveness_compares_start_ticks_not_the_wall_clock(
+    tmp_path: Path, monkeypatch,
+):
+    """Linux: a wall-clock step (NTP after boot) moves a process's computed
+    start time but not its start ticks; the ticks decide (#9)."""
+    from ytop.stick import boot
+
+    target = new_target(tmp_path)
+    monkeypatch.setattr(ms, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(boot, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(boot, "process_start_ticks", lambda pid=None: 777)
+    # The clock jumped an hour since the lock was written.
+    monkeypatch.setattr(boot, "process_start_time", lambda pid=None: 4600.0)
+    doc = {"pid": 4242, "started": 1000.0, "ticks": 777}
+    (target / ms.LOCK).write_text(json.dumps(doc))
+    assert ms._lock_live(target) and boot.lock_live(target)
+    # Same start time but other ticks: a recycled pid.
+    doc = {"pid": 4242, "started": 4600.0, "ticks": 778}
+    (target / ms.LOCK).write_text(json.dumps(doc))
+    assert not ms._lock_live(target) and not boot.lock_live(target)
+    # Ticks unknown here (another OS read the lock): the start time decides.
+    monkeypatch.setattr(boot, "process_start_ticks", lambda pid=None: None)
+    assert ms._lock_live(target) and boot.lock_live(target)
+
+
+def test_boot_cleanup_never_breaks_a_lock_another_process_just_took(
+    tmp_path: Path, monkeypatch,
+):
+    """boot.py judges a lock stale, then a make takes the stick before it
+    breaks it: the make's fresh lock and its folders stay (#9)."""
+    from ytop.stick import boot
+
+    target = new_target(tmp_path)
+    lock = target / ms.LOCK
+    stale = json.dumps({"pid": 4242, "started": None}).encode()
+    lock.write_bytes(stale)
+    old = time.time() - 120
+    os.utime(lock, (old, old))
+    seen = boot.read_lock(lock)
+    theirs = json.dumps({"pid": 5151, "started": None})
+
+    def rival_breaks_first() -> None:
+        lock.unlink()
+        lock.write_text(theirs)
+
+    assert not boot.break_stale_lock(lock, seen, before=rival_breaks_first)
+    assert lock.read_text() == theirs
+    assert sorted(p.name for p in target.iterdir()) == [ms.LOCK]
+    # The very file judged stale goes.
+    lock.write_bytes(stale)
+    os.utime(lock, (old, old))
+    assert boot.break_stale_lock(lock, boot.read_lock(lock))
+    assert not lock.exists()
 
 
 def test_component_merge_reports_files_and_bytes(tmp_path: Path, image: Path):

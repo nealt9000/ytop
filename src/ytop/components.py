@@ -59,6 +59,7 @@ from .stick.boot import (
     CURRENT_JSON,
     PYTHON_COMPONENTS,
     component_paths,
+    process_start_ticks,
     read_current_doc,
     version_dir,
 )
@@ -703,10 +704,15 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def marker_live(pid: int, started: float | None) -> bool:
-    """The process that wrote a marker is still running."""
+def marker_live(pid: int, started: float | None, ticks: int | None = None) -> bool:
+    """The process that wrote a marker is still running (compared by raw
+    start ticks where known: a wall-clock step does not move those)."""
     if not pid_alive(pid):
         return False
+    if ticks is not None:
+        now_ticks = process_start_ticks(pid)
+        if now_ticks is not None:
+            return now_ticks == ticks
     if started is None:
         return True
     from .startup import process_start_time
@@ -732,7 +738,10 @@ def write_in_use(ytop: Path, folders: Iterable[Path]) -> Path | None:
         return None
     marker = _marker(ytop)
     temp = marker.with_name(marker.name + TEMP_SUFFIX)
-    doc = {"pid": os.getpid(), "started": process_start_time(), "folders": sorted(set(rel))}
+    doc = {
+        "pid": os.getpid(), "started": process_start_time(),
+        "ticks": process_start_ticks(), "folders": sorted(set(rel)),
+    }
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         with open(temp, "w", encoding="utf-8") as handle:
@@ -783,10 +792,12 @@ def in_use_folders(ytop: Path) -> set[str]:
             pid = int(doc["pid"])
             raw = doc.get("started")
             started = float(raw) if isinstance(raw, (int, float)) else None
+            raw_ticks = doc.get("ticks")
+            ticks = raw_ticks if type(raw_ticks) is int else None
             folders = [str(f) for f in doc["folders"]]
         except (OSError, ValueError, KeyError, TypeError):
             continue  # garbled: no claim, but not ours to delete
-        if not marker_live(pid, started):
+        if not marker_live(pid, started, ticks):
             _unlink(entry)
             continue
         found.update(folders)

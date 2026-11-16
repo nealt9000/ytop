@@ -595,3 +595,16 @@ def test_merge_compares_pins_by_version_not_spelling(tmp_path: Path):
     comp.merge_newest(source3, target3, PLATS, None)
     assert comp.read_current(target3).current["deno"] == "2.9.8"
     assert comp.is_pinned("2026.11.1", ["2026.11.01"]) and not comp.is_pinned("1.0", ["1.1"])
+
+
+def test_in_use_marker_liveness_compares_start_ticks(monkeypatch):
+    """A wall-clock step must not make a running app's marker look dead
+    (its folders would be pruned under it); a recycled pid is dead (#9)."""
+    import ytop.startup as startup
+
+    monkeypatch.setattr(comp, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(startup, "process_start_time", lambda pid=None: 4600.0)
+    monkeypatch.setattr(comp, "process_start_ticks", lambda pid=None: 777)
+    assert comp.marker_live(4242, 1000.0, 777)  # the clock jumped an hour
+    assert not comp.marker_live(4242, 4600.0, 778)  # same time, other process
+    assert not comp.marker_live(4242, 1000.0)  # an old marker: the time decides

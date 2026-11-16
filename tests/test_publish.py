@@ -468,3 +468,25 @@ def test_rename_journal_not_a_dict_is_set_aside(tmp_path):
     assert recover_rename_journal(layout) == 0
     assert not layout.rename_journal.exists()
     assert list(layout.data_dir.glob("rename-journal.json.corrupt-*"))
+
+
+def test_one_clashing_name_does_not_block_the_rest_of_a_sync(tmp_path):
+    layout = make_library(tmp_path)
+    add_playlist(layout, "PL1", "Mix", [("v1", "First"), ("v2", "Second")],
+                 media=False)
+    foreign = layout.media_root / "Mix" / "01 - First.webm"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"foreign")
+
+    publish_download(layout, "PL1", "v1", _stage(tmp_path, "a.webm", b"one"))
+    publish_download(layout, "PL1", "v2", _stage(tmp_path, "b.webm", b"two"))
+    report = sync_playlist_files(layout, "PL1")
+
+    assert report.errors
+    assert foreign.read_bytes() == b"foreign"
+    second = layout.resolve_media(_media_ref(layout, "PL1", "v2"))
+    assert second == layout.media_root / "Mix" / "02 - Second.webm"
+    assert second.read_bytes() == b"two"
+    first = layout.resolve_media(_media_ref(layout, "PL1", "v1"))
+    assert first is not None and first.read_bytes() == b"one"
+    assert not layout.rename_journal.exists()

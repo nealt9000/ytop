@@ -264,25 +264,56 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _blocked(dst: Path, sources: list[Path]) -> bool:
+    """``dst`` holds a file that this batch does not move away."""
+    if not os.path.lexists(dst) or dst in sources:
+        return False
+    # A case-only rename on a case-insensitive volume is not a clash.
+    return not any(_same_file(dst, src) for src in sources)
+
+
 def _run_batch(
-    layout: LibraryLayout, ops: list[tuple[Path, Path]], report: SyncReport
+    layout: LibraryLayout,
+    ops: list[tuple[Path, Path]],
+    report: SyncReport,
+    *,
+    partial: bool = False,
+    groups: dict[Path, int] | None = None,
 ) -> bool:
+    """Run ``ops`` as one journalled batch; never renames onto a file.
+
+    A clash refuses the whole batch, or with ``partial`` only the ops it
+    blocks (directly, or by keeping a source in place), so one foreign file
+    does not leave every other name in a playlist unsynced.  ``groups`` maps
+    a source to a group number; a blocked op holds back its whole group (a
+    media file and its ``.srt`` files keep matching names)."""
+    groups = groups or {}
     if _finish_pending(layout):
         # A pending batch moved files after these ops were planned.
         ops = [(src, dst) for src, dst in ops if os.path.lexists(src)]
     ops = [(src, dst) for src, dst in ops if src != dst]
     if not ops:
         return True
-    sources = [src for src, _ in ops]
-    for _, dst in ops:
-        if not os.path.lexists(dst) or dst in sources:
-            continue
-        if any(_same_file(dst, src) for src in sources):
-            continue  # case-only rename on a case-insensitive volume
-        report.errors.append(
-            f"not renaming onto existing file {layout.relative_media(dst)}"
-        )
-        return False
+    clean = True
+    while True:
+        sources = [src for src, _ in ops]
+        blocked = [(src, dst) for src, dst in ops if _blocked(dst, sources)]
+        if not blocked:
+            break
+        clean = False
+        for _, dst in blocked:
+            report.errors.append(
+                f"not renaming onto existing file {layout.relative_media(dst)}"
+            )
+        if not partial:
+            return False
+        held = {groups[src] for src, _ in blocked if src in groups}
+        ops = [
+            op for op in ops
+            if op not in blocked and groups.get(op[0], -1) not in held
+        ]
+    if not ops:
+        return clean
     entries = []
     for i, (src, dst) in enumerate(ops):
         tmp = dst.parent / f"{TMP_PREFIX}{i}-{uuid.uuid4().hex[:8]}{dst.suffix}"
@@ -293,7 +324,7 @@ def _run_batch(
         })
     write_json(layout.rename_journal, {"phase": 1, "ops": entries})
     report.renamed += _finish_journal(layout, {"phase": 1, "ops": entries})
-    return True
+    return clean
 
 
 def _finish_pending(layout: LibraryLayout) -> int:
@@ -475,6 +506,7 @@ def sync_playlist_files(layout: LibraryLayout, playlist_id: str) -> SyncReport:
     stems = plan_names(rows, numbered=playlist_id != UNGROUPED_ID)
 
     ops: list[tuple[Path, Path]] = []
+    groups: dict[Path, int] = {}
     scheduled: set[Path] = set()
     for video_id, _ in rows:
         media = _owned_media(layout, folder_rel, metas[video_id])
@@ -487,9 +519,11 @@ def sync_playlist_files(layout: LibraryLayout, playlist_id: str) -> SyncReport:
         if media == target:
             continue
         ops.append((media, target))
+        groups[media] = len(scheduled)
         for srt, lang in _srt_siblings(media):
             ops.append((srt, folder / f"{stem}.{lang}.srt"))
-    _run_batch(layout, ops, report)
+            groups[srt] = len(scheduled)
+    _run_batch(layout, ops, report, partial=True, groups=groups)
 
     captioned: set[Path] = set()
     for video_id, _ in rows:

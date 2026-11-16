@@ -1240,6 +1240,53 @@ def test_tidy_never_runs_under_a_live_lock_or_a_switch_to_repair(
     assert (yt / ms.PREVIOUS_DROP).exists()
 
 
+def test_tidy_keeps_a_valid_copy_it_cannot_read_just_now(stick: Path, server, monkeypatch):
+    """A read that fails for another reason than "not there" (a slow stick,
+    a file an antivirus holds) is no verdict: the copy stays."""
+    from pathlib import Path as RealPath
+
+    yt = stick / ".ytop"
+    assert _install(stick, server).status == "updated"
+    found = appupdate.previous_version(yt)
+    assert found is not None and appupdate.previous_verdict(yt) == "valid"
+    mark = yt / ms.PREVIOUS / ms.PREVIOUS_MARK
+    real_read = RealPath.read_text
+
+    def flaky(self, *args, **kwargs):
+        if self == mark:
+            raise PermissionError(13, "in use by another process")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(RealPath, "read_text", flaky)
+    assert appupdate.previous_verdict(yt) == "unknown"
+    assert appupdate.tidy_previous(yt) is False
+    monkeypatch.undo()
+    # An unreadable build.json of the stick is no verdict either.
+    real_sha = appupdate.sha256_file
+
+    def eio(path):
+        if RealPath(path) == yt / "build.json":
+            raise OSError(5, "I/O error")
+        return real_sha(path)
+
+    monkeypatch.setattr(appupdate, "sha256_file", eio)
+    assert appupdate.previous_verdict(yt) == "unknown"
+    assert appupdate.tidy_previous(yt) is False
+    monkeypatch.undo()
+    assert appupdate.previous_version(yt) == found
+
+
+def test_tidy_deletes_a_copy_for_another_build(stick: Path, server):
+    yt = stick / ".ytop"
+    assert _install(stick, server).status == "updated"
+    assert appupdate.previous_verdict(yt) == "valid"
+    _set_build(yt, build_id="209912312359-other00")  # e.g. a crash, then a make
+    assert appupdate.previous_verdict(yt) == "invalid"
+    assert appupdate.tidy_previous(yt) is True
+    assert not (yt / ms.PREVIOUS).exists()
+    assert appupdate.previous_verdict(yt) == "none"
+
+
 def test_tidy_runs_at_start_on_a_stick(stick: Path, monkeypatch):
     yt = stick / ".ytop"
     (yt / ms.PREVIOUS_DROP).mkdir()

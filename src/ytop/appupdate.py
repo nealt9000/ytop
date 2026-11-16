@@ -711,18 +711,48 @@ def keeps_previous(ytop: Path) -> bool:
     return ms.read_trusted_manifest(ytop) is not None
 
 
+def previous_verdict(ytop: Path) -> str:
+    """``"valid"``, ``"invalid"`` or ``"unknown"`` for ``ytop/previous``
+    (``"none"`` when there is none).  Read only.  ``"invalid"`` only on a
+    definitive verdict: no mark (it is written last, so the copy was never
+    finished), or a mark that reads fine naming another ``build.json`` than
+    the stick's, which reads fine too.  Anything that cannot be read for
+    another reason (a slow stick, a file an antivirus holds) is
+    ``"unknown"``, and an unknown copy is never deleted."""
+    previous = ytop / ms.PREVIOUS
+    if not os.path.lexists(previous):
+        return "none"
+    if not previous.is_dir() or previous.is_symlink():
+        return "invalid"
+    try:
+        text = (previous / ms.PREVIOUS_MARK).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "invalid"
+    except OSError:
+        return "unknown"
+    try:
+        mark = json.loads(text)
+        have = sha256_file(ytop / "build.json")
+    except (OSError, ValueError):
+        return "unknown"
+    named = mark.get("build_sha256") if isinstance(mark, dict) else None
+    if not isinstance(named, str):
+        return "unknown"
+    if named != have:
+        return "invalid"
+    return "valid" if ms.read_previous(ytop) is not None else "unknown"
+
+
 def tidy_previous(ytop: Path) -> bool:
     """Delete what a crash after a switch's commit point can leave inside
-    ``.ytop``: a ``previous.del`` and a ``previous/`` that is no valid
-    rollback copy (:func:`ytop.makestick.read_previous`; it is never
+    ``.ytop``: a ``previous.del`` and a ``previous/`` that is definitely
+    no valid rollback copy (:func:`previous_verdict`; it is never
     offered).  Only under the stick's lock, never while a switch is still
     to be repaired; best effort, never raises.  True if it tidied."""
     previous, drop = ytop / ms.PREVIOUS, ytop / ms.PREVIOUS_DROP
 
     def stale() -> bool:
-        return os.path.lexists(drop) or (
-            os.path.lexists(previous) and ms.read_previous(ytop) is None
-        )
+        return os.path.lexists(drop) or previous_verdict(ytop) == "invalid"
 
     target = ytop.parent
     try:
@@ -738,7 +768,7 @@ def tidy_previous(ytop: Path) -> bool:
             try:
                 if not stale():  # looked at again under the lock
                     return False
-                if os.path.lexists(previous) and ms.read_previous(ytop) is None:
+                if previous_verdict(ytop) == "invalid":
                     remove_tree_best_effort(previous)
                 remove_tree_best_effort(drop)
             finally:

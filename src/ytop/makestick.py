@@ -33,6 +33,10 @@ anything on the stick changes.  In every switch ``app/`` leaves
 An upgrade never touches ``library.json``, ``data/``, ``config.toml``,
 ``cache/`` or ``YTOP Library/``.
 
+Every make and upgrade (self mode too) leaves ``.metadata_never_index`` and
+``.fseventsd/no_log`` at the drive root, so a Mac neither indexes the stick
+nor logs its file events there (:func:`_write_mac_markers`).
+
 **Self mode** (:func:`plan_self_upgrade`, used by :mod:`ytop.appupdate`):
 the running stick upgrades itself from a downloaded update staged on it,
 ``<stick>/.ytop.making-src/``.  The staged image holds only the release
@@ -81,7 +85,7 @@ from typing import Literal
 
 from . import fsinfo
 from .components import merge_newest, merge_size
-from .layout import LibraryInfo, read_library
+from .layout import LibraryInfo, _hide, read_library
 from .libraries import PROBE_TIMEOUT_S, LibrarySet, _mount_candidates
 from .manifest import (
     LEGAL_FILES,
@@ -154,6 +158,13 @@ SOURCE_WARNING = (
 INTERNAL_WARNING = (
     "This folder is on this computer's own disk, not on a removable drive."
 )
+# At the drive root: macOS neither indexes the volume (Spotlight) nor logs
+# its file events (fseventsd) there, so a Mac writes far less to the stick.
+# Both are empty and inert on Windows and Linux.
+NEVER_INDEX = ".metadata_never_index"
+FSEVENTSD = ".fseventsd"
+NO_LOG = "no_log"
+SPOTLIGHT = ".Spotlight-V100"
 
 Mode = Literal["new", "upgrade"]
 
@@ -1558,6 +1569,36 @@ def _running_launcher() -> str | None:
     return "Start YTOP (Windows).cmd" if sys.platform == "win32" else None
 
 
+def _write_mac_markers(target: Path) -> None:
+    """Best effort, never fails a make: put the macOS markers at the drive
+    root (hidden on Windows), and off a Mac delete what Spotlight and
+    fseventsd already wrote there (with the markers in place a Mac does not
+    rebuild it).  On a Mac the volume is mounted and in use by them, so
+    their folders are left alone; the markers count from the next mount."""
+    fseventsd = target / FSEVENTSD
+    for path in (target / NEVER_INDEX, fseventsd / NO_LOG):
+        try:
+            path.parent.mkdir(exist_ok=True)
+            if not path.is_file():
+                path.write_bytes(b"")
+        except OSError:
+            pass
+    for path in (target / NEVER_INDEX, fseventsd):
+        try:
+            _hide(path)
+        except (OSError, AttributeError):
+            pass
+    if sys.platform == "darwin":
+        return
+    remove_tree_best_effort(target / SPOTLIGHT)
+    try:
+        logs = [p for p in fseventsd.iterdir() if p.name != NO_LOG]
+    except OSError:
+        logs = []
+    for log in logs:
+        remove_tree_best_effort(log)
+
+
 def _write_launchers(
     target: Path, templates: Path, label: str, build_id: str, *, running: bool = False,
 ) -> None:
@@ -1749,6 +1790,7 @@ def _run(
         clear_old(target)
         drop_previous(target / ".ytop")  # it no longer matches
     remove_tree_best_effort(target / MAKING)
+    _write_mac_markers(target)
     if plan.image_root is not None:
         warnings: list[str] = []  # self mode: the stick keeps its own store
         merged_bytes = merged_files = 0

@@ -2133,3 +2133,84 @@ def test_make_stick_job_shows_component_warnings(tmp_path: Path, image: Path, mo
     assert "the stick was pulled out" in job.notice
     assert "the stick was pulled out" in client.get(location).text
     assert "the stick was pulled out" in client.get("/downloads").text
+
+
+def _mac_leftovers(target: Path) -> None:
+    """What a Mac writes to a stick it mounts (issue #17)."""
+    store = target / ".Spotlight-V100" / "Store-V2" / "UUID"
+    store.mkdir(parents=True)
+    (store / "live.0.indexPostings").write_bytes(b"x" * 64)
+    (target / ".fseventsd").mkdir(exist_ok=True)
+    (target / ".fseventsd" / "fseventsd-uuid").write_text("uuid\n")
+    (target / ".fseventsd" / "0000000000123abc").write_bytes(b"log")
+    (target / "._README.txt").write_bytes(b"\x00\x05\x16\x07appledouble")
+
+
+def _assert_mac_markers(target: Path) -> None:
+    assert (target / ".metadata_never_index").read_bytes() == b""
+    assert (target / ".fseventsd" / "no_log").read_bytes() == b""
+
+
+def test_new_stick_tells_macos_not_to_index_it(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    make(target, image, library, platforms=["linux-x86_64"], label="A")
+    _assert_mac_markers(target)
+    assert sorted(p.name for p in (target / ".fseventsd").iterdir()) == ["no_log"]
+
+
+def test_new_stick_over_mac_leftovers(tmp_path: Path, image: Path):
+    """Spotlight's and fseventsd's folders and AppleDouble files are no
+    foreign files; what a Mac wrote is cleared, ``._*`` files stay."""
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    _mac_leftovers(target)
+    make(target, image, library, platforms=["linux-x86_64"], label="A")
+    _assert_mac_markers(target)
+    assert not (target / ".Spotlight-V100").exists()
+    assert sorted(p.name for p in (target / ".fseventsd").iterdir()) == ["no_log"]
+    assert (target / "._README.txt").is_file()
+
+
+def test_upgrade_adds_mac_markers_and_clears_the_index(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    make(target, image, library, platforms=PLATS, label="Old")
+    # A stick made before the markers existed, then plugged into a Mac.
+    (target / ".metadata_never_index").unlink()
+    shutil.rmtree(target / ".fseventsd")
+    _mac_leftovers(target)
+    newer = second_image(tmp_path)
+    plan = ms.plan_make(target, newer, library, platforms=PLATS)
+    assert plan.mode == "upgrade"
+    ms.run_make(plan, newer, library, lambda update: None)
+    _assert_mac_markers(target)
+    assert not (target / ".Spotlight-V100").exists()
+    assert sorted(p.name for p in (target / ".fseventsd").iterdir()) == ["no_log"]
+    assert (target / "._README.txt").is_file()
+    assert (target / ".ytop/app/ytop/NEW_APP").is_file()
+
+
+def test_on_a_mac_the_live_index_is_left_alone(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    make(target, image, library, platforms=PLATS, label="Old")
+    _mac_leftovers(target)
+    monkeypatch.setattr(ms.sys, "platform", "darwin")
+    ms._write_mac_markers(target)
+    _assert_mac_markers(target)
+    assert (target / ".Spotlight-V100/Store-V2/UUID/live.0.indexPostings").is_file()
+    assert (target / ".fseventsd" / "fseventsd-uuid").is_file()
+
+
+def test_mac_markers_never_fail_a_make(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    (target / ".fseventsd").write_text("not a folder\n")
+    (target / ".metadata_never_index").mkdir()
+    report = make(target, image, library, platforms=["linux-x86_64"], label="A")
+    assert report.mode == "new"
+    assert read_library(target) is not None
+    assert (target / ".fseventsd").read_text() == "not a folder\n"

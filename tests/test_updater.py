@@ -817,3 +817,57 @@ def test_pins_match_any_spelling_of_the_version(ytop: Path, fake: FakeReleases):
     current = comp.read_current(ytop)
     assert current.pinned_bad["yt-dlp"] == ["2026.11.01", "2026.10.26.0"]
     assert "yt-dlp" not in current.current  # lib/common's copy
+
+
+# --- the stick's lock (#9) -----------------------------------------------------------
+
+
+def test_update_takes_the_sticks_lock_and_leaves_another_process_alone(
+    ytop: Path, fake: FakeReleases, monkeypatch,
+):
+    """A CLI ``components update`` and a server on one stick: the second
+    one finds the stick locked, says busy and leaves the other's staging."""
+    import os
+
+    from ytop.stick import boot
+
+    publish(fake)
+    lock = ytop.parent / boot.LOCK
+    other = {"pid": 4242, "started": None, "ticks": None}
+    lock.write_text(json.dumps(other))
+    monkeypatch.setattr(boot, "pid_alive", lambda pid: pid == 4242)
+    staging = ytop / "components" / up.STAGING / "yt-dlp-2026.11.1"
+    staging.mkdir(parents=True)
+    result = run_update(ytop, fake)
+    assert result.status == "busy" and "another YTOP" in result.message
+    assert staging.is_dir()  # the other process's staging is left alone
+    assert json.loads(lock.read_text()) == other
+
+    monkeypatch.setattr(boot, "pid_alive", lambda pid: False)  # it is gone
+    seen: list[bool] = []
+    real = up._update
+
+    def spy(*args, **kwargs):
+        seen.append(json.loads(lock.read_text())["pid"] == os.getpid())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(up, "_update", spy)
+    assert run_update(ytop, fake).status == "updated"
+    assert seen == [True]  # held while updating
+    assert not lock.exists()  # and let go
+
+
+def test_update_inside_an_app_update_reuses_its_lock(ytop: Path, fake: FakeReleases):
+    """The app update holds the stick's lock and updates components in it."""
+    from ytop import sticklock
+    from ytop.stick import boot
+
+    publish(fake)
+    lock = ytop.parent / boot.LOCK
+    sticklock.acquire(lock, lambda: AssertionError("busy"))
+    try:
+        assert run_update(ytop, fake).status == "updated"
+        assert sticklock.held(lock) and lock.exists()  # still the app update's
+    finally:
+        sticklock.release(lock)
+    assert not lock.exists()

@@ -179,3 +179,17 @@ def test_save_config_never_writes_cookies(tmp_path: Path):
     assert loaded.jobs == 2
     assert loaded.audio_language == "en-GB"
     assert loaded.transcripts == cfg.transcripts
+
+
+def test_save_config_keeps_paths_pot_and_web(tmp_path: Path):
+    _write_cfg(
+        tmp_path,
+        "[paths]\ndetect_removable = false\n[pot]\nprovider = \"off\"\n"
+        "[web]\nport = 9999\nopen_browser = true\n",
+    )
+    cfg = load_config(tmp_path)
+    save_config(tmp_path, cfg)
+    again = load_config(tmp_path)
+    assert again.detect_removable is False
+    assert again.pot_provider == "off"
+    assert again.web.port == 9999 and again.web.open_browser is True

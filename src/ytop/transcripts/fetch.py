@@ -98,6 +98,20 @@ def _update_meta(video_dir: Path, *, doc: dict, raw_file: str) -> None:
         write_json(video_dir / "meta.json", meta)
 
 
+def _export_srt(layout: LibraryLayout, playlist_id: str, label: str) -> None:
+    """Export transcripts as ``.srt`` files beside the media."""
+    # Imported here: ``ytop.publish`` imports the transcript store, which
+    # loads this package.
+    from .. import publish
+
+    try:
+        report = publish.sync_playlist_files(layout, playlist_id)
+        for problem in report.errors:
+            log.warning("srt export for %s: %s", label, problem)
+    except Exception as exc:  # noqa: BLE001 - the transcript is still stored
+        log.warning("srt export for %s failed: %s", label, exc)
+
+
 def fetch_video_transcript(
     video_dir: Path,
     *,
@@ -109,7 +123,10 @@ def fetch_video_transcript(
     index: bool = True,
     retries: int | None = None,
     backoff_s: float | None = None,
+    sync_files: bool = True,
 ) -> TranscriptResult:
+    """Fetch one video's transcript.  ``sync_files=False`` skips the
+    playlist-wide ``.srt`` export; a batch caller then syncs once."""
     video_dir = Path(video_dir)
     meta = read_json(video_dir / "meta.json") or {}
     video_id = str(meta.get("id") or video_dir.name)
@@ -255,16 +272,8 @@ def fetch_video_transcript(
     if meta:
         _update_meta(video_dir, doc=doc, raw_file=raw_file)
 
-    # Export the transcript as an .srt beside the media.  Imported here:
-    # ``ytop.publish`` imports the transcript store, which loads this package.
-    from ..publish import sync_playlist_files
-
-    try:
-        report = sync_playlist_files(layout, playlist_id)
-        for problem in report.errors:
-            log.warning("srt export for %s: %s", video_id, problem)
-    except Exception as exc:  # noqa: BLE001 - the transcript is still stored
-        log.warning("srt export for %s failed: %s", video_id, exc)
+    if sync_files:
+        _export_srt(layout, playlist_id, video_id)
 
     if index:
         try:
@@ -327,6 +336,8 @@ def fetch_playlist_transcripts(
             index=do_index,
             retries=retries,
             backoff_s=backoff_s,
+            # One sync for the whole batch, not one per video (O(n^2)).
+            sync_files=False,
         )
         results.append(result)
         if show_progress:
@@ -343,6 +354,8 @@ def fetch_playlist_transcripts(
         if delay and position < len(needed):
             time.sleep(delay)
 
+    if any(result.status == "fetched" for result in results):
+        _export_srt(layout, playlist_id, playlist_id)
     write_playlist_summary(playlist_dir, playlist, results)
     return results
 
@@ -352,7 +365,19 @@ def write_playlist_summary(
     playlist: dict,
     results: list[TranscriptResult],
 ) -> dict:
-    playlist_dir = Path(playlist_dir)
+    # playlist.json is read, changed and rewritten here; a concurrent publish
+    # or folder rename must not interleave with it.
+    from ..publish import PUBLISH_LOCK
+
+    with PUBLISH_LOCK:
+        return _write_playlist_summary(Path(playlist_dir), playlist, results)
+
+
+def _write_playlist_summary(
+    playlist_dir: Path,
+    playlist: dict,
+    results: list[TranscriptResult],
+) -> dict:
     path = playlist_dir / SUMMARY_FILE
     previous = read_json(path) or {}
     rows = {

@@ -19,11 +19,19 @@ def safe_name(value: str, limit: int = 100, fallback: str = "Untitled") -> str:
     text = _WS.sub(" ", text).strip(" .")
     if not text:
         return fallback
-    head, dot, tail = text.partition(".")
-    if head.strip().upper() in _RESERVED:
-        text = f"{head}_{dot}{tail}"
+    # Truncate first: cutting "CONSOLE" to three characters must not
+    # produce the reserved "CON".
     text = text[:limit].rstrip(" .")
+    head, dot, tail = text.partition(".")
+    if _reserved(head):
+        text = f"{head}_{dot}{tail}"[:limit].rstrip(" .")
+        if _reserved(text.partition(".")[0]):  # the "_" did not fit
+            text = head.strip()[: max(1, limit - 1)] + "_"
     return text or fallback
+
+
+def _reserved(head: str) -> bool:
+    return head.strip().upper() in _RESERVED
 
 
 def numbered_stem(index: int, total: int, title: str) -> str:
@@ -40,7 +48,8 @@ def plan_names(rows: list[tuple[str, str]], numbered: bool) -> dict[str, str]:
     for index, (video_id, title) in enumerate(rows, start=1):
         stem = numbered_stem(index, total, title) if numbered else safe_name(title)
         if stem.casefold() in seen:
-            stem = f"{stem} [{video_id}]"
+            suffix = f" [{video_id}]"
+            stem = stem[: max(1, _MAX_STEM - len(suffix))].rstrip(" .") + suffix
         seen.add(stem.casefold())
         result[video_id] = stem
     return result

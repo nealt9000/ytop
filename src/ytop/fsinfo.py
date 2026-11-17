@@ -42,10 +42,11 @@ def _linux_fs_info(path: Path) -> FsInfo:
             continue
         mount = _unescape(parts[1]).rstrip("/") or "/"
         if mount == "/" or target == mount or target.startswith(mount + "/"):
-            if len(mount) > best_len:
+            # >=: a later entry on the same mount point shadows earlier ones.
+            if len(mount) >= best_len:
                 best_len = len(mount)
                 best_type = parts[2]
-    if best_type == "vfat":
+    if best_type.lower() in ("msdos", "vfat"):
         return FsInfo("vfat", FAT32_MAX_FILE)
     return FsInfo(best_type, None)
 

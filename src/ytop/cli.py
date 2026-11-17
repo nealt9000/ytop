@@ -659,7 +659,7 @@ def cmd_init(args) -> int:
     from .layout import init_library
 
     root = Path(args.path).expanduser()
-    label = args.label if args.label is not None else (root.name or "Library")
+    label = (args.label or "").strip() or root.name or "Library"
     try:
         info = init_library(root, label, args.description or "")
     except OSError as exc:
@@ -696,7 +696,7 @@ def cmd_migrate(args) -> int:
     for path in plan.dropped_partials:
         print(f"  {path}")
     if plan.unscanned:
-        print(f"not readable, will not be migrated: {len(plan.unscanned)}")
+        print(f"will not be migrated (left behind): {len(plan.unscanned)}")
         for path, reason in plan.unscanned:
             print(f"  {path}  ({reason})")
     for warning in plan.warnings:

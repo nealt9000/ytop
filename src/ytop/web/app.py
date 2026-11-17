@@ -911,6 +911,8 @@ def create_app(
             playlist_id = lib.create_playlist(
                 title, selections, library_id=library_id or None
             )
+        except ReadOnlyLibraryError:
+            raise  # 409 from the handler, not a form error
         except (OSError, ValueError) as exc:
             return render(
                 request,
@@ -1762,6 +1764,8 @@ def create_app(
                     url, preserve,
                     library_id or str(form.get("location") or "").strip() or None,
                 )
+            except ReadOnlyLibraryError:
+                raise
             except Exception as exc:  # noqa: BLE001 - shown on the page
                 return reject(f"Could not start the probe: {exc}")
             app.state.jobs.set_notice(job.id, notice)
@@ -1777,6 +1781,8 @@ def create_app(
                 preserve_audio=preserve,
                 library_id=library_id,
             )
+        except ReadOnlyLibraryError:
+            raise
         except Exception as exc:  # noqa: BLE001 - shown on the page
             return reject(f"Could not start the probe: {exc}")
         return RedirectResponse(f"/add/{job.id}", status_code=303)

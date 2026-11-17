@@ -645,3 +645,68 @@ def test_unconnected_storage_location_is_listed(tmp_path):
     marker = (old / "MIGRATED.txt").read_text(encoding="utf-8")
     assert str(gone) in marker and "Gone" in marker
     assert "Remove this folder" not in marker
+
+
+def test_user_playlist_titled_un_grouped_gets_its_own_folder(tmp_path):
+    old = tmp_path / "old"
+    make_old_playlist(old, "PLU", "Un-grouped", videos=(("p1", "Mine"),))
+    make_old_playlist(old, "un-grouped", "Un-grouped",
+                      videos=(("u1", "Loose"),), kind="ungrouped")
+    target = tmp_path / "new"
+    run_migration(plan_migration(old, target), target)
+    layout = _layout(target)
+    user = _media_of(layout, "PLU", "p1")
+    loose = _media_of(layout, "un-grouped", "u1")
+    assert user is not None and loose is not None
+    assert user.parent != loose.parent
+    assert loose.parent.name == "Un-grouped"
+
+
+def test_stray_files_in_old_playlists_are_left_behind(tmp_path):
+    old = tmp_path / "old"
+    make_old_playlist(old, "PLA", "Fine", videos=(("v1", "One"),))
+    stray = old / "playlists" / "notes.txt"
+    stray.write_text("keep", encoding="utf-8")
+    target = tmp_path / "new"
+    report = run_migration(plan_migration(old, target), target)
+    assert any(str(stray) in item for item in report.left_behind)
+    assert stray.read_text(encoding="utf-8") == "keep"
+
+
+def test_unreadable_storage_location_is_listed_not_raised(tmp_path, monkeypatch):
+    old = tmp_path / "old"
+    make_old_playlist(old, "PLA", "Fine", videos=(("v1", "One"),))
+    extra = tmp_path / "extra"
+    (extra / "playlists").mkdir(parents=True)
+    write_json(old / "storage.json", {
+        "schema": 1, "default": "local",
+        "locations": [{"id": "loc-2", "path": str(extra), "label": "Extra"}],
+    })
+    real_iterdir = Path.iterdir
+
+    def iterdir(self):
+        if self == extra / "playlists":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    plan = plan_migration(old, tmp_path / "new")
+    assert [p.id for p in plan.playlists] == ["PLA"]
+    assert [path for path, _ in plan.unscanned] == [extra]
+
+
+def test_run_migration_refuses_a_newer_schema_target(tmp_path):
+    from ytop.layout import init_library
+
+    old = tmp_path / "old"
+    make_old_playlist(old, "PLA", "Fine", videos=(("v1", "One"),))
+    target = tmp_path / "new"
+    init_library(target, "New")
+    marker = LibraryLayout(target).marker
+    doc = read_json(marker)
+    doc["schema"] = 99
+    write_json(marker, doc)
+    plan = plan_migration(old, target)
+    with pytest.raises(ValueError, match="newer"):
+        run_migration(plan, target)
+    assert not LibraryLayout(target).playlist_meta_dir("PLA").exists()

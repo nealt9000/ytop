@@ -805,6 +805,50 @@ def test_crash_between_copy_publish_renames_keeps_an_unmarked_folder(
     assert Library(libs).media_path(PLAYLIST_ID, "vid1") is not None
 
 
+@pytest.mark.parametrize("same_device", [True, False])
+def test_a_rolled_back_media_rename_is_fsynced(
+    tmp_path: Path, monkeypatch, same_device: bool,
+):
+    """When the metadata rename fails, the media folder is renamed back and
+    both directories that rollback touched are fsynced (#10)."""
+    import os
+
+    from ytop.web import fsops
+
+    _force_device(monkeypatch, same_device)
+    home, usb, libs, usb_ref = two_libraries(tmp_path, usb_playlist=False)
+    library = Library(libs)
+    source_meta = home.playlist_meta_dir(PLAYLIST_ID)
+    events: list[tuple] = []
+    real_rename = os.rename
+
+    def rename(src, dst):
+        src, dst = Path(src), Path(dst)
+        is_meta = src == source_meta or (
+            src.name == "meta" and src.parent.name.startswith(".ytopmove-")
+        )
+        if is_meta:
+            raise OSError("stick yanked")
+        real_rename(src, dst)
+        events.append(("rename", src, dst))
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(
+        fsops, "fsync_dir", lambda path: events.append(("fsync", Path(path)))
+    )
+    manager = JobManager(library, start_workers=False)
+    job = manager.move_playlist(PLAYLIST_ID, usb_ref.id)
+    manager._run_move_work(job.id)
+
+    assert manager.get(job.id).status == "failed"
+    renames = [i for i, event in enumerate(events) if event[0] == "rename"]
+    assert len(renames) == 2  # out, then back
+    _, back_src, back_dst = events[renames[-1]]
+    synced = {event[1] for event in events[renames[-1] + 1:] if event[0] == "fsync"}
+    assert {back_src.parent, back_dst.parent} <= synced
+    assert library.media_path(PLAYLIST_ID, "vid1") is not None
+
+
 def test_move_route_page_and_conflicts(tmp_path: Path, monkeypatch):
     home, usb, libs, usb_ref = two_libraries(tmp_path, usb_playlist=False)
     add_playlist(usb, "PLCLASH", "Clash", [("vid9", "Nine")])

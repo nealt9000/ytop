@@ -203,6 +203,159 @@ def test_takeover_shutdown_check_and_close_are_atomic(tmp_path):
         assert app.state.server.should_exit is False
 
 
+def test_a_signal_during_a_takeover_flush_waits_for_it(tmp_path, monkeypatch):
+    """SIGINT/SIGTERM makes uvicorn run the lifespan shutdown; while a
+    takeover's background flush runs, it must not release the instance
+    (and let the process exit) before the flush has finished (#10)."""
+    app, _home, _libs = _app(tmp_path, instance_token="secret")
+    release = threading.Event()
+    go = threading.Event()  # the lifespan waits, or it released too early
+    synced: list[bool] = []
+    released_after_sync: list[bool] = []
+
+    def slow_sync() -> None:
+        release.wait(10)
+        synced.append(True)
+
+    class Server:
+        should_exit = False
+
+        @property
+        def force_exit(self) -> bool:
+            go.set()  # polled only while the lifespan waits for the flush
+            return False
+
+    def hook() -> None:
+        released_after_sync.append(synced == [True])
+        go.set()
+
+    monkeypatch.setattr(app_module, "_sync_filesystems", slow_sync)
+    app.state.shutdown_hooks.append(hook)
+    app.state.server = Server()
+    releaser = threading.Thread(target=lambda: go.wait(10) and release.set())
+    releaser.start()
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/instance/shutdown", headers={"X-YTOP-Token": "secret"}
+        ).status_code == 202
+        # Leaving the block runs the lifespan shutdown, as a signal would.
+    releaser.join(5)
+    assert released_after_sync == [True]
+
+
+def test_a_second_ctrl_c_stops_waiting_for_the_flush(tmp_path, monkeypatch):
+    """uvicorn's force quit (a second Ctrl+C) must still get out (#10)."""
+    app, _home, _libs = _app(tmp_path, instance_token="secret")
+    release = threading.Event()
+    monkeypatch.setattr(app_module, "_sync_filesystems", lambda: release.wait(10))
+    app.state.server = SimpleNamespace(should_exit=False, force_exit=True)
+    try:
+        with TestClient(app) as client:
+            assert client.post(
+                "/api/instance/shutdown", headers={"X-YTOP-Token": "secret"}
+            ).status_code == 202
+        assert not release.is_set()  # left while the flush still ran
+    finally:
+        release.set()
+    assert _wait_for(lambda: app.state.server.should_exit is True)
+
+
+def test_second_quit_after_a_too_long_flush_does_not_say_safe(
+    tmp_path, monkeypatch,
+):
+    """A Quit that gives up waiting for a flush already under way must not
+    say "safe to unplug" (#10)."""
+    app, _home, _libs = _app(tmp_path, instance_token="secret")
+    release = threading.Event()
+    monkeypatch.setattr(app_module, "_sync_filesystems", lambda: release.wait(10))
+    monkeypatch.setattr(app_module, "QUIT_FLUSH_WAIT_S", 0.0)
+    try:
+        with TestClient(app) as client:
+            assert client.post(
+                "/api/instance/shutdown", headers={"X-YTOP-Token": "secret"}
+            ).status_code == 202
+            response = client.post("/api/quit")
+            assert response.status_code == 200
+            assert "It's safe to unplug." not in response.text
+            assert "Don't unplug it yet." in response.text
+            release.set()
+            assert _wait_for(lambda: app.state.server.should_exit is True)
+            # Once the flush is done, Quit says so.
+            assert "It's safe to unplug." in client.post("/api/quit").text
+    finally:
+        release.set()
+
+
+def test_quit_survives_a_failing_request_stop(tmp_path, _no_host_sync):
+    """A failure while stopping the server is logged; the flush already
+    happened, so Quit still answers with its page (#10)."""
+    app, _home, _libs = _app(tmp_path)
+
+    def broken() -> None:
+        raise RuntimeError("no server")
+
+    app.state.request_stop = broken
+    with TestClient(app) as client:
+        response = client.post("/api/quit")
+        assert response.status_code == 200
+        assert "safe to unplug" in response.text
+        assert _no_host_sync == [True]
+
+
+def test_a_stop_requested_before_the_server_exists_is_kept(tmp_path, monkeypatch):
+    """SIGHUP (window closed) in the moment before ``serve`` assigns the
+    server still stops it once it does (#10)."""
+    import uvicorn
+
+    app, _home, _libs = _app(tmp_path)
+    app.state.server = None
+    app.state.request_stop()
+    seen: list[bool] = []
+
+    class FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+
+        def run(self, sockets=None):
+            seen.append(self.should_exit)
+
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    app_module._run_server(app, "127.0.0.1", 0)
+    assert seen == [True]
+
+
+def test_idle_exit_never_cancels_a_job_that_just_started(tmp_path):
+    """A job that starts after the idle check counted none keeps running:
+    idle exit stops nothing while a job is active (#10)."""
+    now = [0.0]
+    app, _home, libs = _app(
+        tmp_path, portable=True, clock=lambda: now[0],
+        idle_timeout_s=300.0, idle_check_s=0.01,
+    )
+    manager = app.state.jobs
+    job = _add_job(app, libs.default().id, status="queued")
+    real_close = manager.close
+    decided = threading.Event()
+    calls: list[bool] = []
+
+    def close(only_if_idle: bool = False) -> bool:
+        calls.append(only_if_idle)
+        decided.set()
+        return real_close(only_if_idle=only_if_idle)
+
+    manager.close = close
+    with TestClient(app):
+        manager.list = lambda: []  # the idle check's count sees nothing
+        now[0] = 1000.0
+        assert decided.wait(5)
+        assert calls[0] is True
+        assert manager._jobs[job.id].status == "queued"
+        assert app.state.stopping is False
+        assert app.state.server.should_exit is False
+        with manager._lock:
+            manager._jobs[job.id].status = "done"
+
+
 def test_heartbeat_endpoint(tmp_path):
     now = [1000.0]
     app, _home, _libs = _app(tmp_path, clock=lambda: now[0])
@@ -641,6 +794,57 @@ def test_late_plugged_library_move_job_reconciled(tmp_path):
         assert job["status"] == "failed"
         assert job["move_phase"] == "staging"
         assert not staging.exists()
+
+
+def _seen_usb(tmp_path, libs, client):
+    usb = _usb(tmp_path)
+    write_json(libs.registry_path, {"schema": 1, "libraries": [str(usb.root)]})
+    libs.refresh()
+    client.get("/")
+    ref = next(r for r in libs.libraries() if r.root == usb.root)
+    return usb, ref
+
+
+def test_recovering_a_known_library_rereads_its_jobs(tmp_path):
+    """A stick unplugged and plugged back in before the job manager noticed
+    is recovered again: its jobs file (changed elsewhere) is read (#10)."""
+    app, _home, libs = _app(tmp_path)
+    with TestClient(app) as client:
+        usb, ref = _seen_usb(tmp_path, libs, client)
+        manager = app.state.jobs
+        assert ref.id in manager._refs
+        write_json(usb.jobs_file, {"schema": 1, "jobs": [{
+            "id": "elsewhere1", "kind": "playlist", "status": "done",
+            "playlist_id": "PLX", "library_id": ref.id,
+        }]})
+        manager.recover_library(ref)
+        assert manager.get("elsewhere1") is not None
+
+
+def test_a_library_finishing_recovery_mid_look_is_not_paused(
+    tmp_path, monkeypatch,
+):
+    """A library that finishes recovery between the job manager's listing
+    (which hides it) and its recovery check is still online: its waiting
+    jobs are not paused (#10)."""
+    app, _home, libs = _app(tmp_path)
+    with TestClient(app) as client:
+        usb, ref = _seen_usb(tmp_path, libs, client)
+        job = _add_job(app, ref.id, status="queued")
+        listed: list[bool] = []
+        real_libraries = libs.libraries
+
+        def libraries(refresh: bool = False):
+            listed.append(True)
+            return [r for r in real_libraries() if r.id != ref.id]  # hidden
+
+        # Recovering until the listing returns, then done.
+        monkeypatch.setattr(libs, "libraries", libraries)
+        monkeypatch.setattr(
+            libs, "recovering", lambda: set() if listed else {ref.id}
+        )
+        app.state.jobs._load_new_libraries()
+        assert app.state.jobs._jobs[job.id].status == "queued"
 
 
 # -- durability --------------------------------------------------------------

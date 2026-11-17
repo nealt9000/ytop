@@ -508,6 +508,7 @@ def create_app(
             idle_stop.set()
             if idle_thread is not None:
                 idle_thread.join(timeout=5)
+            wait_for_flush()
             # Workers must have exited before the process can disappear, so a
             # restart never sees a half-written playlist or a stale job.
             application.state.jobs.close()
@@ -538,8 +539,12 @@ def create_app(
     # path: the instance shutdown endpoint (and Quit/idle exit) call
     # ``app.state.request_stop()``.
     app.state.server = None
+    app.state.stop_requested = False
 
     def request_stop() -> None:
+        # Remembered first: a stop asked for before ``serve`` assigns the
+        # server (SIGHUP right after launch) is applied by ``_run_server``.
+        app.state.stop_requested = True
         server = app.state.server
         if server is not None:
             server.should_exit = True
@@ -563,6 +568,9 @@ def create_app(
     idle_stop = threading.Event()
     quit_lock = threading.Lock()
     quit_done = threading.Event()  # set once the final flush has finished
+    # A final flush (Quit's or an app update's) has started / finished.
+    flush_started = threading.Event()
+    flush_done = threading.Event()
 
     def active_job_count() -> int:
         return sum(1 for job in app.state.jobs.list() if job.active)
@@ -600,6 +608,7 @@ def create_app(
         return True
 
     def finish_quit() -> None:
+        flush_started.set()
         try:
             app.state.jobs.close()
             for ref in libs.libraries():
@@ -609,8 +618,28 @@ def create_app(
         except Exception:
             log.exception("flushing before quit failed")
         finally:
+            flush_done.set()
             quit_done.set()
+            stop_server()
+
+    def stop_server() -> None:
+        try:
             app.state.request_stop()
+        except Exception:
+            log.exception("could not stop the server")
+
+    def wait_for_flush() -> None:
+        """Hold the lifespan shutdown (and so the process exit) until a
+        final flush under way has finished: SIGINT/SIGTERM during a
+        takeover's background flush must not cut it short.  uvicorn's
+        force quit (a second Ctrl+C) stops waiting."""
+        if not flush_started.is_set():
+            return
+        while not flush_done.wait(0.1):
+            server = app.state.server
+            if server is not None and getattr(server, "force_exit", False):
+                log.warning("force quit before the drives were flushed")
+                return
 
     app.state.quit = quit_now
 
@@ -630,6 +659,7 @@ def create_app(
         # From here on the app's own files may be moved: pages render from
         # the templates already loaded, never re-read from disk.
         templates.env.auto_reload = False
+        flush_started.set()
         try:
             for ref in libs.libraries():
                 if not ref.read_only:
@@ -637,6 +667,8 @@ def create_app(
             _sync_filesystems()
         except Exception:
             log.exception("flushing before the update failed")
+        finally:
+            flush_done.set()
 
     def install_finished(result: InstallResult) -> None:
         """The update is done (or undone): if jobs were stopped for it, say
@@ -649,7 +681,7 @@ def create_app(
             pass  # no console
         releases.shown.wait(APP_UPDATE_SHOW_S)
         quit_done.set()
-        app.state.request_stop()
+        stop_server()
 
     def watch_idle() -> None:
         while not idle_stop.wait(idle_check_s):
@@ -657,9 +689,10 @@ def create_app(
                 return
             silent = clock() - app.state.last_heartbeat
             if silent > idle_timeout_s and active_job_count() == 0:
-                log.info("no page open for %.0f s; stopping", silent)
-                quit_now()
-                return
+                # Not forced: a job that started since the count wins.
+                if quit_now(force=False):
+                    log.info("no page open for %.0f s; stopped", silent)
+                    return
 
     launch_at_start = home if home is not None and home.is_launch else None
     runs_from_cache = portable and _runs_from_cache()
@@ -1944,10 +1977,13 @@ def create_app(
         if count and not force:
             return busy(count)
         # Rendered before anything stops: the page needs nothing afterwards.
-        page = templates.get_template("stopped.html").render()
+        stopped = templates.get_template("stopped.html")
+        page, saving = stopped.render(), stopped.render(saving=True)
         if not await run_in_threadpool(quit_now, force):
             return busy(max(active_job_count(), 1))
-        return Response(page, media_type="text/html")
+        # A flush already under way that outlasted the wait: not safe yet.
+        done = quit_done.is_set()
+        return Response(page if done else saving, media_type="text/html")
 
     @app.get("/api/instance", dependencies=[Depends(require_token)])
     def instance_status():
@@ -2145,6 +2181,8 @@ def _run_server(
         )
     )
     app.state.server = server
+    if getattr(app.state, "stop_requested", False):
+        server.should_exit = True  # asked for before the server existed
     server.run(sockets=[sock] if sock is not None else None)
 
 

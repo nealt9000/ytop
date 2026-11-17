@@ -272,3 +272,38 @@ def test_add_menu_closes_when_focus_leaves() -> None:
     body = text[text.index("export function initAddMenu"):text.index("// -- dialogs")]
     assert '"focusout"' in body
     assert "menu.contains(next)" in body
+
+
+def test_unfiltered_videos_page_is_capped(tmp_path: Path, monkeypatch) -> None:
+    from ytop.web import app as app_module
+
+    monkeypatch.setattr(app_module, "UNFILTERED_VIDEO_LIMIT", 4)
+    layout = _layout(tmp_path)  # five videos in two playlists
+    client = _client(layout)
+    text = client.get("/videos").text
+    assert "5 videos in 2 playlists" in text
+    assert "Showing the first 4." in text
+    assert text.count('<li class="browse-video') == 4
+    # A filter is not capped.
+    TagStore(layout).add("P1", "Counterpoint")
+    TagStore(layout).add("P2", "Counterpoint")
+    tagged = client.get("/videos", params={"tag": "counterpoint"}).text
+    assert tagged.count('<li class="browse-video') == 5
+    assert "Showing the first" not in tagged
+    client.app.state.jobs.close()
+
+
+def test_home_count_is_not_announced_on_load(tmp_path: Path) -> None:
+    client = _client(_layout(tmp_path))
+    text = client.get("/").text
+    count = re.search(r'<span class="list-count" id="browse-count"[^>]*>', text)
+    assert count and 'role="status"' not in count.group(0)
+    # browse.js makes it live only after its first render.
+    browse = (STATIC_JS / "browse.js").read_text()
+    assert 'count.setAttribute("role", "status")' in browse[browse.rindex("render();"):]
+    client.app.state.jobs.close()
+
+
+def test_library_edit_form_next_is_url_encoded() -> None:
+    template = (STATIC_JS.parents[1] / "templates/library.html").read_text()
+    assert 'name="next" value="/?library={{ s.id|urlencode }}"' in template

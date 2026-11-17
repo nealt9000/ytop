@@ -175,10 +175,12 @@ def _card(item: _Loaded, row: PlaylistRow, key: str) -> PlaylistCard:
         position, done, stamp = _state(item.progress, video.video_id)
         if stamp > last:
             last = stamp
-        if not video.available:
-            continue
+        # The total counts every video, as the card's video count, the
+        # playlist page and the library summary hours do.
         duration = video.duration or 0.0
         total_duration += duration
+        if not video.available:
+            continue
         if done:
             watched += 1
             continue
@@ -502,6 +504,7 @@ def search_library(
             return None
         return f"/watch/{quote(card.key)}/{quote(video_id)}"
 
+    downloaded: dict[str, set[tuple[str, str]]] = {}
     for item in loaded:
         if not any(key[0] == item.ref.id for key in cards):
             continue
@@ -510,7 +513,7 @@ def search_library(
             (row.playlist_id, v.video_id): v.title
             for row in item.rows for v in row.videos
         }
-        available = {
+        available = downloaded[item.ref.id] = {
             (row.playlist_id, v.video_id)
             for row in item.rows for v in row.videos if v.available
         }
@@ -543,9 +546,13 @@ def search_library(
             found = group(item.ref.id, hit.playlist_id)
             if found is None:
                 continue
+            if hit.field == "playlist" and item.playlist_titles.get(hit.playlist_id):
+                # Matched only the stored title of a playlist shown under a
+                # custom one: not a match for what the page displays.
+                continue
             rank = hit.rank / scale
             found.rank = min(found.rank, rank)
-            if hit.playlist_match:
+            if hit.playlist_match and not item.playlist_titles.get(hit.playlist_id):
                 found.playlist_matched = True
             if hit.field == "playlist":
                 continue
@@ -584,10 +591,12 @@ def search_library(
         trow["title"] = item.video_titles.get(trow["video_id"]) or trow["title"]
         trow["playlist_id"] = found.card.key
         trow["playlist_title"] = found.card.title
-        trow["url"] = (
-            f"/watch/{found.card.key}/{trow['video_id']}"
-            f"?t={trow['start']:.3f}#transcript"
+        watch = url(
+            found.card, trow["video_id"],
+            (found.card.playlist_id, trow["video_id"])
+            in downloaded.get(trow["library_id"], set()),
         )
+        trow["url"] = f"{watch}?t={trow['start']:.3f}#transcript" if watch else None
         trow["time_label"] = format_timestamp(trow["start"])
         found.transcript_hits.append(trow)
         found.rank = min(found.rank, float(trow["rank"]))

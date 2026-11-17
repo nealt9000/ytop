@@ -116,12 +116,15 @@ function baseMetricsText(job) {
       return text;
     }
     if (job.active) {
-      let text = `${fmtBytes(job.move_bytes)} of ${fmtBytes(job.move_total_bytes)}`;
-      if (job.move_total_files) {
-        text += ` · ${job.move_files}/${job.move_total_files} files`;
+      // Checking and switching count files only (total bytes 0): no
+      // "0 B of 0 B" pair then.
+      const parts = [];
+      if (job.move_total_bytes) {
+        parts.push(`${fmtBytes(job.move_bytes)} of ${fmtBytes(job.move_total_bytes)}`);
       }
-      if (job.current_title) text += ` · ${job.current_title}`;
-      return text;
+      if (job.move_total_files) parts.push(`${job.move_files}/${job.move_total_files} files`);
+      if (job.current_title) parts.push(job.current_title);
+      return parts.join(" · ");
     }
     return job.error || "";
   }

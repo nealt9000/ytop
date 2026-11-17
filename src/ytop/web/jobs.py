@@ -230,6 +230,20 @@ class Job:
         return human_bytes(self.move_total_bytes)
 
     @property
+    def copy_progress_label(self) -> str:
+        """Progress of an active move/make-stick job.  Phases that count
+        files rather than bytes (checking, switching) report total_bytes 0,
+        so the "X of Y" byte pair is left out instead of showing "0 B of 0 B"."""
+        parts = []
+        if self.move_total_bytes:
+            parts.append(f"{self.moved_label} of {self.move_total_label}")
+        if self.move_total_files:
+            parts.append(f"{self.move_files}/{self.move_total_files} files")
+        if self.current_title:
+            parts.append(self.current_title)
+        return " · ".join(parts)
+
+    @property
     def current_percent(self) -> float:
         if not self.current_total:
             return 0.0

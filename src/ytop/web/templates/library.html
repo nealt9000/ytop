@@ -65,7 +65,7 @@
     <summary class="btn tiny ghost">Edit<span class="sr-only"> {{ s.label }}</span></summary>
     <form class="summary-edit-form" action="/storage/{{ s.id }}/label" method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="next" value="/?library={{ s.id }}">
+      <input type="hidden" name="next" value="/?library={{ s.id|urlencode }}">
       <label class="field">
         <span>Name</span>
         <input type="text" name="label" value="{{ s.label }}" maxlength="80" required>
@@ -130,7 +130,7 @@
       </select>
     </label>
     <a class="btn ghost tiny" href="/tags{% if active_library %}?library={{ active_library|urlencode }}{% endif %}">Manage tags</a>
-    <span class="list-count" id="browse-count" role="status">{{ view.all_playlists|length }} playlist{% if view.all_playlists|length != 1 %}s{% endif %}</span>
+    <span class="list-count" id="browse-count">{{ view.all_playlists|length }} playlist{% if view.all_playlists|length != 1 %}s{% endif %}</span>
   </div>
   {% if view.categories or view.tags or view.channels %}
   <div class="chip-filters">

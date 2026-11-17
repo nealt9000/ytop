@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -123,6 +124,19 @@ AMBIGUOUS_MESSAGE = (
     "This playlist now exists in more than one library — reload the page."
 )
 # Portable mode exits when no page has been open for this long.
+# A stick name shown in the offer-switch banner: a short folder or drive
+# name, else a generic wording.
+OFFER_LABEL_RE = re.compile(r"[\w .()'&+-]{1,40}")
+
+
+def offer_label(value: str | None) -> str:
+    text = (value or "").strip()
+    return text if OFFER_LABEL_RE.fullmatch(text) else "another stick"
+
+
+# The unfiltered Videos page shows at most this many; a tag, category or
+# channel narrows it.
+UNFILTERED_VIDEO_LIMIT = 500
 IDLE_TIMEOUT_S = 300.0
 IDLE_CHECK_S = 30.0
 # How long a second Quit waits for a flush already under way.
@@ -515,6 +529,11 @@ def create_app(
     app.state.library = lib
     app.state.config = cfg
     app.state.csrf_token = csrf_token
+    # A newer YTOP on another stick.  Its launcher says so over the
+    # token-checked rescan call, and only that is remembered for every page;
+    # a plain ``?offer_switch=1`` link (anyone can make one) shows the banner
+    # on that one page.  Either way the stick name must look like one.
+    app.state.switch_offer = ""
     # The running uvicorn.Server (set by ``serve``) and the one graceful stop
     # path: the instance shutdown endpoint (and Quit/idle exit) call
     # ``app.state.request_stop()``.
@@ -694,6 +713,9 @@ def create_app(
         }
 
     def render(request: Request, template: str, **context):
+        switch_offer = app.state.switch_offer
+        if not switch_offer and request.query_params.get("offer_switch") == "1":
+            switch_offer = offer_label(request.query_params.get("offer_from"))
         base = {
             "request": request,
             "q": "",
@@ -703,6 +725,7 @@ def create_app(
             "live_job": None,
             "job_by_playlist": {},
             "csrf_token": csrf_token,
+            "switch_offer": switch_offer,
             # The one-time question and the offer (any page).
             "ask_app_updates": releases.asking(),
             "app_offer": releases.offer if releases.phase in ("idle", "failed") else None,
@@ -833,6 +856,17 @@ def create_app(
         else:
             heading = "All videos"
         library_label = next((ref.label for ref in refs if ref.id == active), "")
+        video_total = sum(len(videos) for _card, videos in groups)
+        shown_total, playlist_total = video_total, len(groups)
+        if not (tag or category or channel) and video_total > UNFILTERED_VIDEO_LIMIT:
+            # Unfiltered, a big library would be one enormous page.
+            capped, room = [], UNFILTERED_VIDEO_LIMIT
+            for card, videos in groups:
+                if room <= 0:
+                    break
+                capped.append((card, videos[:room]))
+                room -= len(videos[:room])
+            groups, shown_total = capped, UNFILTERED_VIDEO_LIMIT
         return render(
             request,
             "videos.html",
@@ -840,7 +874,9 @@ def create_app(
             heading=heading,
             active_library=active,
             library_label=library_label,
-            video_total=sum(len(videos) for _card, videos in groups),
+            video_total=video_total,
+            shown_total=shown_total,
+            playlist_total=playlist_total,
         )
 
     @app.get("/playlist/new")
@@ -1549,7 +1585,7 @@ def create_app(
 
     def _render_make_stick(
         request: Request, raw_target: str = "", error: str = "",
-        status_code: int = 200,
+        status_code: int = 200, platforms: list[str] | None = None,
     ):
         try:
             image: Path | None = makestick.source_image()
@@ -1577,11 +1613,21 @@ def create_app(
             lib.playlists_and_bytes()[0]
             if info is not None and info.mode == "new" else []
         )
+        available = [str(plat) for plat in (build or {}).get("platforms") or []]
+        # Ticked platforms: the ones asked for, else (upgrading) the ones the
+        # stick already starts on, else all of them.  The upgrade summary is
+        # counted for exactly these, not for every platform the image has.
+        checked = [plat for plat in available if plat in set(platforms or [])]
+        if not checked and info is not None and info.mode == "upgrade":
+            have = (info.image_build or {}).get("platforms") or []
+            checked = [plat for plat in available if plat in set(map(str, have))]
+        if not checked:
+            checked = available
         upgrade_line = ""
         if info is not None and info.mode == "upgrade" and image is not None:
             try:
                 upgrade_line = makestick.upgrade_summary(makestick.plan_make(
-                    info.path, image, lib, mode="upgrade",
+                    info.path, image, lib, mode="upgrade", platforms=checked,
                 ))
             except (makestick.MakeStickError, OSError):
                 upgrade_line = ""
@@ -1590,6 +1636,7 @@ def create_app(
             "make_stick.html",
             job=None,
             upgrade_line=upgrade_line,
+            checked_platforms=checked,
             image_error=image_error,
             build=build,
             platform_sizes={
@@ -1609,8 +1656,9 @@ def create_app(
     @app.get("/make-stick")
     def make_stick_page(
         request: Request, target: str = Query(default="", max_length=1000),
+        platforms: list[str] = Query(default=[]),
     ):
-        return _render_make_stick(request, target)
+        return _render_make_stick(request, target, platforms=platforms)
 
     @app.post("/make-stick")
     async def make_stick_submit(request: Request):
@@ -1630,16 +1678,21 @@ def create_app(
         try:
             image, stick_plan = await run_in_threadpool(plan)
         except ValueError as exc:
-            return _render_make_stick(request, raw_target, str(exc), 400)
+            return _render_make_stick(
+                request, raw_target, str(exc), 400, platforms=platforms,
+            )
         except OSError as exc:
             return _render_make_stick(
                 request, raw_target,
                 makestick.drive_problem(_make_target(raw_target), exc), 400,
+                platforms=platforms,
             )
         try:
             job = app.state.jobs.make_stick(stick_plan, image)
         except ValueError as exc:  # a busy target or playlist
-            return _render_make_stick(request, raw_target, str(exc), 409)
+            return _render_make_stick(
+                request, raw_target, str(exc), 409, platforms=platforms,
+            )
         return RedirectResponse(f"/make-stick/{job.id}", status_code=303)
 
     @app.get("/make-stick/{job_id}")
@@ -1690,7 +1743,20 @@ def create_app(
         if playlist_id.startswith("library:"):
             library_id, playlist_id = playlist_id[len("library:"):], ""
         if target.kind != "video":
-            # A pure playlist link: add the whole playlist, as /add does.
+            # A pure playlist link: add the whole playlist, as /add does.  A
+            # chosen destination playlist can't hold it; say so instead of
+            # dropping the choice silently, and keep to its library.
+            notice = PLAYLIST_LINK_NOTICE
+            if playlist_id:
+                refuse_ambiguous(playlist_id)
+                chosen = lib.resolve_playlist(playlist_id)
+                if chosen is not None:
+                    library_id = library_id or chosen[0].id
+                    title = lib.playlist_titles().get(playlist_id, playlist_id)
+                    notice = (
+                        "That was a playlist link, so the whole playlist is "
+                        f"being added as its own playlist, not into {title}."
+                    )
             try:
                 job = start_playlist_probe(
                     url, preserve,
@@ -1698,7 +1764,7 @@ def create_app(
                 )
             except Exception as exc:  # noqa: BLE001 - shown on the page
                 return reject(f"Could not start the probe: {exc}")
-            app.state.jobs.set_notice(job.id, PLAYLIST_LINK_NOTICE)
+            app.state.jobs.set_notice(job.id, notice)
             return RedirectResponse(f"/add/{job.id}", status_code=303)
         elif playlist_id:
             refuse_ambiguous(playlist_id)
@@ -1857,15 +1923,24 @@ def create_app(
     async def quit_api(request: Request):
         form = await request.form()
         force = str(form.get("force") or "") == "1"
+        # The Quit form posted without JavaScript carries its token as a
+        # field; the script sends it as a header and wants JSON back.
+        plain_form = "csrf_token" in form and "x-csrf-token" not in request.headers
+
+        def busy(count: int):
+            if plain_form:
+                response = render(request, "quit_busy.html", active_jobs=count)
+                response.status_code = 409
+                return response
+            return JSONResponse({"active_jobs": count}, status_code=409)
+
         count = active_job_count()
         if count and not force:
-            return JSONResponse({"active_jobs": count}, status_code=409)
+            return busy(count)
         # Rendered before anything stops: the page needs nothing afterwards.
         page = templates.get_template("stopped.html").render()
         if not await run_in_threadpool(quit_now, force):
-            return JSONResponse(
-                {"active_jobs": max(active_job_count(), 1)}, status_code=409
-            )
+            return busy(max(active_job_count(), 1))
         return Response(page, media_type="text/html")
 
     @app.get("/api/instance", dependencies=[Depends(require_token)])
@@ -1882,8 +1957,12 @@ def create_app(
 
     @app.post("/api/instance/rescan", dependencies=[Depends(require_token)],
               status_code=204)
-    def instance_rescan() -> Response:
+    def instance_rescan(
+        offer_from: str | None = Query(default=None, max_length=200),
+    ) -> Response:
         libs.refresh()
+        if offer_from is not None:  # a launcher with a newer YTOP
+            app.state.switch_offer = offer_label(offer_from)
         return Response(status_code=204)
 
     @app.post("/api/instance/shutdown", dependencies=[Depends(require_token)])

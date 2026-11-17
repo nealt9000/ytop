@@ -171,6 +171,8 @@ def test_no_takeover_when_jobs_active(portable_root, opened):
         assert len(opened) == 1
         assert opened[0].startswith(running.info.url + "?offer_switch=1")
         assert running.rescans == 1
+        # The launcher's token-checked rescan carried the offer.
+        assert running.app.state.switch_offer == portable_root.name
         assert running.thread.is_alive()
     finally:
         running.stop()
@@ -179,10 +181,60 @@ def test_no_takeover_when_jobs_active(portable_root, opened):
 def test_offer_switch_banner(tmp_path: Path):
     root = lib_root(tmp_path)
     client = TestClient(create_app(root, libraries=library_set(root)))
+    assert "A newer YTOP" not in client.get("/").text
     page = client.get("/", params={"offer_switch": "1", "offer_from": "BLUE"}).text
     assert ("A newer YTOP is available on BLUE; switch when downloads finish"
             in page)
+    # A plain link (anyone can make one) is not remembered.
+    assert "A newer YTOP" not in client.get("/videos").text
+
+
+def test_offer_switch_from_the_launcher_stays_on_every_page(tmp_path: Path):
+    root = lib_root(tmp_path)
+    app = create_app(root, libraries=library_set(root), instance_token="secret")
+    client = TestClient(app)
+    # Without the instance token the offer is refused.
+    assert client.post("/api/instance/rescan",
+                       params={"offer_from": "BLUE"}).status_code == 403
     assert "A newer YTOP" not in client.get("/").text
+    assert client.post(
+        "/api/instance/rescan", params={"offer_from": "BLUE"},
+        headers={"X-YTOP-Token": "secret"},
+    ).status_code == 204
+    for path in ("/", "/videos", "/downloads"):
+        assert "A newer YTOP is available on BLUE" in client.get(path).text, path
+    # A later spoofed link can't replace the launcher's stick name.
+    page = client.get("/", params={"offer_switch": "1", "offer_from": "EVIL"}).text
+    assert "EVIL" not in page and "available on BLUE" in page
+
+
+@pytest.mark.parametrize(("value", "shown"), [
+    ("BLUE", "BLUE"),
+    ("NO NAME", "NO NAME"),
+    ("Neal's stick (2)", "Neal's stick (2)"),
+    ("Größe_1-a.b", "Größe_1-a.b"),
+    ("x" * 40, "x" * 40),
+    ("x" * 41, "another stick"),
+    ("", "another stick"),
+    ("Call 555-0100 now! Visit evil.example/fix", "another stick"),
+    ("BLUE; your library is corrupt", "another stick"),
+    ("a\nb", "another stick"),
+    ("<b>x</b>", "another stick"),
+])
+def test_offer_label_accepts_only_stick_like_names(value: str, shown: str):
+    from ytop.web.app import offer_label
+
+    assert offer_label(value) == shown
+
+
+def test_offer_switch_link_with_odd_text_says_another_stick(tmp_path: Path):
+    root = lib_root(tmp_path)
+    client = TestClient(create_app(root, libraries=library_set(root)))
+    page = client.get("/", params={
+        "offer_switch": "1", "offer_from": "BLUE; call 555-0100 to fix it",
+    }).text
+    assert "A newer YTOP is available on another stick;" in page
+    assert "555-0100" not in page
 
 
 def test_stale_instance_file_ignored(portable_root, opened):

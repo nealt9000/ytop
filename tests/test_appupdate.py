@@ -1191,3 +1191,12 @@ def test_page_says_no_release_published(stick: Path):
         page = client.get("/app-update").text
         assert "No YTOP release has been published yet" in page
         assert "Couldn&#39;t check" not in page and "Couldn't check" not in page
+
+
+def test_install_adds_the_mac_markers(stick: Path, server):
+    """An app update is an upgrade too: it leaves the macOS markers (#17)."""
+    shutil.rmtree(stick / ".fseventsd", ignore_errors=True)
+    (stick / ".metadata_never_index").unlink(missing_ok=True)
+    assert _install(stick, server).status == "updated"
+    assert (stick / ".metadata_never_index").read_bytes() == b""
+    assert (stick / ".fseventsd" / "no_log").read_bytes() == b""

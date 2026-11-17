@@ -1220,3 +1220,108 @@ def test_storage_page_shows_components(tmp_path: Path):
     assert 'action="/storage/components/update"' not in page
     client.app.state.jobs.close()
     bare.app.state.jobs.close()
+
+
+def test_create_playlist_and_add_video_on_read_only_library_give_409(
+    tmp_path: Path,
+):
+    home, usb, libs, usb_ref = two_libraries(tmp_path)
+    marker = json.loads(usb.marker.read_text())
+    marker["schema"] = 99
+    usb.marker.write_text(json.dumps(marker))
+    libs.refresh()
+    client = TestClient(create_app(home.root, libraries=libs))
+    token = client.app.state.csrf_token
+    try:
+        response = client.post(
+            "/playlist/new",
+            data={"title": "Nope", "location": usb_ref.id, "csrf_token": token},
+            follow_redirects=False,
+        )
+        assert response.status_code == 409
+        response = client.post(
+            "/add/video",
+            data={"url": "jNQXAC9IVRw", "playlist": f"library:{usb_ref.id}",
+                  "csrf_token": token},
+            follow_redirects=False,
+        )
+        # The job layer refuses a read-only destination with its own
+        # (form-level) message before anything is written.
+        assert "made by a newer YTOP" in response.text
+        assert client.app.state.jobs.list() == []
+    finally:
+        client.app.state.jobs.close()
+
+
+def test_interrupted_move_reconciles_after_a_remount(tmp_path: Path, monkeypatch):
+    """Job paths are absolute; a stick back under another mount point must
+    still be repaired, not reported as missing."""
+    import os
+
+    _force_device(monkeypatch, True)
+    home, usb, libs, usb_ref = two_libraries(tmp_path, usb_playlist=False)
+    library = Library(libs)
+    content = library.media_path(PLAYLIST_ID, "vid1").read_bytes()
+    source_meta = home.playlist_meta_dir(PLAYLIST_ID)
+    monkeypatch.setattr(os, "rename", _crash_once(
+        os.rename, lambda src, dst: Path(src) == source_meta,
+    ))
+    job_id = _crash_move(JobManager(library, start_workers=False), PLAYLIST_ID, usb_ref.id)
+    monkeypatch.undo()
+    _force_device(monkeypatch, True)
+
+    remounted = tmp_path / "usb-again"
+    usb.root.rename(remounted)
+    libs.add_folder(remounted, "USB stick")
+    job = JobManager(Library(libs), start_workers=False).get(job_id)
+
+    assert job.status == "failed" and job.source_cleanup_complete, job.error
+    assert "left where it was" in job.error
+    media = Library(libs).media_path(PLAYLIST_ID, "vid1")
+    assert media is not None and media.is_relative_to(home.media_root)
+    assert media.read_bytes() == content
+    again = LibraryLayout(remounted)
+    assert not (again.media_root / "Local").exists()
+    assert not [p for p in again.meta_root.iterdir() if p.name.startswith(".")]
+
+
+def test_crash_while_finishing_a_copy_move_is_finished_on_restart(
+    tmp_path: Path, monkeypatch,
+):
+    from ytop.web import fsops
+
+    _force_device(monkeypatch, False)
+    home, usb, libs, usb_ref = two_libraries(tmp_path, usb_playlist=False)
+    library = Library(libs)
+    monkeypatch.setattr(fsops, "_finish_destination", _crash_once(
+        fsops._finish_destination, lambda spec: True,
+    ))
+    job_id = _crash_move(JobManager(library, start_workers=False), PLAYLIST_ID, usb_ref.id)
+    # The journal survived the crash.
+    assert [p for p in usb.meta_root.iterdir() if p.name.endswith(".json")]
+
+    JobManager(Library(libs), start_workers=False).get(job_id)
+
+    assert not [p for p in usb.meta_root.iterdir() if p.name.startswith(".")]
+    media = Library(libs).resolve_in(usb_ref.id, PLAYLIST_ID)
+    assert media is not None
+    assert (usb.media_root / "Local" / "01 - Video One.webm").is_file()
+
+
+def test_unparsable_move_journal_is_removed_with_its_staging(tmp_path: Path):
+    from ytop.web import fsops
+
+    home, usb, libs, usb_ref = two_libraries(tmp_path, usb_playlist=False)
+    staging = usb.meta_root / ".ytopmove-deadbeef"
+    staging.mkdir(parents=True)
+    fsops.journal_path(staging).write_text("{garbage", encoding="utf-8")
+
+    result = fsops.reconcile_move(
+        source=home.playlist_meta_dir(PLAYLIST_ID),
+        target=usb.playlist_meta_dir(PLAYLIST_ID),
+        staging=staging,
+    )
+
+    assert result.phase == "staging"
+    assert not staging.exists()
+    assert not fsops.journal_path(staging).exists()

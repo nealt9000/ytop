@@ -55,6 +55,7 @@
   <ol class="search-results">
     {% for result in group.transcript_hits %}
     <li class="search-result">
+      {% if result.url %}
       <a href="{{ result.url }}">
         <span class="search-time">{{ result.time_label }}</span>
         <span class="search-body">
@@ -62,6 +63,16 @@
           <span class="search-snippet">{{ result.html|safe }}</span>
         </span>
       </a>
+      {% else %}
+      <div class="search-result-row">
+        <span class="search-time">{{ result.time_label }}</span>
+        <span class="search-body">
+          <strong>{{ result.title }}</strong>
+          <span class="muted small"><span class="state-missing">Not downloaded</span></span>
+          <span class="search-snippet">{{ result.html|safe }}</span>
+        </span>
+      </div>
+      {% endif %}
     </li>
     {% endfor %}
   </ol>

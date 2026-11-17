@@ -144,12 +144,6 @@ def staging_is_ours(staging: Path, target_playlists: Path) -> bool:
     return is_within(staging, target_playlists) and staging.name.startswith(".")
 
 
-def remove_staging(staging: Path, target_playlists: Path) -> None:
-    if not staging_is_ours(staging, target_playlists):
-        return
-    shutil.rmtree(staging, ignore_errors=True)
-
-
 # --- planning ----------------------------------------------------------------
 
 
@@ -738,14 +732,17 @@ def _copy_move(
     except Exception:
         _drop_staging(plan.staging, meta_root)
         raise
-    _drop_staging(plan.staging, meta_root)
+    # The journal outlives the destination's sync, so a crash during it is
+    # finished by ``reconcile_move`` on the next start.
     try:
         _finish_destination(spec)
     except Exception as exc:  # noqa: BLE001 - reported honestly
+        _drop_staging(plan.staging, meta_root)
         raise PublishedError(
             f"the playlist was copied to {plan.dest.label}, but finishing it "
             f"there failed ({exc}); the original was kept"
         ) from exc
+    _drop_staging(plan.staging, meta_root)
     if not remove_source:
         return
     report.phase("cleaning_source", "Removing the original…")
@@ -940,9 +937,10 @@ def reconcile_move(
             return repaired
     target_ok = target.is_dir()
     source_ok = source.is_dir()
+    # ``_drop_staging`` also removes a journal that could not be parsed.
     if target_ok and not source_ok:
         if staging is not None:
-            remove_staging(staging, target.parent)
+            _drop_staging(staging, target.parent)
         return ReconcileResult("done", "done", True, None)
     if target_ok and source_ok:
         return ReconcileResult(
@@ -952,7 +950,7 @@ def reconcile_move(
         )
     if source_ok:
         if staging is not None:
-            remove_staging(staging, target.parent)
+            _drop_staging(staging, target.parent)
         return ReconcileResult(
             "staging", "failed", True,
             "the move was interrupted before anything was published; the "
@@ -1027,5 +1025,12 @@ def _reconcile_journal(
     if target_ok:
         # A copy move whose publish completed: the staging is spent.
         _owner_marker(dest_media, spec.staging).unlink(missing_ok=True)
+        if spec.mode == "copy":
+            # The journal is dropped only after the destination's sync, so
+            # a crash may have cut that short; it is idempotent.
+            try:
+                _finish_destination(spec)
+            except Exception:  # noqa: BLE001 - the copy itself is complete
+                log.exception("could not finish moved playlist %s", spec.playlist_id)
         _drop_staging(spec.staging, meta_root)
     return None

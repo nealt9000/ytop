@@ -11,8 +11,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEST="${1:-$ROOT/.tools/ffmpeg}"
 CACHE="$ROOT/.tools/dl/archive.tar.xz"
-URL="https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-11-12-39/ffmpeg-N-128790-g9bee1e603c-linux64-gpl.tar.xz"
+ASSET="ffmpeg-N-128790-g9bee1e603c-linux64-gpl.tar.xz"
 SHA256="f5752bf3597cbc9fc7a60fe5cea3522797a5ea2493d91cffb6f13e5b4c861233"
+# The same file mirrored as an asset of this repo's release ci-ffmpeg-1
+# (FFmpeg-Builds autobuilds expire), then the upstream original.  Both are
+# checked against SHA256, so the fallback cannot change the binary.
+URLS=(
+  "https://github.com/nealt9000/ytop/releases/download/ci-ffmpeg-1/$ASSET"
+  "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-11-12-39/$ASSET"
+)
 
 if [ -x "$DEST/bin/ffmpeg" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "already present: $DEST/bin/ffmpeg"
@@ -22,9 +29,18 @@ fi
 
 mkdir -p "$(dirname "$CACHE")" "$DEST"
 if [ ! -f "$CACHE" ]; then
-  echo "downloading $URL"
-  curl -fL --retry 3 --retry-delay 2 -o "$CACHE.part" "$URL"
-  mv "$CACHE.part" "$CACHE"
+  for url in "${URLS[@]}"; do
+    echo "downloading $url"
+    if curl -fL --retry 3 --retry-delay 2 -o "$CACHE.part" "$url"; then
+      mv "$CACHE.part" "$CACHE"
+      break
+    fi
+    rm -f "$CACHE.part"
+  done
+  if [ ! -f "$CACHE" ]; then
+    echo "could not download $ASSET from any source" >&2
+    exit 1
+  fi
 fi
 
 echo "$SHA256  $CACHE" | sha256sum -c -

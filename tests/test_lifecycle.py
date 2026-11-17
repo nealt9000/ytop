@@ -63,6 +63,29 @@ def test_quit_refuses_with_active_jobs(tmp_path):
         assert app.state.server.should_exit is False
 
 
+def test_quit_without_javascript_gets_a_page_not_json(tmp_path):
+    """The Quit form posted without JavaScript gets a readable page that
+    offers "Quit anyway"; the script (token in a header) still gets JSON."""
+    app, _home, libs = _app(tmp_path)
+    token = app.state.csrf_token
+    with TestClient(app) as client:
+        _add_job(app, libs.default().id)
+        page = client.post("/api/quit", headers=BROWSER,
+                           data={"csrf_token": token})
+        assert page.status_code == 409
+        assert page.headers["content-type"].startswith("text/html")
+        assert "1 download is still running" in page.text
+        assert 'name="force" value="1"' in page.text
+        assert "active_jobs" not in page.text
+        assert app.state.server.should_exit is False
+
+        script = client.post("/api/quit",
+                             headers={**BROWSER, "X-CSRF-Token": token})
+        assert script.status_code == 409
+        assert script.json() == {"active_jobs": 1}
+        assert app.state.server.should_exit is False
+
+
 def test_quit_requires_csrf_from_a_browser(tmp_path):
     app, _home, _libs = _app(tmp_path)
     with TestClient(app) as client:

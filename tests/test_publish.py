@@ -420,3 +420,73 @@ def test_a_playlist_titled_un_grouped_gets_its_own_folder(tmp_path):
 
     assert folder.name.casefold() != UNGROUPED_FOLDER.casefold()
     assert folder.name == f"{UNGROUPED_FOLDER} [PL1]"
+
+
+def test_orphan_sweep_never_overwrites_an_earlier_orphan(tmp_path):
+    layout = make_library(tmp_path)
+    folder = layout.media_root / "Mix"
+    folder.mkdir(parents=True)
+    orphan = folder / ".ytoppublish-deadbeef.webm"
+    orphan.write_bytes(b"second")
+    target = layout.cache_dir / "orphans"
+    target.mkdir(parents=True)
+    (target / orphan.name).write_bytes(b"first")
+
+    recover_rename_journal(layout)
+
+    assert not orphan.exists()
+    kept = sorted(p.read_bytes() for p in target.iterdir())
+    assert kept == [b"first", b"second"]
+
+
+def test_rename_journal_rejects_escaping_and_malformed_ops(tmp_path):
+    layout = make_library(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"keep")
+    (layout.media_root / "A").mkdir(parents=True)
+    good = layout.media_root / "A" / "x.webm"
+    good.write_bytes(b"x")
+    absolute = str(tmp_path / "abs.txt")
+    write_json(layout.rename_journal, {"phase": 1, "ops": [
+        {"src": "../../outside.txt", "tmp": "A/.t0", "dst": "A/stolen.txt"},
+        {"src": "A/x.webm"},  # missing keys
+        {"src": absolute, "tmp": "A/.t1", "dst": "A/p"},
+        {"src": "A/x.webm", "tmp": "A/.ytoptmp-0.webm", "dst": "A/y.webm"},
+    ]})
+
+    assert recover_rename_journal(layout) == 1
+
+    assert outside.read_bytes() == b"keep"
+    assert (layout.media_root / "A" / "y.webm").read_bytes() == b"x"
+    assert not (layout.media_root / "A" / "stolen.txt").exists()
+    assert not layout.rename_journal.exists()
+
+
+def test_rename_journal_not_a_dict_is_set_aside(tmp_path):
+    layout = make_library(tmp_path)
+    write_json(layout.rename_journal, ["nonsense"])
+    assert recover_rename_journal(layout) == 0
+    assert not layout.rename_journal.exists()
+    assert list(layout.data_dir.glob("rename-journal.json.corrupt-*"))
+
+
+def test_one_clashing_name_does_not_block_the_rest_of_a_sync(tmp_path):
+    layout = make_library(tmp_path)
+    add_playlist(layout, "PL1", "Mix", [("v1", "First"), ("v2", "Second")],
+                 media=False)
+    foreign = layout.media_root / "Mix" / "01 - First.webm"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"foreign")
+
+    publish_download(layout, "PL1", "v1", _stage(tmp_path, "a.webm", b"one"))
+    publish_download(layout, "PL1", "v2", _stage(tmp_path, "b.webm", b"two"))
+    report = sync_playlist_files(layout, "PL1")
+
+    assert report.errors
+    assert foreign.read_bytes() == b"foreign"
+    second = layout.resolve_media(_media_ref(layout, "PL1", "v2"))
+    assert second == layout.media_root / "Mix" / "02 - Second.webm"
+    assert second.read_bytes() == b"two"
+    first = layout.resolve_media(_media_ref(layout, "PL1", "v1"))
+    assert first is not None and first.read_bytes() == b"one"
+    assert not layout.rename_journal.exists()

@@ -40,17 +40,22 @@ jobs:
 
       - name: Build in container
         if: matrix.container != ''
+        env:
+          CONTAINER: ${{ matrix.container }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          docker build -t ffmpeg-minimal -f tools/ffmpeg-minimal/Containerfile.${{ matrix.container }} tools/ffmpeg-minimal
+          docker build -t ffmpeg-minimal -f "tools/ffmpeg-minimal/Containerfile.$CONTAINER" tools/ffmpeg-minimal
           mkdir -p dist
-          docker run --rm -v "$PWD/dist:/out" ffmpeg-minimal ${{ matrix.platform }} /out
+          docker run --rm -v "$PWD/dist:/out" ffmpeg-minimal "$PLATFORM" /out
 
       - name: Build natively (macOS)
         if: matrix.container == ''
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           brew install nasm meson ninja pkg-config
           uname -m
-          tools/ffmpeg-minimal/build.sh ${{ matrix.platform }} dist
+          tools/ffmpeg-minimal/build.sh "$PLATFORM" dist
 
       - uses: actions/setup-python@v5
         if: matrix.verify
@@ -59,9 +64,11 @@ jobs:
 
       - name: Verify
         if: matrix.verify
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           mkdir -p check
-          tar -xzf dist/ffmpeg-minimal-${{ matrix.platform }}.tar.gz -C check
+          tar -xzf "dist/ffmpeg-minimal-$PLATFORM.tar.gz" -C check
           file check/bin/ffmpeg check/bin/ffprobe
           python tools/ffmpeg-minimal/verify.py check/bin/ffmpeg check/bin/ffprobe tests/fixtures/media
 
@@ -112,16 +119,35 @@ jobs:
           ls -l dist
           test "$(ls dist/*.tar.gz | wc -l)" -eq 5
           (cd dist && cat *.sha256 && sha256sum -c *.sha256)
+          # exists <api path>: 0 if GitHub has it, 1 on 404; any other
+          # failure (auth, rate limit, outage) stops the job (fail closed).
+          exists() {
+            local err
+            if err=$(gh api "$1" 2>&1 >/dev/null); then
+              return 0
+            fi
+            case "$err" in
+              *"(HTTP 404)"*) return 1 ;;
+            esac
+            echo "::error::gh api $1 failed: $err"
+            exit 1
+          }
           if [ "$REF_TYPE" = tag ]; then
             tag="$REF_NAME"
+            # Pushing a tag that already has a release (e.g. mirroring one)
+            # builds and verifies again but publishes nothing.
+            if exists "repos/$GH_REPO/releases/tags/$tag"; then
+              echo "::notice::release $tag already exists; nothing to publish"
+              exit 0
+            fi
             gh release create "$tag" dist/* --verify-tag --title "$tag" \
               --notes "Minimal ffmpeg + ffprobe for YTOP sticks (tools/ffmpeg-minimal), all 5 platforms verified."
           else
             n=1
             # git/ref/tags/<prefix> prefix-matches (e.g. -1 also hits -10), which can
             # only over-skip numbers, never reuse an existing tag.
-            while gh release view "ffmpeg-minimal-$n" >/dev/null 2>&1 \
-                || gh api "repos/$GH_REPO/git/ref/tags/ffmpeg-minimal-$n" >/dev/null 2>&1; do
+            while exists "repos/$GH_REPO/releases/tags/ffmpeg-minimal-$n" \
+                || exists "repos/$GH_REPO/git/ref/tags/ffmpeg-minimal-$n"; do
               n=$((n + 1))
             done
             tag="ffmpeg-minimal-$n"

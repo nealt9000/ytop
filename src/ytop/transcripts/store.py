@@ -395,20 +395,45 @@ def search(
     limit: int = 50,
     *,
     playlist_id: str | None = None,
+    per_playlist: int | None = None,
+    normalize: bool = False,
 ) -> list[dict]:
     """Search every library's index; hits are merged by FTS rank (bm25,
     lower is better) and ``limit`` applies after the merge.  Each hit carries
-    the ``library_id`` it came from."""
+    the ``library_id`` it came from.
+
+    ``per_playlist`` keeps at most that many hits per playlist and puts
+    every playlist's best hit before any playlist's next one, so one
+    playlist's many matches cannot crowd the others out of ``limit``.
+
+    ``normalize`` divides each library's ranks by its best one's size
+    (the best hit is -1.0).  bm25 depends on each index's own statistics
+    (its document count and lengths), so raw ranks from different
+    libraries are not comparable; relative ones roughly are.
+    """
     from ..layout import LibraryLayout as Layout  # lazy: layout -> yt -> store
 
     if isinstance(layouts, Layout):
         layouts = [layouts]
-    limit = max(1, min(int(limit), 200))
+    limit = max(1, min(int(limit), 200 if per_playlist is None else 5000))
     hits: list[dict] = []
     for layout in layouts:
-        hits.extend(_search_one(layout, query, limit, playlist_id))
-    hits.sort(key=lambda hit: hit["rank"])
+        found = _search_one(layout, query, limit, playlist_id, per_playlist)
+        if normalize:
+            normalize_ranks(found)
+        hits.extend(found)
+    hits.sort(key=lambda hit: (hit.get("_n", 0), hit["rank"]))
+    for hit in hits:
+        hit.pop("_n", None)
     return hits[:limit]
+
+
+def normalize_ranks(hits: Sequence[dict], key: str = "rank") -> None:
+    """Scale one index's bm25 ranks in place so its best is -1.0."""
+    best = min((float(hit[key]) for hit in hits), default=0.0)
+    if best < 0:
+        for hit in hits:
+            hit[key] = float(hit[key]) / -best
 
 
 def _search_one(
@@ -416,30 +441,70 @@ def _search_one(
     query: str,
     limit: int,
     playlist_id: str | None,
+    per_playlist: int | None = None,
 ) -> list[dict]:
     path = db_path(layout)
     expression = fts_query(query)
     if not expression or not path.exists():
         return []
+    columns = """
+        rowid AS rid, video_id, playlist_id, title, start_ms, end_ms,
+        snippet(transcript_fts, 0, ?, ?, '…', 18) AS snip
+    """
+    where = " WHERE transcript_fts MATCH ?"
+    match: list = [expression]
+    if playlist_id:
+        where += " AND playlist_id = ?"
+        match.append(playlist_id)
+    picked: list[tuple[sqlite3.Row, float, int]] = []
     try:
         with _connect(layout) as conn:
             ensure_schema(conn)
             if not _has_fts(conn):
                 return []
-            sql = """
-                SELECT video_id, playlist_id, title, start_ms, end_ms,
-                       snippet(transcript_fts, 0, ?, ?, '…', 18) AS snip,
-                       bm25(transcript_fts) AS rank
-                FROM transcript_fts
-                WHERE transcript_fts MATCH ?
-            """
-            params: list = [SNIPPET_START, SNIPPET_END, expression]
-            if playlist_id:
-                sql += " AND playlist_id = ?"
-                params.append(playlist_id)
-            sql += " ORDER BY rank LIMIT ?"
-            params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
+            if per_playlist is None:
+                rows = conn.execute(
+                    f"SELECT {columns}, bm25(transcript_fts) AS rank "
+                    f"FROM transcript_fts{where} ORDER BY rank LIMIT ?",
+                    [SNIPPET_START, SNIPPET_END, *match, limit],
+                ).fetchall()
+                picked = [(row, float(row["rank"]), 0) for row in rows]
+            else:
+                ranked = conn.execute(
+                    f"""
+                    SELECT rid, rank, n FROM (
+                        SELECT rid, rank, row_number() OVER (
+                            PARTITION BY playlist_id ORDER BY rank
+                        ) AS n
+                        FROM (
+                            SELECT rowid AS rid, playlist_id,
+                                   bm25(transcript_fts) AS rank
+                            FROM transcript_fts{where}
+                            ORDER BY rank
+                        )
+                    )
+                    WHERE n <= ?
+                    ORDER BY n, rank
+                    LIMIT ?
+                    """,
+                    [*match, max(1, int(per_playlist)), limit],
+                ).fetchall()
+                if ranked:
+                    marks = ",".join("?" for _ in ranked)
+                    by_rowid = {
+                        row["rid"]: row
+                        for row in conn.execute(
+                            f"SELECT {columns} FROM transcript_fts{where} "
+                            f"AND rowid IN ({marks})",
+                            [SNIPPET_START, SNIPPET_END, *match,
+                             *(row["rid"] for row in ranked)],
+                        )
+                    }
+                    picked = [
+                        (by_rowid[row["rid"]], float(row["rank"]), int(row["n"]))
+                        for row in ranked
+                        if row["rid"] in by_rowid
+                    ]
     except (sqlite3.Error, OSError):
         return []
 
@@ -448,14 +513,14 @@ def _search_one(
     info = read_library(layout.root)
     library_id = info.id if info is not None else ""
     results = []
-    for row in rows:
+    for row, rank, number in picked:
         raw = str(row["snip"] or "")
         plain = raw.replace(SNIPPET_START, "").replace(SNIPPET_END, "")
         escaped = html.escape(raw, quote=False)
         highlighted = escaped.replace(
             SNIPPET_START, "<mark>"
         ).replace(SNIPPET_END, "</mark>")
-        results.append({
+        hit = {
             "video_id": row["video_id"],
             "playlist_id": row["playlist_id"],
             "title": row["title"],
@@ -464,6 +529,9 @@ def _search_one(
             "text": plain,
             "html": highlighted,
             "library_id": library_id,
-            "rank": float(row["rank"]),
-        })
+            "rank": rank,
+        }
+        if per_playlist is not None:
+            hit["_n"] = number
+        results.append(hit)
     return results

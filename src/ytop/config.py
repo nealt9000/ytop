@@ -267,7 +267,7 @@ def _toml_value(value: object) -> str:
 
 
 def save_config(library_root: Path, cfg: Config) -> None:
-    """Write download/transcript/update settings only; never any cookie keys."""
+    """Write every persisted setting; never any cookie keys."""
     download = {
         "jobs": cfg.jobs,
         "probe_jobs": cfg.probe_jobs,
@@ -288,10 +288,20 @@ def save_config(library_root: Path, cfg: Config) -> None:
         "delay_s": t.delay_s,
         "index": t.index,
     }
-    lines = ["[download]"]
+    lines = ["[paths]", f"detect_removable = {_toml_value(cfg.detect_removable)}"]
+    lines += ["", "[download]"]
     lines += [f"{k} = {_toml_value(v)}" for k, v in download.items()]
+    lines += ["", "[pot]", f"provider = {_toml_value(cfg.pot_provider)}"]
     lines += ["", "[transcripts]"]
     lines += [f"{k} = {_toml_value(v)}" for k, v in transcripts.items()]
+    w = cfg.web
+    lines += ["", "[web]"]
+    lines += [
+        f"{k} = {_toml_value(v)}"
+        for k, v in (
+            ("host", w.host), ("port", w.port), ("open_browser", w.open_browser)
+        )
+    ]
     u = cfg.updates
     updates: dict[str, object] = {"check_components": u.check_components}
     if u.check_app is not None:

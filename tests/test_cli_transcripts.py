@@ -172,3 +172,74 @@ def test_rename_during_the_fetch_keeps_the_new_media_ref(tmp_path: Path,
     assert meta["files"]["media"].startswith("Renamed/")
     assert layout.resolve_media(meta["files"]["media"]).is_file()
     assert meta["transcript"]["segments"] == 1
+
+
+def _caption(video_id, languages):
+    return CaptionData(
+        language="en", kind="auto", ext="json",
+        segments=[Segment(0.0, 4.0, f"Words for {video_id}.")],
+        raw=b"[]",
+    )
+
+
+def test_playlist_transcripts_sync_the_files_once(tmp_path: Path, monkeypatch):
+    import ytop.publish as publish
+
+    layout = make_layout(tmp_path)
+    add_playlist(layout, PLAYLIST_ID, "List",
+                 [("vid1", "One"), ("vid2", "Two"), ("vid3", "Three")])
+    monkeypatch.setattr("ytop.transcripts.fetch.fetch_transcript_api", _caption)
+    calls: list[str] = []
+    real = publish.sync_playlist_files
+
+    def counting(lay, playlist_id):
+        calls.append(playlist_id)
+        return real(lay, playlist_id)
+
+    monkeypatch.setattr(publish, "sync_playlist_files", counting)
+    code = main([
+        "transcripts", PLAYLIST_ID, "--library", str(layout.root),
+        "--delay", "0", "--json",
+    ])
+    assert code == 0
+    assert calls == [PLAYLIST_ID]
+    for stem in ("01 - One", "02 - Two", "03 - Three"):
+        assert (layout.media_root / "List" / f"{stem}.en.srt").is_file()
+
+
+def test_playlist_summary_is_written_under_the_publish_lock(
+    tmp_path: Path, monkeypatch
+):
+    import threading
+
+    from ytop.publish import PUBLISH_LOCK
+    from ytop.transcripts import fetch as fetch_mod
+
+    layout = make_library(tmp_path)
+    monkeypatch.setattr(fetch_mod, "fetch_transcript_api", _caption)
+    held: list[bool] = []
+    real = fetch_mod.write_json
+
+    def checking(path, data, **kwargs):
+        if Path(path).name == "playlist.json":
+            result: list[bool] = []
+
+            def probe():
+                got = PUBLISH_LOCK.acquire(blocking=False)
+                if got:
+                    PUBLISH_LOCK.release()
+                result.append(got)
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join()
+            held.append(not result[0])
+        return real(path, data, **kwargs)
+
+    monkeypatch.setattr(fetch_mod, "write_json", checking)
+    code = main([
+        "transcripts", PLAYLIST_ID, "--library", str(layout.root),
+        "--delay", "0", "--json",
+    ])
+    assert code == 0
+    assert held and all(held)

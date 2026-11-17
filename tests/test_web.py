@@ -204,6 +204,16 @@ def test_library_page_lists_playlists(client: TestClient):
     assert "Opus audio" in playlist
 
 
+def test_playlist_card_total_time_counts_every_video(client: TestClient):
+    """Like the library summary hours and the playlist page: vid2 (50 s) is
+    not downloaded but still counts toward the card's total time."""
+    home = client.get("/").text
+    start = home.index(f'data-key="{PLAYLIST_ID}"')
+    card = home[start:home.index("</article>", start)]
+    assert 'data-length="150.0"' in card
+    assert 'data-remaining="100.0"' in card
+
+
 def test_playlist_page_keeps_youtube_order(client: TestClient):
     response = client.get(f"/playlist/{PLAYLIST_ID}")
     assert response.status_code == 200
@@ -816,6 +826,28 @@ def test_add_playlist_url_does_not_create_a_video_job(
     assert client.get(f"/api/jobs/{job_id}").json()["kind"] == "playlist"
 
 
+def test_add_video_playlist_link_says_the_destination_is_not_used(
+    client: TestClient, monkeypatch,
+):
+    """Choosing a destination and then pasting a playlist link adds the
+    playlist as its own; the page says so instead of dropping the choice."""
+    monkeypatch.setattr(jobs_module, "probe_playlist", lambda *a, **k: None)
+    response = client.post(
+        "/add/video",
+        data={
+            "url": "https://www.youtube.com/playlist?list=PLabc123456",
+            "playlist": PLAYLIST_ID,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = response.headers["location"].rsplit("/", 1)[-1]
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["kind"] == "playlist"
+    assert "not into Playlist One" in job["notice"]
+    assert "not into Playlist One" in client.get(f"/add/{job_id}").text
+
+
 def test_add_rejects_an_invalid_target(client: TestClient):
     response = client.post("/add", data={"url": "not a link"})
     assert response.status_code == 400
@@ -866,21 +898,60 @@ def test_search_across_libraries(tmp_path: Path):
 
     client = TestClient(create_app(first.root, libraries=libs))
     page = client.get("/search", params={"q": "isomorphism"}).text
-    # The same playlist id lives in both libraries, so links use keys.
-    assert f"/watch/{PLAYLIST_ID}@{first_id[:8]}/vid1?t=" in page
-    assert f"/watch/{PLAYLIST_ID}@{second_id[:8]}/vid1?t=" in page
+    # The same playlist id lives in both libraries, so links use keys,
+    # quoted like the video result links ("@" -> "%40").
+    assert f"/watch/{PLAYLIST_ID}%40{first_id[:8]}/vid1?t=" in page
+    assert f"/watch/{PLAYLIST_ID}%40{second_id[:8]}/vid1?t=" in page
     only = client.get(
         "/search",
         params={"q": "isomorphism", "playlist": f"{PLAYLIST_ID}@{second_id[:8]}"},
     ).text
-    assert f"/watch/{PLAYLIST_ID}@{second_id[:8]}/vid1?t=" in only
-    assert f"@{first_id[:8]}/vid1?t=" not in only
+    assert f"/watch/{PLAYLIST_ID}%40{second_id[:8]}/vid1?t=" in only
+    assert f"%40{first_id[:8]}/vid1?t=" not in only
     client.app.state.jobs.close()
 
 
 def test_search_transcript_hit_keeps_timestamp_url(client: TestClient):
     text = client.get("/search", params={"q": "isomorphism"}).text
     assert f"/watch/{PLAYLIST_ID}/vid1?t=0.000#transcript" in text
+
+
+def test_search_transcript_hit_for_a_missing_video_has_no_watch_link(
+    tmp_path: Path,
+):
+    layout = make_library(tmp_path)
+    make_video(
+        layout, PLAYLIST_ID, "vid2", title="Video Two", index=2, total=2,
+        folder="Playlist One", chapters=False, media=False, duration=50,
+    )
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    text = client.get("/search", params={"q": "isomorphism"}).text
+    assert f"/watch/{PLAYLIST_ID}/vid1?t=0.000#transcript" in text
+    assert "/vid2?t=" not in text
+    assert "Not downloaded" in text
+    client.app.state.jobs.close()
+
+
+def test_search_ignores_the_stored_title_of_a_custom_titled_playlist(
+    tmp_path: Path,
+):
+    from ytop.web.library import TitleStore
+
+    layout = make_library(tmp_path)
+    TitleStore(layout).set_playlist_title(PLAYLIST_ID, "Zebra Course")
+    client = TestClient(create_app(layout.root, libraries=library_set(layout)))
+    # "Playlist" is only in the stored title now: no match under "Zebra Course".
+    hidden = client.get("/search", params={"q": "Playlist"}).text
+    assert "Zebra Course" not in hidden.split("</header>", 1)[1]
+    assert "Playlist Two" in hidden  # no custom title: its stored one counts
+    # A video hit still lists, without counting the playlist as matched.
+    video = client.get("/search", params={"q": "One"}).text
+    assert "1 match for" in video
+    assert "Video <mark>One</mark>" in video
+    # The custom title itself matches.
+    custom = client.get("/search", params={"q": "zebra"}).text
+    assert "1 match for" in custom and "Zebra Course" in custom
+    client.app.state.jobs.close()
 
 
 def test_search_box_label(client: TestClient):

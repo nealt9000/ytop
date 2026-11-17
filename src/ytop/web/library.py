@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
+from .. import fsinfo
 from ..layout import UNGROUPED_FOLDER, UNGROUPED_ID, LibraryLayout, safe_id
 from ..libraries import LibraryRef, LibrarySet
 from ..publish import (
@@ -770,6 +771,18 @@ def _walk_files(path: Path):
             yield os.path.join(root, name)
 
 
+def _lives_in(playlist_id: str, meta_dir: Path) -> bool:
+    """``meta_dir`` is the folder every path for ``playlist_id`` resolves to.
+
+    A playlist.json whose id points at another folder cannot reach its own
+    videos; the library index skips it, and so does every listing.
+    """
+    try:
+        return safe_id(playlist_id) == meta_dir.name
+    except ValueError:
+        return False
+
+
 class Library:
     """Playlist views and edits across every online library."""
 
@@ -825,7 +838,7 @@ class Library:
                 if not doc:
                     continue
                 playlist_id = str(doc.get("id") or path.name)
-                if playlist_id in seen:
+                if playlist_id in seen or not _lives_in(playlist_id, path):
                     continue
                 seen.add(playlist_id)
                 records.append((ref, path, doc))
@@ -1628,8 +1641,12 @@ class Library:
         selections: list[tuple[str, str]],
         imports_dir: Path,
     ) -> dict[tuple[str, str], Path]:
-        """Copy media of selections from other libraries onto ``dest``."""
+        """Copy media of selections from other libraries onto ``dest``.
+
+        Refuses (``ValueError``) before copying anything when a file is
+        larger than the destination's per-file limit (FAT32)."""
         copied: dict[tuple[str, str], Path] = {}
+        sources: list[tuple[tuple[str, str], Path]] = []
         for source_playlist, video_id in selections:
             resolved = self.resolve_playlist(source_playlist)
             if resolved is None or resolved[0].id == dest.id:
@@ -1638,15 +1655,28 @@ class Library:
             source_dir = self._video_dir(
                 source_ref.layout, str(source_doc.get("id")), video_id
             )
-            if source_dir is None or (source_playlist, video_id) in copied:
+            key = (source_playlist, video_id)
+            if source_dir is None or any(key == seen for seen, _ in sources):
                 continue
             source_media = find_media(source_ref.layout, source_dir)
             if source_media is None:
                 continue
+            sources.append((key, source_media))
+        limit = fsinfo.fs_info(dest.layout.root).max_file_bytes
+        if limit is not None:
+            for _key, source_media in sources:
+                size = source_media.stat().st_size
+                if size > limit:
+                    raise ValueError(
+                        f"“{source_media.name}” is {human_bytes(size)}, larger "
+                        f"than the FAT32 limit of {human_bytes(limit)} per file "
+                        f"on {dest.label}"
+                    )
+        for key, source_media in sources:
             imports_dir.mkdir(parents=True, exist_ok=True)
-            staged = imports_dir / f"{len(copied)}-{safe_id(video_id)}{source_media.suffix}"
+            staged = imports_dir / f"{len(copied)}-{safe_id(key[1])}{source_media.suffix}"
             shutil.copyfile(source_media, staged)
-            copied[(source_playlist, video_id)] = staged
+            copied[key] = staged
         return copied
 
     def _build_playlist(

@@ -264,3 +264,41 @@ def test_video_without_audio_tracks_does_not_scan(home: LibraryLayout, monkeypat
     view = library.video_view(SOURCE_ID, "vida")
     assert view is not None
     assert library.audio_path(SOURCE_ID, "vida", "es") is None
+
+
+def test_cross_library_copy_keeps_srt_and_checks_fat32(
+    home: LibraryLayout, tmp_path: Path, monkeypatch
+):
+    from ytop import fsinfo
+    from ytop.publish import sync_playlist_files
+    from ytop.transcripts.captions import Segment
+    from ytop.transcripts.store import write_transcript
+
+    usb = LibraryLayout(tmp_path / "usb")
+    init_library(usb.root, "USB stick")
+    libs = library_set(home)
+    usb_ref = libs.add_folder(usb.root, "USB stick")
+    library = Library(libs)
+    write_transcript(
+        home.video_meta_dir(SOURCE_ID, "vidb"), video_id="vidb", title="B",
+        language="en", kind="manual", segments=[Segment(0, 1, "hello")],
+        raw_file=None,
+    )
+    sync_playlist_files(home, SOURCE_ID)
+
+    copy_id = library.create_playlist(
+        "Copy", [(SOURCE_ID, "vidb")], library_id=usb_ref.id
+    )
+    copied = library.media_path(copy_id, "vidb")
+    assert copied.with_name(copied.stem + ".en.srt").is_file()
+
+    monkeypatch.setattr(
+        fsinfo, "fs_info",
+        lambda path: fsinfo.FsInfo("vfat", 10)
+        if Path(path).is_relative_to(usb.root) else fsinfo.FsInfo("ext4", None),
+    )
+    before = sorted(p.name for p in usb.meta_root.iterdir())
+    with pytest.raises(ValueError, match="FAT32"):
+        library.create_playlist("Big", [(SOURCE_ID, "vidb")], library_id=usb_ref.id)
+    assert sorted(p.name for p in usb.meta_root.iterdir()) == before
+    assert not list(usb.cache_dir.glob("import-*"))

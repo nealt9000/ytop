@@ -106,7 +106,8 @@ def test_hide_and_unhide(tmp_path: Path) -> None:
     assert 'href="/videos?tag=fugue&amp;library=' not in page
     assert "/unhide" in page
     assert 'aria-label="Remove tag Fugue"' not in client.get("/playlist/P1").text
-    assert 'aria-label="Unhide fugue"' in page
+    # A user-added tag has no derived label: it is shown as it was added.
+    assert 'aria-label="Unhide Fugue"' in page
     assert 'aria-label="Hide Fugue"' not in page
     response = _post(client, f"/tags/{lib}/unhide", key="fugue")
     assert response.status_code == 303
@@ -134,6 +135,46 @@ def test_tag_edit_on_read_only_library_is_refused(tmp_path: Path) -> None:
         assert response.status_code == 409, path
         assert READ_ONLY.replace("'", "&#39;") in response.text, path
     assert not layout.tags_file.exists()
+    client.app.state.jobs.close()
+
+
+def test_unknown_tag_action_is_400_even_when_read_only(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    marker = json.loads(layout.marker.read_text())
+    marker["schema"] = 99
+    layout.marker.write_text(json.dumps(marker))
+    client = _client(layout)
+    response = _post(client, "/playlist/P1/tags", action="frobnicate", tag="x")
+    assert response.status_code == 400
+    client.app.state.jobs.close()
+
+
+def test_suggestions_are_the_tags_the_library_shows(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    store = TagStore(layout)
+    store.add("P2", "Fugue")
+    store.add("P2", "Secret")
+    store.hide("secret")
+    store.rename("fugue", "Counterpoint")
+    client = _client(layout)
+    page = client.get("/playlist/P1").text
+    datalist = page[page.index("<datalist"):page.index("</datalist>")]
+    # Another playlist's user tag is offered, by its renamed label; a
+    # hidden one is not.
+    assert '<option value="Counterpoint">' in datalist
+    assert "Fugue" not in datalist and "Secret" not in datalist
+    client.app.state.jobs.close()
+
+
+def test_hidden_renamed_tag_shows_its_label(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    store = TagStore(layout)
+    store.add("P1", "Fugue")
+    store.rename("fugue", "Counterpoint")
+    store.hide("counterpoint")
+    client = _client(layout)
+    page = client.get("/tags").text
+    assert 'aria-label="Unhide Counterpoint"' in page
     client.app.state.jobs.close()
 
 

@@ -20,7 +20,7 @@ from yt_dlp.utils import DownloadError
 
 from ..config import Config
 from ..fsinfo import fits_on
-from ..index import index_for
+from ..index import refresh_video_quietly
 from ..layout import LibraryLayout, read_library
 from ..publish import PUBLISH_LOCK, playlist_folder, publish_download
 from ..toolchain import ffmpeg_path
@@ -63,6 +63,7 @@ from .probe import (
     extract_video_info,
     probe_playlist,
 )
+from .rawinfo import trim_raw_info
 
 
 @dataclass
@@ -206,6 +207,8 @@ def _download_media(
     if not force:
         existing = find_media(layout, video_dir)
         if existing is not None:
+            # A partial left by an earlier interrupted attempt is now moot.
+            shutil.rmtree(layout.partial_dir(item.id), ignore_errors=True)
             return existing, "skipped"
 
     assert item.selection is not None
@@ -306,9 +309,18 @@ def _download_alternate_audio(
     standalone files so the browser can switch tracks without a transcode.
     A failure here must not lose the video that already downloaded.
     """
+    audio_dir = Path(video_dir) / "audio"
+    if force and audio_dir.is_dir():
+        # A forced re-download replaces the tracks; drop ones no longer selected.
+        keep = {
+            str(fmt.get("format_id") or "")
+            for fmt in (item.selection.alternates if item.selection else [])
+        }
+        for path in audio_dir.iterdir():
+            if path.is_file() and path.name.partition(".")[0] not in keep:
+                path.unlink(missing_ok=True)
     if item.selection is None or not item.selection.alternates:
         return []
-    audio_dir = Path(video_dir) / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     saved: list[tuple[dict, Path]] = []
     for fmt in item.selection.alternates:
@@ -466,8 +478,9 @@ def _process_item(
     vdir.mkdir(parents=True, exist_ok=True)
     existing_meta = read_json(vdir / "meta.json") or {}
 
-    # Keep the raw extractor snapshot before doing anything expensive.
-    write_json(vdir / "raw.json", item.info)
+    # Keep the raw extractor snapshot before doing anything expensive,
+    # without the stream URLs and caption bulk nothing reads back (#5).
+    write_json(vdir / "raw.json", trim_raw_info(item.info))
 
     if not quiet:
         with lock:
@@ -550,10 +563,7 @@ def _process_item(
             media = current
         meta["files"]["media"] = layout.relative_media(media) if media else None
         write_json(vdir / "meta.json", meta)
-    try:
-        index_for(layout).refresh_video(playlist_id, item.id)
-    except Exception:  # noqa: BLE001 - the index is disposable
-        pass
+    refresh_video_quietly(layout, playlist_id, item.id)
 
     transcript: TranscriptResult | None = None
     if fetch_transcripts and media is not None and not error:
@@ -736,18 +746,27 @@ def download_probe(
             row["index"] = position
         return rows
 
+    def current_folder() -> None:
+        # The folder may be renamed while we download (rename_folder holds
+        # PUBLISH_LOCK); take the one on disk, never our cached copy.
+        on_disk = read_json(pdir / "playlist.json") or {}
+        if on_disk.get("folder"):
+            existing_doc["folder"] = on_disk["folder"]
+
     def write_partial() -> None:
-        doc = normalize_playlist(
-            probe.playlist,
-            entries=ordered_entries(),
-            thumbnail_file=thumb_name,
-            existing=existing_doc,
-            options=playlist_options,
-        )
-        if limit is not None:
-            doc["partial"] = True
-            doc["limit"] = limit
-        write_json(pdir / "playlist.json", doc)
+        with PUBLISH_LOCK:
+            current_folder()
+            doc = normalize_playlist(
+                probe.playlist,
+                entries=ordered_entries(),
+                thumbnail_file=thumb_name,
+                existing=existing_doc,
+                options=playlist_options,
+            )
+            if limit is not None:
+                doc["partial"] = True
+                doc["limit"] = limit
+            write_json(pdir / "playlist.json", doc)
 
     if cancel is not None and cancel():
         raise JobCancelled("cancelled by the user")
@@ -862,17 +881,19 @@ def download_probe(
             fetch_thumbnail(thumb_source, playlist_thumb)
         thumb_name = PLAYLIST_THUMB_NAME if playlist_thumb.exists() else None
 
-    playlist_doc = normalize_playlist(
-        probe.playlist,
-        entries=entries,
-        thumbnail_file=thumb_name,
-        existing=existing_doc,
-        options=playlist_options,
-    )
-    if limit is not None:
-        playlist_doc["partial"] = True
-        playlist_doc["limit"] = limit
-    write_json(pdir / "playlist.json", playlist_doc)
+    with PUBLISH_LOCK:
+        current_folder()
+        playlist_doc = normalize_playlist(
+            probe.playlist,
+            entries=entries,
+            thumbnail_file=thumb_name,
+            existing=existing_doc,
+            options=playlist_options,
+        )
+        if limit is not None:
+            playlist_doc["partial"] = True
+            playlist_doc["limit"] = limit
+        write_json(pdir / "playlist.json", playlist_doc)
 
     transcript_results = [
         item.transcript for item in items

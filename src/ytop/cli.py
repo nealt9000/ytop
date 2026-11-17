@@ -515,7 +515,11 @@ def _open_existing(args, live, *, offer_from: str | None = None) -> int:
 
     from . import instance
 
-    instance.post(live, "/api/instance/rescan")
+    rescan = "/api/instance/rescan"
+    if offer_from is not None:
+        # Token-checked, so the server keeps the offer on every page.
+        rescan += "?" + urlencode({"offer_from": offer_from})
+    instance.post(live, rescan)
     url = live.url
     if offer_from is not None:
         url += "?" + urlencode({"offer_switch": "1", "offer_from": offer_from})
@@ -655,7 +659,7 @@ def cmd_init(args) -> int:
     from .layout import init_library
 
     root = Path(args.path).expanduser()
-    label = args.label if args.label is not None else (root.name or "Library")
+    label = (args.label or "").strip() or root.name or "Library"
     try:
         info = init_library(root, label, args.description or "")
     except OSError as exc:
@@ -692,7 +696,7 @@ def cmd_migrate(args) -> int:
     for path in plan.dropped_partials:
         print(f"  {path}")
     if plan.unscanned:
-        print(f"not readable, will not be migrated: {len(plan.unscanned)}")
+        print(f"will not be migrated (left behind): {len(plan.unscanned)}")
         for path, reason in plan.unscanned:
             print(f"  {path}  ({reason})")
     for warning in plan.warnings:

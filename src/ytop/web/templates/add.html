@@ -283,7 +283,7 @@
 
 {% elif job.status == "paused_offline" %}
 <section class="empty-state">
-  <h1>Paused — library offline</h1>
+  <h1>Paused</h1>
   <p>{{ job.title or job.url }}</p>
   <p class="muted">{{ job.error or "Its library is not connected." }} Completed videos are kept.</p>
   <div class="hero-actions" style="justify-content: center">
@@ -291,7 +291,7 @@
     <form action="/jobs/{{ job.id }}/download" method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="policy" value="{{ job.policy }}">
-      <button type="submit" class="btn primary">Resume</button>
+      <button type="submit" class="btn primary">{% if job.paused_from == "ready" or (not job.paused_from and not job.started_at) %}Back to review{% else %}Resume{% endif %}</button>
     </form>
     {% endif %}
     <form action="/jobs/{{ job.id }}/remove" method="post"

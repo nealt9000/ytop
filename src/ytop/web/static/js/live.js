@@ -93,7 +93,7 @@ function statusWord(job) {
     done: "Complete",
     cancelled: "Cancelled",
     failed: "Failed",
-    paused_offline: "Paused — library offline",
+    paused_offline: "Paused",
   }[job.status] || job.status;
 }
 

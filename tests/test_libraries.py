@@ -167,6 +167,24 @@ def test_slow_candidate_skipped(tmp_path: Path, monkeypatch):
     assert [ref.label for ref in refs] == ["Fast"]
 
 
+def test_probe_timeout_is_injectable(tmp_path: Path, monkeypatch):
+    lib = tmp_path / "lib"
+    init_library(lib, "Lib")
+    real = libraries_module.read_library
+
+    def sluggish(root):
+        time.sleep(0.3)
+        return real(root)
+
+    monkeypatch.setattr(libraries_module, "read_library", sluggish)
+    short = LibrarySet(lib, registry_path=tmp_path / "r.json", detect=False,
+                       probe_timeout=0.05)
+    assert short.libraries() == []
+    patient = LibrarySet(lib, registry_path=tmp_path / "r.json", detect=False,
+                         probe_timeout=30.0)
+    assert [ref.label for ref in patient.libraries()] == ["Lib"]
+
+
 def test_default_ref_for_path_and_set_info(tmp_path: Path):
     launch = make_library(tmp_path / "launch", "Laptop")
     libs = _set(launch.root, tmp_path, detect=False)

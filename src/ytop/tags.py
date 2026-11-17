@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 import threading
@@ -21,12 +22,14 @@ from .yt.metadata import (
 UNCATEGORIZED = "Uncategorized"
 MAX_TAGS = 5
 MIN_SHARE = 0.25
+MAX_LABEL = 32
 STOPWORDS = frozenset(
     {"video", "videos", "youtube", "hd", "4k", "1080p", "official", "full", "new"}
 )
 
 _DROPPED_CHARS = frozenset('<>"`{}|')  # | separates keys in data-tags
-_DROPPED_CATEGORIES = frozenset({"So", "Cc", "Cf"})
+_DROPPED_CATEGORIES = frozenset({"So", "Cf"})
+_SPACED_CATEGORIES = frozenset({"Cc"})  # a tab or newline still parts words
 _ONLY_NOISE = re.compile(r"^[\d\W_]+$")
 
 
@@ -46,11 +49,16 @@ class TagInput:
 
 
 def _clean(text: str) -> str:
-    return "".join(
-        ch
-        for ch in text
-        if ch not in _DROPPED_CHARS and unicodedata.category(ch) not in _DROPPED_CATEGORIES
-    )
+    out: list[str] = []
+    for ch in text:
+        if ch in _DROPPED_CHARS:
+            continue
+        category = unicodedata.category(ch)
+        if category in _SPACED_CATEGORIES:
+            out.append(" ")
+        elif category not in _DROPPED_CATEGORIES:
+            out.append(ch)
+    return "".join(out)
 
 
 def _strip_punct(text: str) -> str:
@@ -70,10 +78,7 @@ def _normalize_text(text: str) -> str:
 
 def normalize_tag(raw: str) -> str:
     """Return the tag key, or "" if unusable."""
-    text = _normalize_text(raw)
-    text = text.lstrip("#")
-    text = " ".join(text.replace("_", " ").split())
-    return _strip_punct(text)
+    return _strip_punct(_normalize_text(raw).lstrip("#"))
 
 
 def is_junk(key: str, channel_key: str) -> bool:
@@ -89,7 +94,18 @@ def is_junk(key: str, channel_key: str) -> bool:
 
 
 def _label(raw: str) -> str:
-    return _clean(raw).strip()
+    """A derived tag's display text: trimmed like its key, case kept."""
+    text = " ".join(_clean(raw).replace("_", " ").split())
+    return _strip_punct(_strip_punct(text).lstrip("#"))[:MAX_LABEL].strip()
+
+
+@functools.lru_cache(maxsize=4096)
+def _word_pattern(key: str) -> re.Pattern[str]:
+    """``key`` (or its plural, which derive_tags merges into it) as a whole
+    word or phrase."""
+    # As derive_tags merges plurals: never "ss" ("bas" is not "bass").
+    plural = "s?" if len(key) >= 3 and not key.endswith("s") else ""
+    return re.compile(rf"(?<!\w){re.escape(key)}{plural}(?!\w)")
 
 
 def derive_tags(inputs: Sequence[TagInput]) -> dict[str, list[Tag]]:
@@ -116,7 +132,10 @@ def derive_tags(inputs: Sequence[TagInput]) -> dict[str, list[Tag]]:
                 if not key:
                     continue
                 key = merge(key)
-                label_counts.setdefault(key, Counter())[_label(raw)] += 1
+                labels = label_counts.setdefault(key, Counter())
+                label = _label(raw)
+                if label:
+                    labels[label] += 1
                 if not is_junk(key, channel_key):
                     keys.add(key)
             videos.append(keys)
@@ -132,8 +151,10 @@ def derive_tags(inputs: Sequence[TagInput]) -> dict[str, list[Tag]]:
         from_text = {
             key
             for key in vocabulary
-            if not is_junk(key, channel_key)
-            and re.search(rf"(?<!\w){re.escape(key)}(?!\w)", text)
+            # The substring test is cheap and rules out almost every key.
+            if key in text
+            and not is_junk(key, channel_key)
+            and _word_pattern(key).search(text)
         }
         candidates.append((counts, from_text))
 
@@ -160,7 +181,8 @@ def derive_tags(inputs: Sequence[TagInput]) -> dict[str, list[Tag]]:
             scored.append((tf * idf, key))
         scored.sort(key=lambda item: (-item[0], item[1]))
         result[inp.playlist_id] = [
-            Tag(key, _best_label(label_counts[key])) for _, key in scored[:MAX_TAGS]
+            Tag(key, _best_label(label_counts[key]) if label_counts[key] else key)
+            for _, key in scored[:MAX_TAGS]
         ]
     return result
 
@@ -178,7 +200,6 @@ def playlist_category(video_categories: Sequence[Sequence[str]]) -> str:
 
 # -- user edits ---------------------------------------------------------------
 
-MAX_LABEL = 32
 MAX_RENAME_HOPS = 8
 
 
@@ -230,6 +251,9 @@ def _parse_edits(data: object) -> TagEdits:
     return edits
 
 
+_ROW_FIELDS = frozenset({"add", "remove", "category"})
+
+
 class TagStore:
     """User tag edits that always beat derived tags.
 
@@ -268,15 +292,23 @@ class TagStore:
             out["videos"] = videos if isinstance(videos, dict) else {}
             out["renames"] = dict(sorted(edits.renames.items()))
             out["hidden"] = sorted(edits.hidden)
-            out["playlists"] = {
-                pid: {
-                    "add": row.add,
-                    "remove": row.remove,
-                    **({"category": row.category} if row.category else {}),
-                }
-                for pid, row in edits.playlists.items()
-                if row.add or row.remove or row.category
-            }
+            old_rows = raw.get("playlists")
+            if not isinstance(old_rows, dict):
+                old_rows = {}
+            out["playlists"] = {}
+            for pid, row in edits.playlists.items():
+                # Fields this version does not know (a newer app's) survive.
+                old = old_rows.get(pid)
+                extra = {
+                    k: v for k, v in old.items() if k not in _ROW_FIELDS
+                } if isinstance(old, dict) else {}
+                if row.add or row.remove or row.category or extra:
+                    out["playlists"][pid] = {
+                        **extra,
+                        "add": row.add,
+                        "remove": row.remove,
+                        **({"category": row.category} if row.category else {}),
+                    }
             write_json(self.path, out)
 
     def rename(self, key: str, label: str) -> None:
@@ -286,6 +318,9 @@ class TagStore:
         Counterpoint, then counterpoint → Fugue) undoes the old merge instead
         of leaving a loop, so keys and labels never get swapped.
         """
+        key = normalize_tag(key)  # as remove, hide and unhide do
+        if not key:
+            return
         clean = _clean_label(label)
         target = normalize_tag(clean)
 

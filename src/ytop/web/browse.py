@@ -427,8 +427,15 @@ def build_videos(
 
 SEARCH_QUERY_MAX = 200
 GROUP_HIT_LIMIT = 10
-META_FETCH = 400
-TRANSCRIPT_FETCH = 200
+# Hits read before grouping.  Both sources return at most GROUP_HIT_LIMIT
+# per playlist and every playlist's best hit before any playlist's next one,
+# so a playlist with many matches cannot crowd the others out: each of up to
+# this many matching playlists keeps its best hit.
+META_FETCH = 1000
+TRANSCRIPT_FETCH = 500
+# The rank of a match found outside the indexes (a custom title): as good
+# as each index's best hit once ranks are normalised.
+BEST_RANK = -1.0
 
 
 @dataclass
@@ -459,7 +466,9 @@ def search_library(
 ) -> list[SearchGroup]:
     """Titles, descriptions, channels, tags and transcripts, grouped by
     playlist.  Playlists whose title or tags matched come first, then the
-    rest by best rank (bm25, lower is better, for both sources)."""
+    rest by best rank (bm25, lower is better, for both sources).  Each
+    index's ranks are divided by its best one's size (as store.normalize_ranks),
+    since bm25 from different libraries' indexes is not comparable."""
     q = (q or "")[:SEARCH_QUERY_MAX]
     tokens = [t.casefold() for t in query_tokens(q)]
     if not tokens:
@@ -516,7 +525,7 @@ def search_library(
                 found = group(item.ref.id, row.playlist_id)
                 if found is not None:
                     found.playlist_matched = True
-                    found.rank = min(found.rank, 0.0)
+                    found.rank = min(found.rank, BEST_RANK)
             for video in row.videos:
                 custom = item.video_titles.get(video.video_id)
                 if custom and all(t in str(custom).casefold() for t in tokens):
@@ -527,10 +536,13 @@ def search_library(
                             "video_id": video.video_id, "title": str(custom),
                             "field": "title", "html": _mark(str(custom), tokens),
                             "url": url(found.card, video.video_id, video.available),
-                            "available": video.available, "rank": 0.0,
+                            "available": video.available, "rank": BEST_RANK,
                         })
-                        found.rank = min(found.rank, 0.0)
-        for hit in index.search_meta(q, META_FETCH):
+                        found.rank = min(found.rank, BEST_RANK)
+        meta_hits = index.search_meta(q, META_FETCH, per_playlist=GROUP_HIT_LIMIT)
+        best = min((hit.rank for hit in meta_hits), default=0.0)
+        scale = -best if best < 0 else 1.0
+        for hit in meta_hits:
             found = group(item.ref.id, hit.playlist_id)
             if found is None:
                 continue
@@ -538,7 +550,8 @@ def search_library(
                 # Matched only the stored title of a playlist shown under a
                 # custom one: not a match for what the page displays.
                 continue
-            found.rank = min(found.rank, hit.rank)
+            rank = hit.rank / scale
+            found.rank = min(found.rank, rank)
             if hit.playlist_match and not item.playlist_titles.get(hit.playlist_id):
                 found.playlist_matched = True
             if hit.field == "playlist":
@@ -552,7 +565,7 @@ def search_library(
             found.video_hits.append({
                 "video_id": hit.video_id, "title": title, "field": hit.field,
                 "html": hit.html, "url": url(found.card, hit.video_id, is_available),
-                "available": is_available, "rank": hit.rank,
+                "available": is_available, "rank": rank,
             })
 
     for card in cards.values():
@@ -568,7 +581,8 @@ def search_library(
     refs = {item.ref.id: item for item in loaded}
     layouts = [refs[lid].ref.layout for lid in {key[0] for key in cards}]
     for trow in search_transcripts(
-        layouts, q, TRANSCRIPT_FETCH, playlist_id=only_id
+        layouts, q, TRANSCRIPT_FETCH, playlist_id=only_id,
+        per_playlist=GROUP_HIT_LIMIT, normalize=True,
     ):
         found = group(trow["library_id"], trow["playlist_id"])
         if found is None:

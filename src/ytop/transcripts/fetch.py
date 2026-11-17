@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..config import Config
-from ..index import index_for
+from ..index import refresh_video_quietly
 from ..layout import LibraryLayout
 from ..yt.metadata import (
     find_media,
@@ -43,16 +43,6 @@ from .store import (
 SUMMARY_FILE = "transcripts.json"
 
 log = logging.getLogger(__name__)
-
-
-def _refresh_library_index(
-    layout: LibraryLayout, playlist_id: str, video_id: str
-) -> None:
-    """Keep the library index current; it is disposable, so never fail."""
-    try:
-        index_for(layout).refresh_video(playlist_id, video_id)
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @dataclass
@@ -161,7 +151,7 @@ def fetch_video_transcript(
                 )
             except Exception:  # noqa: BLE001 - the file is still usable
                 pass
-            _refresh_library_index(layout, playlist_id, video_id)
+            refresh_video_quietly(layout, playlist_id, video_id)
         return TranscriptResult(
             video_id, title, "skipped",
             language=existing.get("language"),
@@ -292,7 +282,7 @@ def fetch_video_transcript(
             )
         except Exception:  # noqa: BLE001 - indexing is derived state
             pass
-        _refresh_library_index(layout, playlist_id, video_id)
+        refresh_video_quietly(layout, playlist_id, video_id)
 
     return TranscriptResult(
         video_id, title, "fetched",

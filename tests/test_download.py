@@ -572,3 +572,39 @@ def test_skipped_item_drops_a_stale_partial_dir(tmp_path: Path, fake_network):
 
     assert [i.status for i in result.items] == ["skipped"]
     assert not partial.exists()
+
+
+def test_raw_json_is_trimmed_and_resync_trims_an_old_one(
+    tmp_path: Path, fake_network
+):
+    calls, state = fake_network
+    big = item(1, "vid1")
+    big.info["formats"][0]["url"] = "https://googlevideo.invalid/videoplayback?sig=x"
+    big.info["formats"][0]["fragments"] = [{"url": "frag"}] * 3
+    big.info["thumbnails"] = [{"url": "https://example.invalid/t.jpg"}]
+    big.info["tags"] = ["kept"]
+    state["items"] = [big]
+    root = make_library(tmp_path).root
+    cfg = Config()
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    raw_path = result.playlist_dir / "videos" / "vid1" / "raw.json"
+
+    def check() -> None:
+        raw = json.loads(raw_path.read_text())
+        assert raw["tags"] == ["kept"]
+        assert "thumbnails" not in raw
+        assert raw["formats"][0]["format_id"] == "395"
+        assert "url" not in raw["formats"][0]
+        assert "fragments" not in raw["formats"][0]
+
+    check()
+    # The download itself still got the untrimmed info.
+    assert "thumbnails" in big.info and "url" in big.info["formats"][0]
+
+    # An old, untrimmed raw.json is rewritten trimmed by the next sync, even
+    # though the video itself is skipped.
+    raw_path.write_text(json.dumps(big.info), encoding="utf-8")
+    calls.clear()
+    again = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    assert [i.status for i in again.items] == ["skipped"]
+    check()

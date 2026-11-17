@@ -771,6 +771,18 @@ def _walk_files(path: Path):
             yield os.path.join(root, name)
 
 
+def _lives_in(playlist_id: str, meta_dir: Path) -> bool:
+    """``meta_dir`` is the folder every path for ``playlist_id`` resolves to.
+
+    A playlist.json whose id points at another folder cannot reach its own
+    videos; the library index skips it, and so does every listing.
+    """
+    try:
+        return safe_id(playlist_id) == meta_dir.name
+    except ValueError:
+        return False
+
+
 class Library:
     """Playlist views and edits across every online library."""
 
@@ -826,7 +838,7 @@ class Library:
                 if not doc:
                     continue
                 playlist_id = str(doc.get("id") or path.name)
-                if playlist_id in seen:
+                if playlist_id in seen or not _lives_in(playlist_id, path):
                     continue
                 seen.add(playlist_id)
                 records.append((ref, path, doc))

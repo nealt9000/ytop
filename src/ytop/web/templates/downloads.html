@@ -66,9 +66,7 @@
               {{ job.move_total_label }} moved to {{ job.library_label }}
               {% if job.move_total_files %} · {{ job.move_total_files }} files{% endif %}
             {% elif job.active %}
-              {{ job.moved_label }} of {{ job.move_total_label }}
-              {% if job.move_total_files %} · {{ job.move_files }}/{{ job.move_total_files }} files{% endif %}
-              {% if job.current_title %} · {{ job.current_title }}{% endif %}
+              {{ job.copy_progress_label }}
             {% else %}{{ job.error|truncate(140) if job.error else "" }}{% endif %}
           </span>
         {% else %}

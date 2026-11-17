@@ -432,6 +432,33 @@ def test_schema1_fixture_migrates(tmp_path):
     assert jobs is None or jobs.get("jobs") == []
 
 
+def test_migration_leaves_a_built_library_index(tmp_path):
+    import contextlib
+    import sqlite3
+
+    old = _old_library(tmp_path)
+    for video_id in ("a1", "a2", "a3"):
+        path = old / "playlists" / "Lectures [PLA]" / "videos" / video_id / "meta.json"
+        meta = read_json(path) or {}
+        meta["tags"] = ["Linear Algebra"]
+        write_json(path, meta)
+    target = tmp_path / "new"
+    run_migration(plan_migration(old, target), target)
+
+    # Read straight from the file: the first page must not have to build it.
+    with contextlib.closing(sqlite3.connect(_layout(target).index_db)) as conn:
+        playlists = {r[0] for r in conn.execute("SELECT playlist_id FROM idx_playlists")}
+        dirty = conn.execute(
+            "SELECT value FROM idx_meta WHERE key = 'tags_dirty'"
+        ).fetchone()
+        tags = {r[0] for r in conn.execute(
+            "SELECT key FROM idx_tags WHERE playlist_id = 'PLA'"
+        )}
+    assert playlists == {"PLA", "un-grouped"}
+    assert dirty == ("0",)
+    assert "linear algebra" in tags
+
+
 def test_cli_migrate_runs(tmp_path, capsys):
     old = _old_library(tmp_path)
     target = tmp_path / "new"

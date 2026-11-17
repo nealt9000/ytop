@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -90,6 +91,9 @@ log = logging.getLogger(__name__)
 
 
 TAGS_READ_ONLY_MESSAGE = "This library is read-only, so its tags can't be changed."
+# A tag edit refused with EACCES/EPERM is tried again after these pauses: on
+# Windows a virus scanner or indexer briefly holding tags.json looks the same.
+TAG_EDIT_RETRY_S = (0.1, 0.25)
 TAGS_DAMAGED_MESSAGE = "The tags file on this library is damaged; nothing was changed."
 
 
@@ -120,6 +124,19 @@ AMBIGUOUS_MESSAGE = (
     "This playlist now exists in more than one library — reload the page."
 )
 # Portable mode exits when no page has been open for this long.
+# A stick name shown in the offer-switch banner: a short folder or drive
+# name, else a generic wording.
+OFFER_LABEL_RE = re.compile(r"[\w .()'&+-]{1,40}")
+
+
+def offer_label(value: str | None) -> str:
+    text = (value or "").strip()
+    return text if OFFER_LABEL_RE.fullmatch(text) else "another stick"
+
+
+# The unfiltered Videos page shows at most this many; a tag, category or
+# channel narrows it.
+UNFILTERED_VIDEO_LIMIT = 500
 IDLE_TIMEOUT_S = 300.0
 IDLE_CHECK_S = 30.0
 # How long a second Quit waits for a flush already under way.
@@ -178,6 +195,21 @@ def _recover_libraries(refs: list[LibraryRef]) -> None:
             recover_rename_journal(ref.layout)
         except OSError as exc:
             log.warning("could not recover %s: %s", ref.root, exc)
+
+
+def _tags_writable(ref: LibraryRef) -> bool:
+    """Tag edits can be saved: not a newer-schema library, and its data
+    folder (where tags.json is replaced) is writable as far as the OS says.
+    A locked stick or read-only mount hides the tag controls."""
+    if ref.read_only:
+        return False
+    data_dir = ref.layout.data_dir
+    try:
+        if not data_dir.is_dir():
+            return os.access(ref.layout.ytop_dir, os.W_OK)
+        return os.access(data_dir, os.W_OK)
+    except OSError:
+        return False
 
 
 def _unplug_needs_quit() -> bool:
@@ -259,8 +291,12 @@ def _index_libraries(libs: LibrarySet, stop: threading.Event) -> None:
         try:
             index = index_for(ref.layout)
             index.ensure_fresh()
-            while not stop.is_set() and index.backfill_tags(budget_s=2.0):
-                pass
+            # A slice that finds no tags (videos without any) is still
+            # progress: carry on until the backfill says it is done.
+            while not stop.is_set():
+                index.backfill_tags(budget_s=2.0)
+                if not index.backfill_pending:
+                    break
         except Exception as exc:  # noqa: BLE001 - the index is disposable
             if not warned:
                 warned = True
@@ -493,6 +529,11 @@ def create_app(
     app.state.library = lib
     app.state.config = cfg
     app.state.csrf_token = csrf_token
+    # A newer YTOP on another stick.  Its launcher says so over the
+    # token-checked rescan call, and only that is remembered for every page;
+    # a plain ``?offer_switch=1`` link (anyone can make one) shows the banner
+    # on that one page.  Either way the stick name must look like one.
+    app.state.switch_offer = ""
     # The running uvicorn.Server (set by ``serve``) and the one graceful stop
     # path: the instance shutdown endpoint (and Quit/idle exit) call
     # ``app.state.request_stop()``.
@@ -672,6 +713,9 @@ def create_app(
         }
 
     def render(request: Request, template: str, **context):
+        switch_offer = app.state.switch_offer
+        if not switch_offer and request.query_params.get("offer_switch") == "1":
+            switch_offer = offer_label(request.query_params.get("offer_from"))
         base = {
             "request": request,
             "q": "",
@@ -681,6 +725,7 @@ def create_app(
             "live_job": None,
             "job_by_playlist": {},
             "csrf_token": csrf_token,
+            "switch_offer": switch_offer,
             # The one-time question and the offer (any page).
             "ask_app_updates": releases.asking(),
             "app_offer": releases.offer if releases.phase in ("idle", "failed") else None,
@@ -811,6 +856,17 @@ def create_app(
         else:
             heading = "All videos"
         library_label = next((ref.label for ref in refs if ref.id == active), "")
+        video_total = sum(len(videos) for _card, videos in groups)
+        shown_total, playlist_total = video_total, len(groups)
+        if not (tag or category or channel) and video_total > UNFILTERED_VIDEO_LIMIT:
+            # Unfiltered, a big library would be one enormous page.
+            capped, room = [], UNFILTERED_VIDEO_LIMIT
+            for card, videos in groups:
+                if room <= 0:
+                    break
+                capped.append((card, videos[:room]))
+                room -= len(videos[:room])
+            groups, shown_total = capped, UNFILTERED_VIDEO_LIMIT
         return render(
             request,
             "videos.html",
@@ -818,7 +874,9 @@ def create_app(
             heading=heading,
             active_library=active,
             library_label=library_label,
-            video_total=sum(len(videos) for _card, videos in groups),
+            video_total=video_total,
+            shown_total=shown_total,
+            playlist_total=playlist_total,
         )
 
     @app.get("/playlist/new")
@@ -897,9 +955,12 @@ def create_app(
             row = derived.get(pid)
             effective_tags = apply_edits(pid, list(row.tags) if row else [], edits)
             effective_cat = effective_category(pid, row.category if row else "", edits)
+            # Suggest every tag the library shows, as shown: derived and
+            # user-added ones, renamed, without hidden ones.
             seen: dict = {}
-            for item in derived.values():
-                for tag in item.tags:
+            for other in set(derived) | set(edits.playlists):
+                item = derived.get(other)
+                for tag in apply_edits(other, list(item.tags) if item else [], edits):
                     seen.setdefault(tag.key, tag)
             vocabulary = sorted(seen.values(), key=lambda tag: tag.label.casefold())
             category_names = sorted(
@@ -915,7 +976,7 @@ def create_app(
             effective_category=effective_cat,
             tag_vocabulary=vocabulary,
             category_names=category_names,
-            can_edit_tags=ref is not None and not ref.read_only,
+            can_edit_tags=ref is not None and _tags_writable(ref),
         )
 
     @app.post("/playlist/{playlist_id}/title")
@@ -934,18 +995,29 @@ def create_app(
         return TagStore(ref.layout)
 
     def edit_tags(change: Callable[[], None]) -> None:
-        try:
-            change()
-        except CorruptDocumentError as exc:
-            raise HTTPException(status_code=409, detail=TAGS_DAMAGED_MESSAGE) from exc
-        except OSError as exc:
-            # A locked stick, a read-only mount or a folder without write
-            # permission: the same answer as a newer-schema library.
-            if exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+        # Every tag edit is idempotent and saved atomically, so a refused
+        # attempt can simply be repeated.
+        for pause in (*TAG_EDIT_RETRY_S, None):
+            try:
+                change()
+                return
+            except CorruptDocumentError as exc:
                 raise HTTPException(
-                    status_code=409, detail=TAGS_READ_ONLY_MESSAGE
+                    status_code=409, detail=TAGS_DAMAGED_MESSAGE
                 ) from exc
-            raise
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM) and pause is not None:
+                    # Perhaps a brief lock (Windows), not a locked stick.
+                    time.sleep(pause)
+                    continue
+                # A locked stick, a read-only mount or a folder without
+                # write permission: the same answer as a newer-schema
+                # library.
+                if exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+                    raise HTTPException(
+                        status_code=409, detail=TAGS_READ_ONLY_MESSAGE
+                    ) from exc
+                raise
 
     def tag_target(playlist_id: str) -> tuple[LibraryRef, str]:
         refuse_ambiguous(playlist_id)
@@ -958,16 +1030,17 @@ def create_app(
     @app.post("/playlist/{playlist_id}/tags")
     async def playlist_tags(request: Request, playlist_id: str):
         ref, pid = tag_target(playlist_id)
-        store = tag_store_for(ref)
         form = await request.form()
         action = str(form.get("action") or "")
         tag = str(form.get("tag") or "")
+        # A malformed request is refused as such, whatever the library.
+        if action not in ("add", "remove"):
+            raise HTTPException(status_code=400, detail="unknown tag action")
+        store = tag_store_for(ref)
         if action == "add":
             edit_tags(lambda: store.add(pid, tag))
-        elif action == "remove":
-            edit_tags(lambda: store.remove(pid, tag))
         else:
-            raise HTTPException(status_code=400, detail="unknown tag action")
+            edit_tags(lambda: store.remove(pid, tag))
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/category")
@@ -999,15 +1072,18 @@ def create_app(
         )
         vocabulary = index_for(ref.layout, read_only=ref.read_only).vocabulary()
         edits = TagStore(ref.layout).read()
-        hidden = [
-            (key, vocabulary[key].label if key in vocabulary else key)
-            for key in sorted(edits.hidden)
-        ]
         # A tag's own name before its rename: derived, or as the user added it.
         names = {key: tag.label for key, tag in vocabulary.items()}
         for row in edits.playlists.values():
             for added in row.add:
                 names.setdefault(normalize_tag(added), added)
+        # A hidden tag by the name it was shown with: a rename's label, else
+        # its own (a user-added tag has no derived label).
+        shown = {normalize_tag(label): label for label in edits.renames.values()}
+        hidden = [
+            (key, shown.get(key) or names.get(key, key))
+            for key in sorted(edits.hidden)
+        ]
         renamed = [
             (key, names.get(key, key), label)
             for key, label in sorted(edits.renames.items())
@@ -1020,7 +1096,7 @@ def create_app(
             tags=tags,
             hidden_tags=hidden,
             renamed_tags=renamed,
-            can_edit_tags=not ref.read_only,
+            can_edit_tags=_tags_writable(ref),
         )
 
     @app.post("/tags/{library_id}/{action}")
@@ -1511,7 +1587,7 @@ def create_app(
 
     def _render_make_stick(
         request: Request, raw_target: str = "", error: str = "",
-        status_code: int = 200,
+        status_code: int = 200, platforms: list[str] | None = None,
     ):
         try:
             image: Path | None = makestick.source_image()
@@ -1531,17 +1607,29 @@ def create_app(
             except OSError as exc:
                 error = error or makestick.drive_problem(_make_target(raw_target), exc)
         if info is None:
-            candidates = makestick.candidate_targets(libs, image)
+            candidates = makestick.candidate_targets(
+                libs, image, timeout=libs.probe_timeout
+            )
         sizes = (build or {}).get("sizes") or {}
         playlists = (
             lib.playlists_and_bytes()[0]
             if info is not None and info.mode == "new" else []
         )
+        available = [str(plat) for plat in (build or {}).get("platforms") or []]
+        # Ticked platforms: the ones asked for, else (upgrading) the ones the
+        # stick already starts on, else all of them.  The upgrade summary is
+        # counted for exactly these, not for every platform the image has.
+        checked = [plat for plat in available if plat in set(platforms or [])]
+        if not checked and info is not None and info.mode == "upgrade":
+            have = (info.image_build or {}).get("platforms") or []
+            checked = [plat for plat in available if plat in set(map(str, have))]
+        if not checked:
+            checked = available
         upgrade_line = ""
         if info is not None and info.mode == "upgrade" and image is not None:
             try:
                 upgrade_line = makestick.upgrade_summary(makestick.plan_make(
-                    info.path, image, lib, mode="upgrade",
+                    info.path, image, lib, mode="upgrade", platforms=checked,
                 ))
             except (makestick.MakeStickError, OSError):
                 upgrade_line = ""
@@ -1550,6 +1638,7 @@ def create_app(
             "make_stick.html",
             job=None,
             upgrade_line=upgrade_line,
+            checked_platforms=checked,
             image_error=image_error,
             build=build,
             platform_sizes={
@@ -1569,8 +1658,9 @@ def create_app(
     @app.get("/make-stick")
     def make_stick_page(
         request: Request, target: str = Query(default="", max_length=1000),
+        platforms: list[str] = Query(default=[]),
     ):
-        return _render_make_stick(request, target)
+        return _render_make_stick(request, target, platforms=platforms)
 
     @app.post("/make-stick")
     async def make_stick_submit(request: Request):
@@ -1590,16 +1680,21 @@ def create_app(
         try:
             image, stick_plan = await run_in_threadpool(plan)
         except ValueError as exc:
-            return _render_make_stick(request, raw_target, str(exc), 400)
+            return _render_make_stick(
+                request, raw_target, str(exc), 400, platforms=platforms,
+            )
         except OSError as exc:
             return _render_make_stick(
                 request, raw_target,
                 makestick.drive_problem(_make_target(raw_target), exc), 400,
+                platforms=platforms,
             )
         try:
             job = app.state.jobs.make_stick(stick_plan, image)
         except ValueError as exc:  # a busy target or playlist
-            return _render_make_stick(request, raw_target, str(exc), 409)
+            return _render_make_stick(
+                request, raw_target, str(exc), 409, platforms=platforms,
+            )
         return RedirectResponse(f"/make-stick/{job.id}", status_code=303)
 
     @app.get("/make-stick/{job_id}")
@@ -1650,7 +1745,20 @@ def create_app(
         if playlist_id.startswith("library:"):
             library_id, playlist_id = playlist_id[len("library:"):], ""
         if target.kind != "video":
-            # A pure playlist link: add the whole playlist, as /add does.
+            # A pure playlist link: add the whole playlist, as /add does.  A
+            # chosen destination playlist can't hold it; say so instead of
+            # dropping the choice silently, and keep to its library.
+            notice = PLAYLIST_LINK_NOTICE
+            if playlist_id:
+                refuse_ambiguous(playlist_id)
+                chosen = lib.resolve_playlist(playlist_id)
+                if chosen is not None:
+                    library_id = library_id or chosen[0].id
+                    title = lib.playlist_titles().get(playlist_id, playlist_id)
+                    notice = (
+                        "That was a playlist link, so the whole playlist is "
+                        f"being added as its own playlist, not into {title}."
+                    )
             try:
                 job = start_playlist_probe(
                     url, preserve,
@@ -1660,7 +1768,7 @@ def create_app(
                 raise
             except Exception as exc:  # noqa: BLE001 - shown on the page
                 return reject(f"Could not start the probe: {exc}")
-            app.state.jobs.set_notice(job.id, PLAYLIST_LINK_NOTICE)
+            app.state.jobs.set_notice(job.id, notice)
             return RedirectResponse(f"/add/{job.id}", status_code=303)
         elif playlist_id:
             refuse_ambiguous(playlist_id)
@@ -1821,15 +1929,24 @@ def create_app(
     async def quit_api(request: Request):
         form = await request.form()
         force = str(form.get("force") or "") == "1"
+        # The Quit form posted without JavaScript carries its token as a
+        # field; the script sends it as a header and wants JSON back.
+        plain_form = "csrf_token" in form and "x-csrf-token" not in request.headers
+
+        def busy(count: int):
+            if plain_form:
+                response = render(request, "quit_busy.html", active_jobs=count)
+                response.status_code = 409
+                return response
+            return JSONResponse({"active_jobs": count}, status_code=409)
+
         count = active_job_count()
         if count and not force:
-            return JSONResponse({"active_jobs": count}, status_code=409)
+            return busy(count)
         # Rendered before anything stops: the page needs nothing afterwards.
         page = templates.get_template("stopped.html").render()
         if not await run_in_threadpool(quit_now, force):
-            return JSONResponse(
-                {"active_jobs": max(active_job_count(), 1)}, status_code=409
-            )
+            return busy(max(active_job_count(), 1))
         return Response(page, media_type="text/html")
 
     @app.get("/api/instance", dependencies=[Depends(require_token)])
@@ -1846,8 +1963,12 @@ def create_app(
 
     @app.post("/api/instance/rescan", dependencies=[Depends(require_token)],
               status_code=204)
-    def instance_rescan() -> Response:
+    def instance_rescan(
+        offer_from: str | None = Query(default=None, max_length=200),
+    ) -> Response:
         libs.refresh()
+        if offer_from is not None:  # a launcher with a newer YTOP
+            app.state.switch_offer = offer_label(offer_from)
         return Response(status_code=204)
 
     @app.post("/api/instance/shutdown", dependencies=[Depends(require_token)])

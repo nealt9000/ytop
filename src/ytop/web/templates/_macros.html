@@ -36,7 +36,7 @@
   {%- elif job.status == "ready" %}Ready to download
   {%- elif job.status == "queued" %}Queued
   {%- elif job.status == "running" %}Downloading
-  {%- elif job.status == "paused_offline" %}Paused — library offline
+  {%- elif job.status == "paused_offline" %}Paused
   {%- elif job.status == "done" %}Complete
   {%- elif job.status == "cancelled" %}Cancelled
   {%- else %}Failed{% endif -%}

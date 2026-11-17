@@ -84,6 +84,10 @@ ConfigFor = Callable[[Path | None], Config]
 COPY_KINDS = ("move", "make_stick")
 DOWNLOAD_KINDS = ("playlist", "video")
 UPDATE_TITLE = "Update YouTube parts"
+INTERRUPTED_MESSAGE = (
+    "interrupted before it finished (YTOP stopped or the drive was "
+    "unplugged); click Resume to continue"
+)
 # Nonterminal progress is coalesced; a terminal transition always flushes.
 SAVE_INTERVAL_S = 0.75
 
@@ -178,6 +182,9 @@ class Job:
     error: str | None = None
     # What the component updater did for this job (see ytop.autoupdate).
     notice: str = ""
+    # The status a paused job had: a paused review ("ready") goes back to
+    # its review on Resume instead of downloading unconfirmed.
+    paused_from: str = ""
     items: list[dict] = field(default_factory=list)
 
     @property
@@ -224,6 +231,20 @@ class Job:
         return human_bytes(self.move_total_bytes)
 
     @property
+    def copy_progress_label(self) -> str:
+        """Progress of an active move/make-stick job.  Phases that count
+        files rather than bytes (checking, switching) report total_bytes 0,
+        so the "X of Y" byte pair is left out instead of showing "0 B of 0 B"."""
+        parts = []
+        if self.move_total_bytes:
+            parts.append(f"{self.moved_label} of {self.move_total_label}")
+        if self.move_total_files:
+            parts.append(f"{self.move_files}/{self.move_total_files} files")
+        if self.current_title:
+            parts.append(self.current_title)
+        return " · ".join(parts)
+
+    @property
     def current_percent(self) -> float:
         if not self.current_total:
             return 0.0
@@ -244,7 +265,7 @@ class Job:
             "done": "Complete",
             "failed": "Failed",
             "cancelled": "Cancelled",
-            PAUSED: "Paused — library offline",
+            PAUSED: "Paused",
         }
         return labels.get(self.status, self.status)
 
@@ -409,6 +430,8 @@ class JobManager:
         # was last written to each (unchanged files are not rewritten).
         self._files: set[str] = set()
         self._written: dict[str, list[dict]] = {}
+        # Libraries whose last jobs.json write failed (warned about once).
+        self._unsaved: set[str] = set()
         self._save_pending = False
         self._last_save = 0.0
         self._closed = False
@@ -482,8 +505,13 @@ class JobManager:
             if document.ok:
                 self._files.add(ref.id)
             doc = document.data if document.ok else {}
+            rows = (doc or {}).get("jobs") or []
+            if document.ok and isinstance(rows, list):
+                # What the file holds: an unchanged file is never rewritten
+                # (a locked stick or read-only mount is only listed).
+                self._written[ref.id] = copy.deepcopy(rows)
             broken = 0
-            for row in (doc or {}).get("jobs") or []:
+            for row in rows if isinstance(rows, list) else []:
                 if not isinstance(row, dict) or not row.get("id"):
                     continue
                 if str(row["id"]) in self._jobs:
@@ -493,7 +521,13 @@ class JobManager:
                 except (TypeError, ValueError):
                     broken += 1
                     continue
-                if job.status in ACTIVE:
+                if job.kind in DOWNLOAD_KINDS and job.status in {
+                    "queued", "running",
+                }:
+                    # Its worker is gone (YTOP stopped, or the stick was
+                    # pulled before the pause could be saved to it).
+                    self._set_paused(job, INTERRUPTED_MESSAGE)
+                elif job.status in ACTIVE:
                     job.status = "failed"
                     job.error = "interrupted by a server restart"
                     job.finished_at = now_iso()
@@ -527,6 +561,7 @@ class JobManager:
                 self._refs.pop(library_id, None)
                 # It may have changed elsewhere; rewrite it when it returns.
                 self._written.pop(library_id, None)
+                self._unsaved.discard(library_id)
             new = [ref for ref in refs if ref.id not in self._refs]
             added = self._merge_libraries(new) if new else False
             paused = self._pause_offline({ref.id for ref in every} | recovering)
@@ -561,6 +596,8 @@ class JobManager:
 
     @staticmethod
     def _set_paused(job: Job, message: str) -> None:
+        if job.status != PAUSED:
+            job.paused_from = job.status
         job.status = PAUSED
         job.error = message
         job.cancel_requested = False
@@ -610,8 +647,13 @@ class JobManager:
         if ref.read_only:
             return
         with self._lock:
-            if self._closed or ref.id in self._refs:
+            if self._closed:
                 return
+            # The library set saw it go away and come back, even if this
+            # manager missed the unplug: it may have changed elsewhere.
+            self._refs.pop(ref.id, None)
+            self._written.pop(ref.id, None)
+            self._unsaved.discard(ref.id)
             before = set(self._jobs)
             self._merge_libraries([ref])
             touching = {
@@ -750,8 +792,15 @@ class JobManager:
                         "jobs": rows,
                     })
                 except OSError as exc:
-                    log.warning("could not save jobs to %s: %s", ref.root, exc)
+                    # A locked stick or read-only mount: say so once, not on
+                    # every progress save.
+                    if library_id not in self._unsaved:
+                        self._unsaved.add(library_id)
+                        log.warning(
+                            "could not save jobs to %s: %s", ref.root, exc
+                        )
                     continue
+                self._unsaved.discard(library_id)
                 self._files.add(library_id)
                 self._written[library_id] = rows
                 for job in jobs:
@@ -1733,6 +1782,13 @@ class JobManager:
         *,
         preserve_audio: bool | None = None,
     ) -> Job:
+        # List first, outside the job lock: a re-plugged library whose
+        # recovery was deferred (it cannot wait for PUBLISH_LOCK under the
+        # job lock) is recovered here instead of looking unplugged below.
+        try:
+            self._lib.libraries.libraries()
+        except Exception:  # noqa: BLE001 - discovery must never break this
+            log.exception("library discovery failed")
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -1749,6 +1805,19 @@ class JobManager:
                 )
             if not job.items:
                 raise ValueError("this job has no probe data; re-add the playlist")
+            if job.status == PAUSED and (
+                job.paused_from == "ready"
+                # Paused before this was recorded, and never started.
+                or (not job.paused_from and job.started_at is None)
+            ):
+                # A review paused before the user chose to download: show
+                # the review again rather than downloading unconfirmed.
+                job.status = "ready"
+                job.error = None
+                job.paused_from = ""
+                job.updated_at = now_iso()
+                self._save(force=True)
+                return copy.deepcopy(job)
             if policy not in {"efficient", "native"}:
                 raise ValueError("policy must be 'efficient' or 'native'")
             # A target that was deleted must not be silently recreated.
@@ -1798,6 +1867,7 @@ class JobManager:
                 row["error"] = None
             self._base_bytes[job_id] = 0
             job.status = "queued"
+            job.paused_from = ""
             job.policy = policy
             job.target_mb_per_hour = target_mb
             job.max_height = max_height

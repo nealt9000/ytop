@@ -515,7 +515,11 @@ def _open_existing(args, live, *, offer_from: str | None = None) -> int:
 
     from . import instance
 
-    instance.post(live, "/api/instance/rescan")
+    rescan = "/api/instance/rescan"
+    if offer_from is not None:
+        # Token-checked, so the server keeps the offer on every page.
+        rescan += "?" + urlencode({"offer_from": offer_from})
+    instance.post(live, rescan)
     url = live.url
     if offer_from is not None:
         url += "?" + urlencode({"offer_switch": "1", "offer_from": offer_from})

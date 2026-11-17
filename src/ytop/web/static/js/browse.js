@@ -247,4 +247,6 @@ export function initBrowse() {
   });
 
   render();
+  // Live only from now on: the count written on load is not announced.
+  if (count) count.setAttribute("role", "status");
 }

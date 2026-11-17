@@ -52,8 +52,8 @@
     </nav>
   </header>
 
-  {% if request.query_params.get('offer_switch') == '1' %}
-  <div class="offer-switch" role="status">A newer {{ product_name }} is available on {{ request.query_params.get('offer_from') or 'another stick' }}; switch when downloads finish</div>
+  {% if switch_offer %}
+  <div class="offer-switch" role="status">A newer {{ product_name }} is available on {{ switch_offer }}; switch when downloads finish</div>
   {% endif %}
   {% if ask_app_updates %}
   <div class="offer-switch app-update-ask" role="region" aria-label="{{ product_name }} updates">

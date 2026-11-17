@@ -136,7 +136,7 @@ def test_download_job_tracks_items_and_bytes(tmp_path: Path, monkeypatch):
     assert [row["status"] for row in job.items] == ["downloaded", "downloaded"]
 
 
-def test_restart_marks_an_active_job_failed(tmp_path: Path, monkeypatch):
+def test_restart_pauses_an_active_download(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
     manager = JobManager(lib_root(tmp_path))
     job = manager.create_probe("PLTESTJOBS00000000000000000001")
@@ -147,8 +147,8 @@ def test_restart_marks_an_active_job_failed(tmp_path: Path, monkeypatch):
     reopened = JobManager(lib_root(tmp_path))
     loaded = reopened.get(job.id)
     assert loaded is not None
-    assert loaded.status == "failed"
-    assert "restart" in (loaded.error or "")
+    assert loaded.status == "paused_offline"
+    assert "Resume" in (loaded.error or "")
 
 
 def test_add_and_download_pages(tmp_path: Path, monkeypatch):
@@ -500,7 +500,7 @@ def test_jobs_paused_when_library_offline(tmp_path: Path, monkeypatch):
     libs.refresh()
     listed = {job.id: job for job in manager.list()}
     assert listed[ready.id].status == "paused_offline"
-    assert listed[ready.id].status_label == "Paused — library offline"
+    assert listed[ready.id].status_label == "Paused"
     assert "USB stick" in (listed[ready.id].error or "")
     assert not listed[ready.id].active
     # Resume while it is still unplugged is refused with a clear message.
@@ -517,6 +517,8 @@ def test_jobs_paused_when_library_offline(tmp_path: Path, monkeypatch):
     shutil.move(parked, usb.root)
     libs.refresh()
     assert manager.get(ready.id).status == "paused_offline"
+    # A paused review goes back to its review; the user confirms again.
+    assert manager.start_download(ready.id).status == "ready"
     manager.start_download(ready.id)
     job = wait_for(manager, ready.id, {"done", "failed", "paused_offline"})
     assert job.status == "done"

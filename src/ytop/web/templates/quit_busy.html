@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Still downloading · {{ product_name }}{% endblock %}
+{% block content %}
+<section class="empty-state">
+  <h1>{{ active_jobs }} download{% if active_jobs != 1 %}s are{% else %} is{% endif %} still running</h1>
+  <p>Quit anyway? They will stop; add the playlist again later to resume the partial downloads.</p>
+  <div class="hero-actions">
+    <form action="/api/quit" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="force" value="1">
+      <button type="submit" class="btn danger">Quit anyway</button>
+    </form>
+    <a class="btn" href="/downloads">See downloads</a>
+    <a class="btn primary" href="/">Keep {{ product_name }} running</a>
+  </div>
+</section>
+{% endblock %}

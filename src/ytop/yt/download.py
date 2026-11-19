@@ -624,13 +624,19 @@ def download_probe(
     min_height: int = 240,
     fetch_transcripts: bool = True,
     preserve_audio: bool | None = None,
+    quality: str | None = None,
     library_root: Path | None = None,
     cancel: Callable[[], bool] | None = None,
     on_item_start: StartCallback | None = None,
     on_item_done: ItemCallback | None = None,
     on_progress: Callable[[ProbedItem, int, int], None] | None = None,
 ) -> FetchResult:
-    """Download a previously probed playlist, reporting per-item progress."""
+    """Download a previously probed playlist, reporting per-item progress.
+
+    ``quality`` (a review choice such as ``"720p"``) is remembered on the
+    playlist so the next sync's review starts from it; ``None`` keeps the
+    stored choice.
+    """
     lock = threading.Lock()
     if library_root is None:
         raise ValueError("library_root is required")
@@ -663,6 +669,8 @@ def download_probe(
     if preserve_audio is None:
         preserve_audio = bool(playlist_options.get("preserve_audio"))
     playlist_options["preserve_audio"] = bool(preserve_audio)
+    if quality is not None:
+        playlist_options["quality"] = str(quality)
 
     # Apply the requested policy to the whole playlist before writing bytes.
     if target_mb_per_hour and target_mb_per_hour > 0:

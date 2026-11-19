@@ -125,6 +125,17 @@ QUALITY_TIERS = (480, 720, 1080, 1440, 2160)
 TIER_POLICIES = tuple(f"{height}p" for height in QUALITY_TIERS)
 
 
+def policy_settings(policy: str, config: Config) -> tuple[float, int]:
+    """``(target_mb_per_hour, max_height)`` for a review quality choice."""
+    if policy == "efficient":
+        return float(config.target_mb_per_hour), int(config.max_height)
+    if policy == "native":
+        return 0.0, 0
+    if policy in TIER_POLICIES:
+        return 0.0, int(policy[:-1])
+    raise ValueError(f"unknown download quality: {policy!r}")
+
+
 @dataclass
 class Job:
     id: str
@@ -1878,8 +1889,8 @@ class JobManager:
                 job.updated_at = now_iso()
                 self._save(force=True)
                 return copy.deepcopy(job)
-            if policy not in {"efficient", "native"}:
-                raise ValueError("policy must be 'efficient' or 'native'")
+            # Validates the choice before anything about the job changes.
+            policy_settings(policy, Config())
             # A target that was deleted must not be silently recreated.
             if (
                 job.kind != "video"
@@ -1912,10 +1923,7 @@ class JobManager:
                         (resolved[2].get("options") or {}).get("preserve_audio")
                     )
             config = self._job_config(job)
-            target_mb = (
-                0.0 if policy == "native" else config.target_mb_per_hour
-            )
-            max_height = 0 if policy == "native" else config.max_height
+            target_mb, max_height = policy_settings(policy, config)
             # "Sync again" and retries fetch fresh remote metadata.
             if job.in_library or job.status in {
                 "done", "failed", "cancelled", PAUSED,
@@ -2289,6 +2297,8 @@ class JobManager:
                 min_height=config.min_height,
                 fetch_transcripts=True,
                 preserve_audio=job.preserve_audio,
+                # A single video added to a playlist leaves its quality alone.
+                quality=None if job.kind == "video" else job.policy,
                 library_root=location.root,
                 cancel=cancel.is_set,
                 on_item_start=on_start,

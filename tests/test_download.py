@@ -361,6 +361,25 @@ def test_preserve_audio_is_stored_on_the_playlist(tmp_path: Path, fake_network):
     assert doc["options"]["preserve_audio"] is True
 
 
+def test_quality_is_stored_on_the_playlist(tmp_path: Path, fake_network):
+    root = make_library(tmp_path).root
+    cfg = Config()
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    probe = download_mod.probe_playlist("PL1", cfg)
+    download_mod.download_probe(
+        probe, cfg, quiet=True, max_height=720, target_mb_per_hour=0,
+        library_root=root, quality="720p",
+    )
+    doc = json.loads((result.playlist_dir / "playlist.json").read_text())
+    assert doc["options"]["quality"] == "720p"
+    assert doc["options"]["preserve_audio"] is False
+
+    # A download that does not name a quality keeps the remembered one.
+    download_mod.download_probe(probe, cfg, quiet=True, library_root=root)
+    doc = json.loads((result.playlist_dir / "playlist.json").read_text())
+    assert doc["options"]["quality"] == "720p"
+
+
 def test_kind_survives_a_download_into_a_local_playlist(
     tmp_path: Path, fake_network,
 ):

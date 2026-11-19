@@ -92,7 +92,7 @@
   {% endfor %}
 </div>
 {% if job.free_bytes is not none %}
-<p class="muted small">{{ job.free_bytes|bytes }} free on the destination drive{% if job.in_library %}; only videos not already downloaded are fetched{% endif %}.</p>
+<p class="muted small">{{ job.free_bytes|bytes }} free on the destination drive{% if job.in_library and job.kind != "video" %}; only videos not already downloaded are fetched{% endif %}.</p>
 {% endif %}
 {% if job.fat32_warning %}
 <p class="form-error">⚠ {{ job.fat32_count }} videos exceed FAT32's 4 GB limit on this drive</p>

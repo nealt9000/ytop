@@ -136,6 +136,26 @@ def policy_settings(policy: str, config: Config) -> tuple[float, int]:
     raise ValueError(f"unknown download quality: {policy!r}")
 
 
+def _suggested_policy(stored, review: dict) -> str:
+    """The review choice to preselect from a playlist's stored quality.
+
+    A remembered tier that is no longer smaller than Native (the videos above
+    it went away) means Native now; anything unknown means Efficient.
+    """
+    if not isinstance(stored, str):
+        return "efficient"
+    if stored in {"efficient", "native", *review["estimate_tiers"]}:
+        return stored
+    if stored in TIER_POLICIES:
+        tallest = max(
+            (int(row.get("native_height") or 0) for row in review["items"]),
+            default=0,
+        )
+        if tallest and int(stored[:-1]) >= tallest:
+            return "native"
+    return "efficient"
+
+
 @dataclass
 class Job:
     id: str
@@ -223,7 +243,7 @@ class Job:
 
     @property
     def quality_options(self) -> list[dict]:
-        """Download choices for the review, smallest first."""
+        """Download choices for the review: Efficient, tiers, Native."""
         options = [("efficient", "Efficient", self.estimate_bytes)]
         for height in QUALITY_TIERS:
             key = f"{height}p"
@@ -232,7 +252,11 @@ class Job:
                     (key, f"{key} max", int(self.estimate_tiers[key]))
                 )
         options.append(("native", "Native", self.estimate_native_bytes))
-        show_fit = self.free_bytes is not None and not self.in_library
+        # A sync only fetches new videos, so its totals overstate the need;
+        # a single video is always new.
+        show_fit = self.free_bytes is not None and (
+            not self.in_library or self.kind == "video"
+        )
         return [
             {
                 "policy": policy,
@@ -1423,10 +1447,7 @@ class JobManager:
             job_id, str(probe.playlist.get("id") or "")
         )
         review = _compact_probe(probe, config, preserve, destination)
-        offered = {"efficient", "native", *review["estimate_tiers"]}
-        suggested = (
-            stored_quality if stored_quality in offered else "efficient"
-        )
+        suggested = _suggested_policy(stored_quality, review)
         self._install_probe(job_id, probe)
         self._update(
             job_id,

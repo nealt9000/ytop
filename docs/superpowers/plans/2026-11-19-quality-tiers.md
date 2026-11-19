@@ -23,7 +23,7 @@
 
 1. **Unknown policy from a forged/old form** (`policy="999p"`, `"720"`) → `start_download` raises `ValueError` (route returns 409), never downloads at native. Test in Task 2.
 2. **Playlist whose max height is 720p** → no 720p/1080p/1440p/2160p options (equal to Native), only Efficient, 480p (if smaller), Native. Test in Task 1.
-3. **Stored `options["quality"]` that is no longer offered** (e.g. `"1080p"` on a now-720p playlist, or garbage) → review preselects Efficient. Test in Task 3.
+3. **Stored `options["quality"]` that is no longer offered** → a tier at or above the playlist's tallest native height preselects Native (amended after final review); garbage or non-string values preselect Efficient. Test in Task 3.
 4. **Single-video add into an existing playlist** must not overwrite that playlist's stored quality. Test in Task 2.
 5. **Destination folder not yet created** (new playlist) → free space read from the nearest existing ancestor, not an error/None. Test in Task 1.
 

@@ -866,7 +866,7 @@ def test_review_preselects_the_stored_quality(tmp_path: Path, monkeypatch):
     assert job.suggested_policy == "native"
 
 
-@pytest.mark.parametrize("stored", ["1080p", "bogus", 7, None])
+@pytest.mark.parametrize("stored", ["bogus", 7, None, "360p"])
 def test_review_ignores_a_stored_quality_that_is_not_offered(
     tmp_path: Path, monkeypatch, stored,
 ):
@@ -876,3 +876,34 @@ def test_review_ignores_a_stored_quality_that_is_not_offered(
     manager = JobManager(lib_root(tmp_path))
     job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
     assert job.suggested_policy == "efficient"
+
+
+def test_a_stored_tier_merged_into_native_preselects_native(
+    tmp_path: Path, monkeypatch,
+):
+    # fake_probe tops out at 240p: a 720p cap now picks the native renditions,
+    # so the remembered 720p choice must not fall back to Efficient.
+    playlist_id = _stored_quality(tmp_path, "720p")
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "native"
+
+
+@pytest.mark.parametrize("stored", [["720p"], {"q": 1}])
+def test_an_unhashable_stored_quality_does_not_break_the_review(
+    tmp_path: Path, monkeypatch, stored,
+):
+    playlist_id = _stored_quality(tmp_path, stored)
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "efficient"
+
+
+def test_a_single_video_review_shows_fits():
+    job = jobs_module.Job(
+        id="j", kind="video", in_library=True, estimate_bytes=10,
+        estimate_native_bytes=100, free_bytes=50,
+    )
+    assert [o["fits"] for o in job.quality_options] == [True, False]

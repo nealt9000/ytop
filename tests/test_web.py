@@ -783,6 +783,7 @@ def test_add_video_page_probes_into_the_chosen_playlist(
     assert "Keep high-quality audio" in status
     assert "Opus 50k" in status
     assert "1 video" in status
+    assert "only videos not already downloaded" not in status
 
 
 def test_a_single_video_url_goes_to_ungrouped(

@@ -693,3 +693,217 @@ def test_probe_job_uses_default_library_cache_root(tmp_path: Path, monkeypatch):
 
     job.library_id = ""
     assert manager._job_cache_root(job) == lib_root(tmp_path)
+
+
+# -- quality tiers -------------------------------------------------------------
+def _tier_video(fid: str, height: int, size: int) -> dict:
+    return {"format_id": fid, "vcodec": "av01", "acodec": "none",
+            "height": height, "width": height * 16 // 9, "fps": 30,
+            "ext": "webm", "protocol": "https", "filesize": size}
+
+
+def _tier_audio() -> dict:
+    return {"format_id": "a", "vcodec": "none", "acodec": "opus", "abr": 50,
+            "language": "en", "ext": "webm", "filesize": 100}
+
+
+def _tier_probe(*heights_per_item: tuple[int, ...]) -> ProbeResult:
+    items = []
+    for index, heights in enumerate(heights_per_item, start=1):
+        info = {"id": f"v{index}", "duration": 60, "formats": [
+            _tier_video(f"{h}", h, h * 10) for h in heights
+        ] + [_tier_audio()]}
+        item = ProbedItem(index=index, id=f"v{index}", url=f"u{index}",
+                          duration=60.0)
+        item.info = info
+        item.selection = _selection()
+        items.append(item)
+    return ProbeResult(url="https://www.youtube.com/playlist?list=PL1",
+                       playlist={"id": "PL1", "title": "List"}, items=items)
+
+
+def test_review_offers_only_tiers_smaller_than_native():
+    probe = _tier_probe((360, 720, 1080), (360, 720))
+    review = jobs_module._compact_probe(probe, Config(), False, None)
+    assert set(review["estimate_tiers"]) == {"480p", "720p"}
+    # 480p falls back to 360p on both items.
+    assert review["estimate_tiers"]["480p"] == 2 * (3600 + 100)
+    assert review["estimate_tiers"]["720p"] == 2 * (7200 + 100)
+    assert review["estimate_tiers"]["720p"] < review["estimate_native_bytes"]
+    assert review["free_bytes"] is None
+
+
+def test_review_has_no_tiers_when_playlist_tops_out_at_720p():
+    probe = _tier_probe((360, 720), (360, 720))
+    review = jobs_module._compact_probe(probe, Config(), False, None)
+    assert set(review["estimate_tiers"]) == {"480p"}
+
+
+def test_review_reads_free_space_of_the_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "free_bytes", lambda path: 12345)
+    probe = _tier_probe((360,))
+    review = jobs_module._compact_probe(probe, Config(), False, tmp_path / "new")
+    assert review["free_bytes"] == 12345
+
+
+def test_quality_options_order_labels_and_fits():
+    job = jobs_module.Job(
+        id="j", estimate_bytes=10, estimate_native_bytes=100,
+        estimate_tiers={"720p": 50, "480p": 30}, free_bytes=40,
+    )
+    opts = job.quality_options
+    assert [o["policy"] for o in opts] == ["efficient", "480p", "720p", "native"]
+    assert [o["label"] for o in opts] == [
+        "Efficient", "480p max", "720p max", "Native",
+    ]
+    assert [o["bytes"] for o in opts] == [10, 30, 50, 100]
+    assert [o["fits"] for o in opts] == [True, True, False, False]
+    job.in_library = True
+    assert all(o["fits"] is None for o in job.quality_options)
+    job.in_library = False
+    job.free_bytes = None
+    assert all(o["fits"] is None for o in job.quality_options)
+
+
+def test_policy_label_for_a_tier():
+    job = jobs_module.Job(id="j", policy="720p")
+    assert job.policy_label == "720p max"
+
+
+def test_policy_settings():
+    cfg = Config()
+    assert jobs_module.policy_settings("720p", cfg) == (0.0, 720)
+    assert jobs_module.policy_settings("2160p", cfg) == (0.0, 2160)
+    assert jobs_module.policy_settings("native", cfg) == (0.0, 0)
+    assert jobs_module.policy_settings("efficient", cfg) == (
+        cfg.target_mb_per_hour, cfg.max_height,
+    )
+    for bad in ("999p", "720", "", "cap", "360p"):
+        with pytest.raises(ValueError):
+            jobs_module.policy_settings(bad, cfg)
+
+
+def _capturing_download(tmp_path: Path, captured: dict):
+    def fake_download(probe, config, *, on_item_done=None, **kwargs):
+        captured.update(kwargs)
+        results = []
+        for item in probe.items:
+            result = ItemResult(item.index, item.id, item.title, "skipped",
+                                size=1000)
+            results.append(result)
+            if on_item_done:
+                on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results,
+                           total_bytes=sum(r.size for r in results))
+    return fake_download
+
+
+def test_start_download_with_a_tier(tmp_path: Path, monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    monkeypatch.setattr(jobs_module, "download_probe",
+                        _capturing_download(tmp_path, captured))
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    wait_for(manager, job.id, {"ready"})
+    manager.start_download(job.id, policy="720p")
+    job = wait_for(manager, job.id, {"done"})
+    assert (job.policy, job.max_height, job.target_mb_per_hour) == (
+        "720p", 720, 0,
+    )
+    assert captured["max_height"] == 720
+    assert captured["target_mb_per_hour"] == 0
+    assert captured["quality"] == "720p"
+    assert job.policy_label == "720p max"
+
+
+def test_start_download_rejects_an_unknown_tier(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    wait_for(manager, job.id, {"ready"})
+    with pytest.raises(ValueError):
+        manager.start_download(job.id, policy="999p")
+    assert manager.get(job.id).status == "ready"
+
+
+def test_a_video_job_does_not_change_the_playlist_quality(
+    tmp_path: Path, monkeypatch,
+):
+    from test_web import fake_probe_video
+
+    captured: dict = {}
+    monkeypatch.setattr(jobs_module, "probe_video", fake_probe_video)
+    monkeypatch.setattr(jobs_module, "download_probe",
+                        _capturing_download(tmp_path, captured))
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_video_probe("abc12345678")
+    wait_for(manager, job.id, {"ready"})
+    manager.start_download(job.id, policy="720p")
+    wait_for(manager, job.id, {"done"})
+    assert captured["max_height"] == 720
+    assert captured["quality"] is None
+
+
+def _stored_quality(tmp_path: Path, quality) -> str:
+    import json
+
+    playlist_id = "PLTESTJOBS00000000000000000001"
+    playlist_dir = LibraryLayout(lib_root(tmp_path)).playlist_meta_dir(playlist_id)
+    playlist_dir.mkdir(parents=True)
+    (playlist_dir / "playlist.json").write_text(json.dumps({
+        "schema": 1, "id": playlist_id, "title": "Existing",
+        "entries": [], "options": {"quality": quality},
+    }), encoding="utf-8")
+    return playlist_id
+
+
+def test_review_preselects_the_stored_quality(tmp_path: Path, monkeypatch):
+    playlist_id = _stored_quality(tmp_path, "native")
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "native"
+
+
+@pytest.mark.parametrize("stored", ["bogus", 7, None, "360p"])
+def test_review_ignores_a_stored_quality_that_is_not_offered(
+    tmp_path: Path, monkeypatch, stored,
+):
+    # fake_probe offers only 240p, so no tier is smaller than native.
+    playlist_id = _stored_quality(tmp_path, stored)
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "efficient"
+
+
+def test_a_stored_tier_merged_into_native_preselects_native(
+    tmp_path: Path, monkeypatch,
+):
+    # fake_probe tops out at 240p: a 720p cap now picks the native renditions,
+    # so the remembered 720p choice must not fall back to Efficient.
+    playlist_id = _stored_quality(tmp_path, "720p")
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "native"
+
+
+@pytest.mark.parametrize("stored", [["720p"], {"q": 1}])
+def test_an_unhashable_stored_quality_does_not_break_the_review(
+    tmp_path: Path, monkeypatch, stored,
+):
+    playlist_id = _stored_quality(tmp_path, stored)
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "efficient"
+
+
+def test_a_single_video_review_shows_fits():
+    job = jobs_module.Job(
+        id="j", kind="video", in_library=True, estimate_bytes=10,
+        estimate_native_bytes=100, free_bytes=50,
+    )
+    assert [o["fits"] for o in job.quality_options] == [True, False]

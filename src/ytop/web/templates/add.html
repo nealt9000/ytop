@@ -83,17 +83,17 @@
 </section>
 
 <div class="size-options">
+  {% for option in job.quality_options %}
   <div class="size-option">
-    <span class="size-label">Efficient ({{ job.target_mb_per_hour|round|int }} MB/h budget)</span>
-    <strong>{{ job.estimate_label }}</strong>
-    <span class="muted tiny">Best native rendition under the budget, no re-encode</span>
+    <span class="size-label">{{ option.label }}{% if option.policy == "efficient" %} ({{ job.target_mb_per_hour|round|int }} MB/h budget){% endif %}</span>
+    <strong>{{ option.size_label }}</strong>
+    {% if option.fits is not none %}<span class="muted tiny">{% if option.fits %}✓ fits{% else %}✗ doesn't fit{% endif %}</span>{% endif %}
   </div>
-  <div class="size-option">
-    <span class="size-label">Native (best available)</span>
-    <strong>{{ job.estimate_native_label }}</strong>
-    <span class="muted tiny">Highest resolution YouTube offers</span>
-  </div>
+  {% endfor %}
 </div>
+{% if job.free_bytes is not none %}
+<p class="muted small">{{ job.free_bytes|bytes }} free on the destination drive{% if job.in_library and job.kind != "video" %}; only videos not already downloaded are fetched{% endif %}.</p>
+{% endif %}
 {% if job.fat32_warning %}
 <p class="form-error">⚠ {{ job.fat32_count }} videos exceed FAT32's 4 GB limit on this drive</p>
 {% endif %}
@@ -114,6 +114,8 @@
     spends one playlist-wide budget, starts every video at the smallest legible rendition, and buys
     height upgrades where they cost the fewest bytes. Forcing one resolution would either waste the
     budget or throw away higher-resolution videos, and forcing one codec would require a re-encode.
+    For a predictable size, the fixed caps (such as 720p max) take the best rendition at or below
+    that height for every video.
     {% if job.in_library %}This playlist is already in your
     library; syncing adds new videos and refreshes metadata without deleting existing media.{% endif %}
   </p>
@@ -124,14 +126,12 @@
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <fieldset class="policy-fieldset">
     <legend>Download quality</legend>
+    {% for option in job.quality_options %}
     <label class="policy-option">
-      <input type="radio" name="policy" value="efficient" checked>
-      <span><strong>Efficient</strong> — {{ job.estimate_label }}<br><small>≈{{ job.target_mb_per_hour|round|int }} MB/h budget</small></span>
+      <input type="radio" name="policy" value="{{ option.policy }}"{% if option.policy == job.suggested_policy %} checked{% endif %}>
+      <span><strong>{{ option.label }}</strong> — {{ option.size_label }}{% if option.fits is not none %} {% if option.fits %}✓ fits{% else %}✗ doesn't fit{% endif %} ({{ job.free_bytes|bytes }} free){% endif %}<br><small>{% if option.policy == "efficient" %}≈{{ job.target_mb_per_hour|round|int }} MB/h budget{% elif option.policy == "native" %}best available resolution{% else %}best rendition at or below {{ option.policy }}{% endif %}</small></span>
     </label>
-    <label class="policy-option">
-      <input type="radio" name="policy" value="native">
-      <span><strong>Native</strong> — {{ job.estimate_native_label }}<br><small>best available resolution</small></span>
-    </label>
+    {% endfor %}
   </fieldset>
   <label class="check-row">
     <input type="checkbox" name="preserve_audio" value="1" {% if job.preserve_audio %}checked{% endif %}>

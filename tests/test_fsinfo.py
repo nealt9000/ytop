@@ -130,3 +130,26 @@ def test_fs_info_linux_msdos_is_fat(monkeypatch):
     )
     info = fs_info(Path("/mnt/st/lib"))
     assert (info.fstype, info.max_file_bytes) == ("vfat", FAT32_MAX_FILE)
+
+
+def test_free_bytes_walks_up_to_an_existing_folder(tmp_path, monkeypatch):
+    import collections
+
+    seen = []
+    usage = collections.namedtuple("usage", "total used free")
+
+    def fake_usage(path):
+        seen.append(Path(path))
+        return usage(100, 40, 60)
+
+    monkeypatch.setattr(fsinfo.shutil, "disk_usage", fake_usage)
+    assert fsinfo.free_bytes(tmp_path / "not" / "yet") == 60
+    assert seen == [tmp_path]
+
+
+def test_free_bytes_is_none_when_the_drive_cannot_be_read(tmp_path, monkeypatch):
+    def broken(path):
+        raise OSError("gone")
+
+    monkeypatch.setattr(fsinfo.shutil, "disk_usage", broken)
+    assert fsinfo.free_bytes(tmp_path) is None

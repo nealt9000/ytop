@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import makestick
 from ..autoupdate import AutoUpdate
 from ..config import SESSION_AUTH, Config, load_config
-from ..fsinfo import fits_on
+from ..fsinfo import fits_on, free_bytes
 from ..libraries import READ_ONLY_MESSAGE, LibraryRef, LibrarySet
 from ..yt.download import ItemResult, download_probe, media_destination
 from ..yt.formats import allocate_efficient, audio_detail, select_format
@@ -120,6 +120,42 @@ def _job_from_row(row: dict, library_id: str) -> Job:
     })
 
 
+# Fixed resolution caps offered between Efficient and Native.
+QUALITY_TIERS = (480, 720, 1080, 1440, 2160)
+TIER_POLICIES = tuple(f"{height}p" for height in QUALITY_TIERS)
+
+
+def policy_settings(policy: str, config: Config) -> tuple[float, int]:
+    """``(target_mb_per_hour, max_height)`` for a review quality choice."""
+    if policy == "efficient":
+        return float(config.target_mb_per_hour), int(config.max_height)
+    if policy == "native":
+        return 0.0, 0
+    if policy in TIER_POLICIES:
+        return 0.0, int(policy[:-1])
+    raise ValueError(f"unknown download quality: {policy!r}")
+
+
+def _suggested_policy(stored, review: dict) -> str:
+    """The review choice to preselect from a playlist's stored quality.
+
+    A remembered tier that is no longer smaller than Native (the videos above
+    it went away) means Native now; anything unknown means Efficient.
+    """
+    if not isinstance(stored, str):
+        return "efficient"
+    if stored in {"efficient", "native", *review["estimate_tiers"]}:
+        return stored
+    if stored in TIER_POLICIES:
+        tallest = max(
+            (int(row.get("native_height") or 0) for row in review["items"]),
+            default=0,
+        )
+        if tallest and int(stored[:-1]) >= tallest:
+            return "native"
+    return "efficient"
+
+
 @dataclass
 class Job:
     id: str
@@ -158,11 +194,17 @@ class Job:
     total_duration: float = 0.0
     estimate_bytes: int = 0
     estimate_native_bytes: int = 0
+    # Fixed resolution caps offered on the review: {"720p": bytes, ...}.
+    estimate_tiers: dict = field(default_factory=dict)
+    # Free space on the destination drive when the review was built.
+    free_bytes: int | None = None
+    # The quality the review preselects (the playlist's last choice).
+    suggested_policy: str = "efficient"
     # Videos whose selected rendition exceeds FAT32's 4 GB file limit on the
     # destination drive (the download refuses them).
     fat32_warning: bool = False
     fat32_count: int = 0
-    policy: str = "efficient"  # efficient | native
+    policy: str = "efficient"  # efficient | native | 480p..2160p
     target_mb_per_hour: float = 100.0
     max_height: int = 0
     cancel_requested: bool = False
@@ -200,9 +242,38 @@ class Job:
         return human_bytes(self.estimate_native_bytes)
 
     @property
+    def quality_options(self) -> list[dict]:
+        """Download choices for the review: Efficient, tiers, Native."""
+        options = [("efficient", "Efficient", self.estimate_bytes)]
+        for height in QUALITY_TIERS:
+            key = f"{height}p"
+            if key in self.estimate_tiers:
+                options.append(
+                    (key, f"{key} max", int(self.estimate_tiers[key]))
+                )
+        options.append(("native", "Native", self.estimate_native_bytes))
+        # A sync only fetches new videos, so its totals overstate the need;
+        # a single video is always new.
+        show_fit = self.free_bytes is not None and (
+            not self.in_library or self.kind == "video"
+        )
+        return [
+            {
+                "policy": policy,
+                "label": label,
+                "bytes": size,
+                "size_label": human_bytes(size),
+                "fits": (size <= self.free_bytes) if show_fit else None,
+            }
+            for policy, label, size in options
+        ]
+
+    @property
     def policy_label(self) -> str:
         if self.policy == "native":
             return "native maximum"
+        if self.policy in TIER_POLICIES:
+            return f"{self.policy} max"
         return f"efficient, {self.target_mb_per_hour:g} MB/h budget"
 
     @property
@@ -280,6 +351,7 @@ def _compact_probe(
     total_duration = 0.0
     efficient_total = 0
     native_total = 0
+    tier_totals = {height: 0 for height in QUALITY_TIERS}
     fat32_count = 0
     for item in probe.items:
         selection = item.selection
@@ -291,6 +363,15 @@ def _compact_probe(
                 )
             except Exception:  # noqa: BLE001 - already recorded on the item
                 native = None
+            if native is not None:
+                for height in QUALITY_TIERS:
+                    try:
+                        tier_totals[height] += select_format(
+                            item.info, config.audio_language, height,
+                            preserve_audio,
+                        ).estimated_bytes
+                    except Exception:  # noqa: BLE001 - same as native
+                        continue
         duration = item.duration or 0
         total_duration += duration
         efficient_size = selection.estimated_bytes if selection else 0
@@ -339,6 +420,12 @@ def _compact_probe(
         "total_duration": total_duration,
         "estimate_bytes": efficient_total,
         "estimate_native_bytes": native_total,
+        "estimate_tiers": {
+            f"{height}p": total
+            for height, total in tier_totals.items()
+            if total < native_total
+        },
+        "free_bytes": free_bytes(destination) if destination is not None else None,
         "fat32_warning": fat32_count > 0,
         "fat32_count": fat32_count,
         "items": items,
@@ -1268,6 +1355,8 @@ class JobManager:
             total_duration=row["duration"],
             estimate_bytes=row["size"],
             estimate_native_bytes=row["native_size"],
+            estimate_tiers=review["estimate_tiers"],
+            free_bytes=review["free_bytes"],
             fat32_warning=review["fat32_warning"],
             fat32_count=review["fat32_count"],
             items=review["items"],
@@ -1341,10 +1430,12 @@ class JobManager:
         resolved = self._job_playlist(job, str(probe.playlist.get("id") or ""))
         preserve = job.preserve_audio
         location = None
+        stored_quality = None
         if resolved is not None:
-            preserve = preserve or bool(
-                (resolved[2].get("options") or {}).get("preserve_audio")
-            )
+            options = resolved[2].get("options")
+            options = options if isinstance(options, dict) else {}
+            preserve = preserve or bool(options.get("preserve_audio"))
+            stored_quality = options.get("quality")
             location = resolved[0]
         if location is not None:
             self._update(
@@ -1356,10 +1447,12 @@ class JobManager:
             job_id, str(probe.playlist.get("id") or "")
         )
         review = _compact_probe(probe, config, preserve, destination)
+        suggested = _suggested_policy(stored_quality, review)
         self._install_probe(job_id, probe)
         self._update(
             job_id,
             status="ready",
+            suggested_policy=suggested,
             preserve_audio=preserve,
             playlist_id=review["id"],
             title=review["title"],
@@ -1370,6 +1463,8 @@ class JobManager:
             total_duration=review["total_duration"],
             estimate_bytes=review["estimate_bytes"],
             estimate_native_bytes=review["estimate_native_bytes"],
+            estimate_tiers=review["estimate_tiers"],
+            free_bytes=review["free_bytes"],
             fat32_warning=review["fat32_warning"],
             fat32_count=review["fat32_count"],
             items=review["items"],
@@ -1822,8 +1917,8 @@ class JobManager:
                 job.updated_at = now_iso()
                 self._save(force=True)
                 return copy.deepcopy(job)
-            if policy not in {"efficient", "native"}:
-                raise ValueError("policy must be 'efficient' or 'native'")
+            # Validates the choice before anything about the job changes.
+            policy_settings(policy, Config())
             # A target that was deleted must not be silently recreated.
             if (
                 job.kind != "video"
@@ -1856,10 +1951,7 @@ class JobManager:
                         (resolved[2].get("options") or {}).get("preserve_audio")
                     )
             config = self._job_config(job)
-            target_mb = (
-                0.0 if policy == "native" else config.target_mb_per_hour
-            )
-            max_height = 0 if policy == "native" else config.max_height
+            target_mb, max_height = policy_settings(policy, config)
             # "Sync again" and retries fetch fresh remote metadata.
             if job.in_library or job.status in {
                 "done", "failed", "cancelled", PAUSED,
@@ -2233,6 +2325,8 @@ class JobManager:
                 min_height=config.min_height,
                 fetch_transcripts=True,
                 preserve_audio=job.preserve_audio,
+                # A single video added to a playlist leaves its quality alone.
+                quality=None if job.kind == "video" else job.policy,
                 library_root=location.root,
                 cancel=cancel.is_set,
                 on_item_start=on_start,

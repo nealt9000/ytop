@@ -327,10 +327,13 @@ matching and diacritic folding, so `godel` finds `Gödel`.
   Playlists appear as soon as a download starts, with finished videos playable
   and the rest filling in as they land.
 - **Add playlist** — paste a YouTube playlist link and choose a destination
-  library; ytop probes it in parallel and shows both the **efficient** size (the default 100 MB/h budget, minimum
-  240p, no re-encode) and the **native** size (best rendition YouTube offers).
-  Every video’s chosen format is listed, and nothing downloads until you confirm.
-  Already-present playlists are offered as a sync.
+  library; ytop probes it in parallel and shows the **efficient** size (the default 100 MB/h budget, minimum
+  240p, no re-encode), fixed caps (**480p**, **720p**, **1080p**, **1440p**,
+  **2160p max**, where they are smaller than native) and the **native** size
+  (best rendition YouTube offers), each marked as fitting or not in the
+  destination drive's free space. Every video’s chosen format is listed, and
+  nothing downloads until you confirm. Already-present playlists are offered as
+  a sync, starting from the quality the playlist was last downloaded with.
 - **Downloads** — probing and download jobs with per-video status, bytes written
   and a progress bar. The page updates in place from `/api/jobs` while jobs run,
   so scroll and keyboard focus are kept; polling pauses on a hidden tab. Each

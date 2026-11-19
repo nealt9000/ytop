@@ -240,7 +240,7 @@ table:
     {"id": "...", "index": 1, "title": "...", "path": "videos/...",
      "video": "video.webm", "available": true, "duration": 3753.8}
   ],
-  "options": {"preserve_audio": false},
+  "options": {"preserve_audio": false, "quality": "720p"},
   "order": "manual"               // absent until the user reorders
 }
 ```
@@ -267,6 +267,12 @@ size: the highest-bitrate original-language rendition in the container-native
 codec family (Opus for AV1/VP9, AAC for H.264), so the result still plays in the
 browser without a transcode. A later sync or single-video add inherits the flag.
 
+`options.quality` is the review choice the playlist was last downloaded with:
+`efficient`, `native`, or a fixed cap `480p`, `720p`, `1080p`, `1440p` or
+`2160p` (the best rendition at or below that height for every video). The next
+sync's review preselects it; a remembered cap that is no longer smaller than
+native preselects `native`. Adding a single video never changes it.
+
 Web download jobs are stored in the library as `.ytop/data/jobs.json`:
 
 ```json
@@ -283,7 +289,7 @@ Web download jobs are stored in the library as `.ytop/data/jobs.json`:
       "probe_done": 12,
       "estimate_bytes": 9025000000,
       "estimate_native_bytes": 32418375244,
-      "policy": "efficient",
+      "policy": "efficient",        // efficient | native | 480p … 2160p
       "target_mb_per_hour": 100.0,
       "in_library": true,
       "items": [
@@ -589,7 +595,7 @@ JSON:
 | `POST /add` | Form: `url`, optional `preserve_audio=1`, `location=<id>` → start a probe; a single-video URL goes to Un-grouped |
 | `GET /add/video` | Single-video form with a destination playlist picker |
 | `POST /add/video` | Form: `url`, `playlist` (empty = Un-grouped), optional `preserve_audio=1` → start one video |
-| `POST /jobs/{job_id}/download` | Form: `policy=efficient|native`, optional `preserve_audio=1`; start or resume a job |
+| `POST /jobs/{job_id}/download` | Form: `policy=efficient|native|480p|720p|1080p|1440p|2160p`, optional `preserve_audio=1`; start or resume a job |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued/probing/running job |
 | `POST /jobs/{job_id}/remove` | Remove an inactive job from `jobs.json` |
 | `POST /playlist/{playlist_id}/title` | Form: `title`; set or clear a playlist title override |

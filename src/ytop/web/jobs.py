@@ -1406,10 +1406,12 @@ class JobManager:
         resolved = self._job_playlist(job, str(probe.playlist.get("id") or ""))
         preserve = job.preserve_audio
         location = None
+        stored_quality = None
         if resolved is not None:
-            preserve = preserve or bool(
-                (resolved[2].get("options") or {}).get("preserve_audio")
-            )
+            options = resolved[2].get("options")
+            options = options if isinstance(options, dict) else {}
+            preserve = preserve or bool(options.get("preserve_audio"))
+            stored_quality = options.get("quality")
             location = resolved[0]
         if location is not None:
             self._update(
@@ -1421,10 +1423,15 @@ class JobManager:
             job_id, str(probe.playlist.get("id") or "")
         )
         review = _compact_probe(probe, config, preserve, destination)
+        offered = {"efficient", "native", *review["estimate_tiers"]}
+        suggested = (
+            stored_quality if stored_quality in offered else "efficient"
+        )
         self._install_probe(job_id, probe)
         self._update(
             job_id,
             status="ready",
+            suggested_policy=suggested,
             preserve_audio=preserve,
             playlist_id=review["id"],
             title=review["title"],

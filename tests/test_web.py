@@ -1028,3 +1028,35 @@ def test_add_video_form_routes_playlist_link(client: TestClient, monkeypatch):
     assert jobs.get(job_id).notice == (
         "That was a playlist link, so the whole playlist is being added."
     )
+
+
+def test_review_page_lists_tiers_with_fits_marker(
+    client: TestClient, monkeypatch,
+):
+    from test_jobs import _tier_probe
+
+    playlist_id = "PLTESTQUAL0000000000000000000001"
+
+    def probe(value, config, on_total=None, on_item=None, **kwargs):
+        result = _tier_probe((360, 720, 1080), (360, 720))
+        result.playlist = {"id": playlist_id, "title": "Tier List"}
+        if on_total:
+            on_total(len(result.items))
+        return result
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", probe)
+    response = client.post(
+        "/add",
+        data={"url": f"https://www.youtube.com/playlist?list={playlist_id}"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = response.headers["location"].rsplit("/", 1)[-1]
+    _wait_for_job(client, job_id, "ready")
+    page = client.get(f"/add/{job_id}").text
+    assert 'value="480p"' in page and 'value="720p"' in page
+    assert 'value="1080p"' not in page
+    assert "720p max" in page
+    assert "fits" in page and " free)" in page
+    assert re.search(r'value="efficient"\s+checked', page)
+    assert not re.search(r'value="native"\s+checked', page)

@@ -843,3 +843,36 @@ def test_a_video_job_does_not_change_the_playlist_quality(
     wait_for(manager, job.id, {"done"})
     assert captured["max_height"] == 720
     assert captured["quality"] is None
+
+
+def _stored_quality(tmp_path: Path, quality) -> str:
+    import json
+
+    playlist_id = "PLTESTJOBS00000000000000000001"
+    playlist_dir = LibraryLayout(lib_root(tmp_path)).playlist_meta_dir(playlist_id)
+    playlist_dir.mkdir(parents=True)
+    (playlist_dir / "playlist.json").write_text(json.dumps({
+        "schema": 1, "id": playlist_id, "title": "Existing",
+        "entries": [], "options": {"quality": quality},
+    }), encoding="utf-8")
+    return playlist_id
+
+
+def test_review_preselects_the_stored_quality(tmp_path: Path, monkeypatch):
+    playlist_id = _stored_quality(tmp_path, "native")
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "native"
+
+
+@pytest.mark.parametrize("stored", ["1080p", "bogus", 7, None])
+def test_review_ignores_a_stored_quality_that_is_not_offered(
+    tmp_path: Path, monkeypatch, stored,
+):
+    # fake_probe offers only 240p, so no tier is smaller than native.
+    playlist_id = _stored_quality(tmp_path, stored)
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_probe(playlist_id).id, {"ready"})
+    assert job.suggested_policy == "efficient"

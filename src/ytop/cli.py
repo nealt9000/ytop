@@ -941,6 +941,11 @@ def _format_bytes(size: float) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ytop.stick.boot import SUDO_REFUSED, under_sudo
+
+    if under_sudo():
+        print(f"ytop: {SUDO_REFUSED}", file=sys.stderr)
+        return 2
     ap = argparse.ArgumentParser(prog="ytop", description="Offline YouTube playlist preserver")
     ap.add_argument("--library", default=None,
                     help="launch library (default: $YTOP_LIBRARY or ~/Videos/YTOP)")

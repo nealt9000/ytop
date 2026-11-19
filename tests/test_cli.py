@@ -211,3 +211,12 @@ def test_init_corrupt_marker_fails(tmp_path: Path, capsys):
     (root / ".ytop" / "library.json").write_text("garbage", encoding="utf-8")
     assert main(["init", str(root)]) == 1
     assert "init failed" in capsys.readouterr().err
+
+
+def test_cli_refuses_to_run_under_sudo(monkeypatch, capsys):
+    import os
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setenv("SUDO_UID", "1000")
+    assert main(["doctor"]) == 2
+    assert "sudo" in capsys.readouterr().err

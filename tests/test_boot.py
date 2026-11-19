@@ -520,3 +520,36 @@ def test_boot_reports_a_journal_it_cannot_parse(tmp_path: Path, monkeypatch, cap
     assert boot.main(["--home", str(target)]) == 5
     err = capsys.readouterr().err
     assert NOT_UNDONE in err and "Traceback" not in err
+
+
+# --- never under sudo (#9) -------------------------------------------------------
+
+
+def _as_root(monkeypatch, sudo: bool) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    if sudo:
+        monkeypatch.setenv("SUDO_UID", "1000")
+    else:
+        monkeypatch.delenv("SUDO_UID", raising=False)
+
+
+def test_boot_refuses_to_run_under_sudo_before_touching_the_stick(
+    tmp_path: Path, monkeypatch, capsys,
+):
+    """Root from sudo would leave root-owned files the user's own YTOP
+    cannot change, and would not see the user's running YTOP: refused,
+    before even a repair."""
+    _as_root(monkeypatch, sudo=True)
+    touched: list[Path] = []
+    monkeypatch.setattr(boot, "repair_interrupted_upgrade",
+                        lambda home, root: touched.append(home) or False)
+    assert boot.main(["--home", str(tmp_path)]) == boot.EXIT_SUDO
+    assert touched == []
+    assert "sudo" in capsys.readouterr().err
+
+
+def test_boot_runs_as_plain_root(tmp_path: Path, monkeypatch):
+    """A root login (a container, say) is one user throughout: allowed."""
+    _as_root(monkeypatch, sudo=False)
+    assert boot.main(["--home", str(tmp_path), "--runtime-root", str(tmp_path)]) \
+        == boot.EXIT_DAMAGED  # got past the check (no build.json here)

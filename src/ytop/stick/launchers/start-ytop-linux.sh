@@ -93,8 +93,10 @@ HAVE_LOCK=
 # The staging lock is a directory; its "owner" file names the launcher
 # holding it: "<pid> <start ticks since boot>" (ticks: a reused pid, or a
 # wall-clock step, never passes for the holder).
+# (Field 22 of /proc/<pid>/stat, the 20th after "pid (comm) "; sed only:
+# the launcher uses no tools beyond those tools/smoke_stick.py allows.)
 start_ticks() {
-    sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20
+    sed -n 's/.*) //; s/^\([^ ]* \)\{19\}\([0-9]*\).*/\2/p' "/proc/$1/stat" 2>/dev/null
 }
 SELF=
 T=$(start_ticks $$)

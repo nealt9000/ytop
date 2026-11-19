@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -665,3 +666,35 @@ def test_linux_launcher_two_waiters_never_both_break_one_stale_lock(tmp_path):
     assert r.returncode == 4, r.stderr + r.stdout  # waited for the rival
     assert (lock / "owner").read_text().strip() == _my_owner()
     assert list(lock.parent.glob("*.lock.stale.*")) == []
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="Linux /proc only")
+def test_linux_launcher_start_ticks_needs_only_the_launcher_commands(tmp_path):
+    """The owner record's start ticks come from the commands the stick
+    smoke test allows on PATH (a missing ``cut`` once left it empty, so the
+    staging lock fell back to the 10-minute age rule)."""
+    import importlib.util
+    import re
+
+    from ytop.stick import boot
+
+    spec = importlib.util.spec_from_file_location(
+        "smoke_stick", LAUNCHERS.parent.parent.parent.parent / "tools/smoke_stick.py"
+    )
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in smoke.LAUNCHER_COMMANDS:
+        found = shutil.which(name)
+        if found:
+            (bin_dir / name).symlink_to(found)
+    script = (LAUNCHERS / "start-ytop-linux.sh").read_text()
+    func = re.search(r"^start_ticks\(\) \{\n.*?^\}\n", script, re.M | re.S)
+    assert func is not None
+    r = subprocess.run(
+        [str(bin_dir / "sh"), "-c", func.group(0) + 'start_ticks "$1"', "sh", str(os.getpid())],
+        env={"PATH": str(bin_dir)}, capture_output=True, text=True, timeout=10,
+    )
+    assert r.stderr == ""
+    assert r.stdout.strip() == str(boot.process_start_ticks(os.getpid()))

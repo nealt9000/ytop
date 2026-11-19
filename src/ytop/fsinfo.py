@@ -6,6 +6,7 @@ import ctypes
 import ctypes.util
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -143,6 +144,21 @@ def fs_info(path: Path) -> FsInfo:
     except Exception:
         pass
     return FsInfo("unknown", None)
+
+
+def free_bytes(path: Path) -> int | None:
+    """Free space on the drive holding ``path``.
+
+    ``path`` need not exist yet (a playlist folder about to be created); its
+    nearest existing ancestor is measured instead.
+    """
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        return int(shutil.disk_usage(probe).free)
+    except OSError:
+        return None
 
 
 def fits_on(path: Path, estimated_bytes: int | None) -> bool:

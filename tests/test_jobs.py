@@ -693,3 +693,78 @@ def test_probe_job_uses_default_library_cache_root(tmp_path: Path, monkeypatch):
 
     job.library_id = ""
     assert manager._job_cache_root(job) == lib_root(tmp_path)
+
+
+# -- quality tiers -------------------------------------------------------------
+def _tier_video(fid: str, height: int, size: int) -> dict:
+    return {"format_id": fid, "vcodec": "av01", "acodec": "none",
+            "height": height, "width": height * 16 // 9, "fps": 30,
+            "ext": "webm", "protocol": "https", "filesize": size}
+
+
+def _tier_audio() -> dict:
+    return {"format_id": "a", "vcodec": "none", "acodec": "opus", "abr": 50,
+            "language": "en", "ext": "webm", "filesize": 100}
+
+
+def _tier_probe(*heights_per_item: tuple[int, ...]) -> ProbeResult:
+    items = []
+    for index, heights in enumerate(heights_per_item, start=1):
+        info = {"id": f"v{index}", "duration": 60, "formats": [
+            _tier_video(f"{h}", h, h * 10) for h in heights
+        ] + [_tier_audio()]}
+        item = ProbedItem(index=index, id=f"v{index}", url=f"u{index}",
+                          duration=60.0)
+        item.info = info
+        item.selection = _selection()
+        items.append(item)
+    return ProbeResult(url="https://www.youtube.com/playlist?list=PL1",
+                       playlist={"id": "PL1", "title": "List"}, items=items)
+
+
+def test_review_offers_only_tiers_smaller_than_native():
+    probe = _tier_probe((360, 720, 1080), (360, 720))
+    review = jobs_module._compact_probe(probe, Config(), False, None)
+    assert set(review["estimate_tiers"]) == {"480p", "720p"}
+    # 480p falls back to 360p on both items.
+    assert review["estimate_tiers"]["480p"] == 2 * (3600 + 100)
+    assert review["estimate_tiers"]["720p"] == 2 * (7200 + 100)
+    assert review["estimate_tiers"]["720p"] < review["estimate_native_bytes"]
+    assert review["free_bytes"] is None
+
+
+def test_review_has_no_tiers_when_playlist_tops_out_at_720p():
+    probe = _tier_probe((360, 720), (360, 720))
+    review = jobs_module._compact_probe(probe, Config(), False, None)
+    assert set(review["estimate_tiers"]) == {"480p"}
+
+
+def test_review_reads_free_space_of_the_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "free_bytes", lambda path: 12345)
+    probe = _tier_probe((360,))
+    review = jobs_module._compact_probe(probe, Config(), False, tmp_path / "new")
+    assert review["free_bytes"] == 12345
+
+
+def test_quality_options_order_labels_and_fits():
+    job = jobs_module.Job(
+        id="j", estimate_bytes=10, estimate_native_bytes=100,
+        estimate_tiers={"720p": 50, "480p": 30}, free_bytes=40,
+    )
+    opts = job.quality_options
+    assert [o["policy"] for o in opts] == ["efficient", "480p", "720p", "native"]
+    assert [o["label"] for o in opts] == [
+        "Efficient", "480p max", "720p max", "Native",
+    ]
+    assert [o["bytes"] for o in opts] == [10, 30, 50, 100]
+    assert [o["fits"] for o in opts] == [True, True, False, False]
+    job.in_library = True
+    assert all(o["fits"] is None for o in job.quality_options)
+    job.in_library = False
+    job.free_bytes = None
+    assert all(o["fits"] is None for o in job.quality_options)
+
+
+def test_policy_label_for_a_tier():
+    job = jobs_module.Job(id="j", policy="720p")
+    assert job.policy_label == "720p max"

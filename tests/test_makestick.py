@@ -2237,6 +2237,29 @@ def test_a_cancelled_component_merge_is_a_warning(tmp_path: Path, image: Path):
     assert "copied" in warning  # a new stick
 
 
+def test_a_cancel_during_the_component_copy_stops_everything_left(
+    tmp_path: Path, image: Path,
+):
+    """Cancel while the YouTube parts copy, on a new stick with playlists
+    chosen: nothing after it runs (owner decision, #12).  The stick is made
+    and works; the report says which playlists were not copied."""
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    seen: list[str] = []
+    report = ms.run_make(
+        ms.plan_make(target, image, library, platforms=PLATS, playlists=[PL_ONE]),
+        image, library, lambda e: seen.append(e.phase),
+        cancel=lambda: "components" in seen,
+    )
+    assert read_library(target) is not None
+    assert "playlists" not in seen
+    assert report.playlists == []
+    assert not LibraryLayout(target).playlist_meta_dir(PL_ONE).exists()
+    assert len(report.warnings) == 2, report.warnings
+    assert "next time" in report.warnings[0]
+    assert "playlist" in report.warnings[1] and "not copied" in report.warnings[1]
+
+
 def test_component_copy_counts_in_what_was_written(
     tmp_path: Path, image: Path, monkeypatch,
 ):

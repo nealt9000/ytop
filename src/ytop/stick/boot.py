@@ -21,6 +21,7 @@ from pathlib import Path
 EXIT_DAMAGED = 2
 EXIT_NO_RUNTIME = 3
 EXIT_REPAIRED = 5  # the launchers use 1-4
+EXIT_SUDO = 6
 DAMAGED = (
     "This YTOP stick is damaged: .ytop/build.json is missing or unreadable. "
     "Make the stick again."
@@ -640,6 +641,20 @@ def platform_key() -> str | None:
     return None
 
 
+SUDO_REFUSED = (
+    "Don't run YTOP with sudo: start it as your own user. Run as root it "
+    "would leave files your own YTOP can't change, and it wouldn't see the "
+    "YTOP you already have running."
+)
+
+
+def under_sudo() -> bool:
+    """Running as root through sudo (a real root login, e.g. in a
+    container, is one user throughout and fine).  POSIX only."""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0 and bool(os.environ.get("SUDO_UID"))
+
+
 def main(argv: list[str] | None = None) -> int:
     # When this start began, for YTOP's "Started in …" timing line.
     os.environ["YTOP_BOOT_T0"] = repr(time.time())
@@ -652,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--home", default=None)
     ap.add_argument("--runtime-root", default=None)
     opts = ap.parse_args(argv)
+    if under_sudo():
+        print(SUDO_REFUSED, file=sys.stderr)
+        return EXIT_SUDO
 
     runtime_root = Path(opts.runtime_root or Path(__file__).resolve().parent).resolve()
     home = Path(opts.home).resolve() if opts.home else runtime_root.parent

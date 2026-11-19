@@ -501,3 +501,71 @@ def test_linux_launcher_reuse_removes_a_dropped_package_folder(tmp_path):
     assert (cache / ".complete").exists()
     assert not (cache / "lib/common/brotli").exists()
     assert (cache / "lib/common").is_dir()
+
+
+# --- interrupted repair, noexec cache (#8) -----------------------------------
+
+def test_linux_launcher_repair_cleans_up_when_terminated(tmp_path, monkeypatch):
+    """TERM while boot.py repairs: the repair finishes, then the temp copy
+    and any possibly mixed cache marker go (not left for the 30-day prune)."""
+    if PLAT != "linux-x86_64":
+        pytest.skip("fake image is built for x86_64")
+    import sys
+
+    stick, before, owned = _genuine_interrupted_stick(tmp_path, monkeypatch)
+    pidfile = tmp_path / "launcher.pid"
+    # The stick's python (copied into repair.*/) signals the launcher, then
+    # runs the real boot.py to the end.
+    py = stick / f".ytop/runtime/{PLAT}/python/bin/python3"
+    py.write_text(
+        f'#!/bin/sh\nkill -TERM "$(cat "{pidfile}")"\nexec "{sys.executable}" "$@"\n'
+    )
+    py.chmod(0o755)
+    import json
+
+    runtime = tmp_path / "cache/ytop/runtime"
+    build_id = json.loads((stick / ".ytop/build.json").read_text())["build_id"]
+    stale = runtime / build_id
+    stale.mkdir(parents=True)
+    (stale / ".complete").write_text("")  # no python: not used for the repair
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(tmp_path / "home"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+    }
+    r = subprocess.run(
+        ["sh", "-c", 'echo $$ > "$1"; exec sh "$2"', "sh", str(pidfile),
+         str(stick / "start-ytop-linux.sh")],
+        env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 1, r.stderr + r.stdout
+    assert owned() == before  # the repair ran to the end
+    assert not (stick / ".ytop.old").exists()
+    assert not list(runtime.glob("repair.*"))
+    assert not (stale / ".complete").exists()
+
+
+def test_linux_launcher_on_a_noexec_cache_says_why(tmp_path):
+    stick = make_stick(tmp_path)
+    assert run(stick, tmp_path).returncode == 0
+    python = cache_dir(tmp_path) / f"runtime/{PLAT}/python/bin/python3"
+    python.chmod(0o644)  # what a noexec mount looks like to test -x
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "chmod").write_text("#!/bin/sh\nexit 0\n")  # noexec: no help
+    (fake / "chmod").chmod(0o755)
+    r = run(stick, tmp_path, {"PATH": f"{fake}:{os.environ['PATH']}"})
+    assert r.returncode == 126
+    assert "doesn't allow running programs" in r.stdout
+    assert "XDG_CACHE_HOME" in r.stdout
+
+
+def test_linux_launcher_restores_a_lost_exec_bit(tmp_path):
+    stick = make_stick(tmp_path)
+    assert run(stick, tmp_path).returncode == 0
+    python = cache_dir(tmp_path) / f"runtime/{PLAT}/python/bin/python3"
+    python.chmod(0o644)
+    (tmp_path / "argv.txt").unlink()
+    r = run(stick, tmp_path)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (tmp_path / "argv.txt").exists()

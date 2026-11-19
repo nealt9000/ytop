@@ -1052,6 +1052,14 @@ def plan_make(
         raise MakeStickError(
             f"{target} holds no YTOP library to upgrade; make a new stick there"
         )
+    if mode == "upgrade" and info.library is not None and info.image_build is None:
+        # A library without YTOP itself (an interrupted upgrade still has
+        # its build.json): the switch has no app to set aside, so it would
+        # copy the whole image and then fail.
+        raise MakeStickError(
+            f"{target} holds the YTOP library “{info.library.label}” "
+            "but no YTOP to upgrade"
+        )
     keys = list(dict.fromkeys(playlists or []))
     if mode == "upgrade" and keys:
         raise MakeStickError(
@@ -1081,8 +1089,18 @@ def plan_make(
     if mode == "upgrade":
         wanted = image_manifest(source, chosen)
         diff = diff_upgrade(source, target / ".ytop", wanted, verify=False)
-        files = [(rel, os.stat(source / rel).st_size) for rel in diff.copy]
-        if any(rel.startswith("app/") for rel in diff.copy):
+        copy = diff.copy
+        if diff.checked_by_hash:
+            # No file list to trust: the run hashes every file.  Until then
+            # a file of the same size counts as unchanged, or a nearly full
+            # older stick would be refused for the whole image; the run
+            # checks the space again once it knows (:func:`_check_space`).
+            copy = [
+                rel for rel in copy
+                if not _same_size(target / ".ytop" / rel, source / rel)
+            ]
+        files = [(rel, os.stat(source / rel).st_size) for rel in copy]
+        if any(rel.startswith("app/") for rel in copy):
             # The run copies the whole app/ when any of it changed.
             have = {rel for rel, _size in files}
             files += [
@@ -1145,6 +1163,26 @@ def plan_make(
         bytes_needed=need, label=name, files=files,
         playlist_files=playlist_files, diff=diff,
     )
+
+
+def _same_size(a: Path, b: Path) -> bool:
+    try:
+        return os.stat(a).st_size == os.stat(b).st_size
+    except OSError:
+        return False
+
+
+def _check_space(target: Path, sizes: list[int]) -> None:
+    """Refuse (before anything is written) to stage files of ``sizes`` that
+    the drive has no room for: an upgrade's verify can find more to copy
+    than its plan counted."""
+    space = sum(sizes) + (len(sizes) + 1) * _cluster_size(target) + SPACE_MARGIN
+    free, _total = _disk_usage(target)
+    if free and space > free:
+        raise MakeStickError(
+            f"not enough space: this needs about {human_bytes(space)} but "
+            f"{target} has {human_bytes(free)} free; nothing was changed"
+        )
 
 
 def _app_rels(diff: UpgradeDiff, wanted: dict[str, str]) -> set[str]:
@@ -1732,9 +1770,12 @@ def _upgrade(
         missing = [rel for rel in copy_rels if not (source / rel).is_file()]
         if missing:
             raise MakeStickError(f"the staged update lacks {missing[0]}")
+    sizes = [os.stat(source / rel).st_size for rel in copy_rels]
+    if image_root is None:  # self mode moves files on the stick itself
+        _check_space(target, sizes)
     progress.phase(
         "copying", "Copying YTOP…", total_files=len(copy_rels),
-        total_bytes=sum(os.stat(source / rel).st_size for rel in copy_rels),
+        total_bytes=sum(sizes),
     )
     making.mkdir()
     _copy_files(
@@ -1759,6 +1800,14 @@ def _run(
     cancelled: Callable[[], bool],
 ) -> MakeReport:
     target = plan.target
+    if plan.mode == "new":
+        # Again now: a start file may have arrived since the plan.
+        foreign = _foreign_launchers(target, source / LAUNCHER_TEMPLATES)
+        if foreign:
+            raise MakeStickError(
+                f"{target} already has {', '.join(foreign)}, not made by YTOP; "
+                "move or rename it first (nothing on the drive is overwritten)"
+            )
     repaired = recover_target(target)
     build = read_build(source)
     build_id = str(build.get("build_id") or "")
@@ -1775,13 +1824,29 @@ def _run(
             copied_bytes, copied_files = _make_new(
                 plan, source, build, progress, cancelled
             )
-        _write_launchers(
-            target, target / ".ytop" / LAUNCHER_TEMPLATES, plan.label, build_id,
-            running=plan.image_root is not None,
-        )
+            # A new stick is no stick without its start files.
+            _write_launchers(
+                target, target / ".ytop" / LAUNCHER_TEMPLATES, plan.label, build_id,
+            )
     except Exception:
         recover_target(target)
         raise
+    notes: list[str] = []
+    if plan.mode == "upgrade":
+        # The new build is in place (committed): failing now would report
+        # an upgrade that happened as failed.  Each start file is replaced
+        # whole, so one not written is still the old one.
+        try:
+            _write_launchers(
+                target, target / ".ytop" / LAUNCHER_TEMPLATES, plan.label, build_id,
+                running=plan.image_root is not None,
+            )
+        except (OSError, MakeStickError) as exc:
+            notes.append(
+                "YTOP was upgraded, but its start files on the drive could "
+                f"not all be refreshed ({exc}); upgrade this stick again to "
+                "write them."
+            )
     # YTOP is in place: what is left is tidying up, never an undo.  Files
     # still in use (Windows) stay for boot.py to delete at the next start.
     if plan.image_root is not None:
@@ -1798,6 +1863,7 @@ def _run(
         warnings, merged_bytes, merged_files = _merge_components(
             plan, source, progress, cancelled
         )
+    warnings = notes + warnings
     # What was written counts the component copy too.
     copied_bytes += merged_bytes
     copied_files += merged_files

@@ -2250,3 +2250,133 @@ def test_mac_markers_never_fail_a_make(tmp_path: Path, image: Path):
     assert report.mode == "new"
     assert read_library(target) is not None
     assert (target / ".fseventsd").read_text() == "not a folder\n"
+
+
+# --- upgrade and repair edge cases (#8) --------------------------------------
+
+
+def test_upgrade_plan_without_manifest_counts_only_size_changes(
+    tmp_path: Path, image: Path,
+):
+    """An older stick (no trusted manifest) is not sized as the whole image:
+    files of the same size count as unchanged until the run hashes them."""
+    home, libs, library = home_library(tmp_path)
+    target = _stick_with_manifest(tmp_path, image, library)
+    yt = target / ".ytop"
+    (yt / MANIFEST_NAME).unlink()
+    plan = ms.plan_make(target, image, library, platforms=PLATS)
+    assert plan.diff is not None and plan.diff.checked_by_hash
+    assert plan.files == []
+    victim = _rels(image, "lib/common/")[0]
+    with open(yt / victim, "ab") as handle:
+        handle.write(b"x")
+    plan = ms.plan_make(target, image, library, platforms=PLATS)
+    assert [rel for rel, _size in plan.files] == [victim]
+
+
+def test_upgrade_rechecks_space_once_verify_finds_more(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    home, libs, library = home_library(tmp_path)
+    target = _stick_with_manifest(tmp_path, image, library)
+    yt = target / ".ytop"
+    apps = _rels(image, "app/")
+    assert len(apps) > 12
+    victim = apps[0]
+    with open(yt / victim, "ab") as handle:
+        handle.write(b"x")  # same manifest hash, other size: only verify sees it
+    before = _owned_state(target)
+    mib = 1024 * 1024
+    monkeypatch.setattr(ms, "_cluster_size", lambda path: mib)
+    free = ms.SPACE_MARGIN + 10 * mib
+    monkeypatch.setattr(ms, "_disk_usage", lambda path: (free, free * 2))
+    plan = ms.plan_make(target, image, library, platforms=PLATS)
+    assert plan.files == []
+    with pytest.raises(ms.MakeStickError, match="not enough space"):
+        ms.run_make(plan, image, library, lambda update: None)
+    assert _owned_state(target) == before
+    assert not (target / ms.MAKING).exists() and not (target / ms.OLD).exists()
+
+
+def test_launcher_failure_after_the_upgrade_commit_is_a_warning(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    home, libs, library = home_library(tmp_path)
+    target, newer = _crash_scenario(tmp_path, image, library)
+
+    def failing(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ms, "_write_launchers", failing)
+    plan = ms.plan_make(target, newer, library, platforms=PLATS)
+    report = ms.run_make(plan, newer, library, lambda update: None)
+    assert any("start files" in note for note in report.warnings)
+    yt = target / ".ytop"
+    assert json.loads((yt / "build.json").read_text())["build_id"] == report.build_id
+    assert not (target / ms.OLD).exists() and not (target / ms.MAKING).exists()
+    source = read_manifest(newer / MANIFEST_NAME)
+    assert source is not None
+    assert hash_tree(yt, sorted(ms._target_files(yt))) == for_platforms(source, PLATS)
+    # The next upgrade writes them.
+    monkeypatch.undo()
+    ms.run_make(
+        ms.plan_make(target, newer, library, platforms=PLATS),
+        newer, library, lambda update: None,
+    )
+    assert (target / "start-ytop-linux.sh").read_bytes() == (
+        newer / ms.LAUNCHER_TEMPLATES / "start-ytop-linux.sh"
+    ).read_bytes()
+
+
+def test_upgrade_of_a_library_without_ytop_is_refused_before_copying(
+    tmp_path: Path, image: Path,
+):
+    home, libs, library = home_library(tmp_path)
+    drive = make_library(tmp_path / "drive", "Drive").root
+    before = sorted(p.relative_to(drive).as_posix() for p in drive.rglob("*"))
+    with pytest.raises(ms.MakeStickError, match="no YTOP to upgrade"):
+        ms.plan_make(drive, image, library, platforms=PLATS)
+    after = sorted(p.relative_to(drive).as_posix() for p in drive.rglob("*"))
+    assert after == before
+
+
+def test_interrupted_upgrade_is_still_planned_as_an_upgrade(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    """build.json is never absent mid-switch, so the refusal above never
+    blocks the repair of an interrupted upgrade."""
+    home, libs, library = home_library(tmp_path)
+    target, newer = _crash_scenario(tmp_path, image, library)
+    real_place = ms._place
+    calls = {"n": 0}
+
+    def crashing(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise Crash()
+        real_place(src, dst)
+
+    monkeypatch.setattr(ms, "_place", crashing)
+    with pytest.raises(Crash):
+        ms.run_make(
+            ms.plan_make(target, newer, library, platforms=PLATS),
+            newer, library, lambda update: None,
+        )
+    monkeypatch.setattr(ms, "_place", real_place)
+    assert not (target / ".ytop/app").exists()
+    plan = ms.plan_make(target, newer, library, platforms=PLATS)
+    assert plan.mode == "upgrade"
+    ms.run_make(plan, newer, library, lambda update: None)
+    assert (target / ".ytop/app").is_dir()
+
+
+def test_new_stick_rechecks_foreign_files_at_run_time(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    plan = ms.plan_make(target, image, library, platforms=["linux-x86_64"])
+    (target / "start-ytop-linux.sh").write_text("echo mine\n")
+    with pytest.raises(ms.MakeStickError, match="start-ytop-linux.sh"):
+        ms.run_make(plan, image, library, lambda update: None)
+    assert (target / "start-ytop-linux.sh").read_text() == "echo mine\n"
+    assert not (target / ".ytop").exists()
+    assert not (target / ms.MAKING).exists()

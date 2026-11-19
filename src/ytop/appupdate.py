@@ -11,7 +11,10 @@ now" works whatever the answer.
 releases API; its ``ytop-release.json`` (see ``tools/package_release.py``)
 is trusted only once it matches the release's ``SHA256SUMS``.  A release is
 offered when its ``build_id`` differs from the stick's, its version is newer
-(PEP 440 order) and it carries every platform the stick does.
+(PEP 440 order) and it carries every platform the stick does.  An offer
+is kept in the library's cache (:func:`save_offer`), so the start-up check
+shows it again for a day without asking GitHub; once a check found nothing,
+the start-up check waits a day too.
 
 **Installing** (:func:`install_app`, after the user confirmed):
 
@@ -304,6 +307,13 @@ def _fetch(ytop: Path, config: Config, http: Http) -> AppCheck:
         notes=(notes if isinstance(notes, str) else "")[:NOTES_LIMIT],
         doc=doc, assets=assets,
     )
+    return _judge(stick, release)
+
+
+def _judge(stick: dict[str, Any], release: AppRelease) -> AppCheck:
+    """Whether the stick whose ``build.json`` is ``stick`` is offered the
+    verified ``release``."""
+    doc = release.doc
     if doc["build_id"] == stick.get("build_id") or not _newer(
         doc["version"], str(stick.get("version") or "")
     ):
@@ -333,6 +343,82 @@ def check_app_result(ytop: Path, config: Config, http: Http | None = None) -> Ap
 def check_app(ytop: Path, config: Config, http: Http | None = None) -> AppRelease | None:
     """The newer, verified release to offer, or None."""
     return check_app_result(ytop, config, http).release
+
+
+# --- the offer, kept between starts -----------------------------------------------
+#
+# A found release is kept in the library's cache (``<library>/.ytop/cache/
+# app-offer.json``, never image-owned) with the time it was found and the
+# build it was found for, so a start within ``CHECK_EVERY`` shows it again
+# without asking GitHub.  It is used only while it still is an offer for the
+# stick as it is (its ``ytop-release.json`` is checked again, as at the
+# check); otherwise the start-up check looks again.
+
+OFFER_FILE = "app-offer.json"
+
+
+def _offer_path(library_root: Path) -> Path:
+    from .layout import LibraryLayout  # lazy: layout -> yt -> config
+
+    return LibraryLayout(Path(library_root)).cache_dir / OFFER_FILE
+
+
+def save_offer(library_root: Path, ytop: Path, release: AppRelease, when: datetime) -> None:
+    """Keep ``release`` (an offer for the stick at ``ytop``); atomic."""
+    path = _offer_path(library_root)
+    doc = {
+        "schema": 1,
+        "checked_at": when.isoformat(),
+        "stick_build_id": str(_stick_build(ytop).get("build_id") or ""),
+        "version": release.version, "build_id": release.build_id,
+        "tag": release.tag, "notes": release.notes,
+        "doc": release.doc, "assets": release.assets,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    with open(temp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(doc) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, path)
+
+
+def drop_offer(library_root: Path) -> None:
+    try:
+        _offer_path(library_root).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def load_offer(library_root: Path, ytop: Path, now: datetime) -> AppRelease | None:
+    """The kept offer, if it was found less than ``CHECK_EVERY`` ago for
+    the build on the stick now and still is an offer for it; never raises."""
+    try:
+        saved = json.loads(_offer_path(library_root).read_text(encoding="utf-8"))
+        checked = datetime.fromisoformat(saved["checked_at"])
+        if checked.tzinfo is None:
+            checked = checked.replace(tzinfo=UTC)
+        if not timedelta(0) <= now - checked < CHECK_EVERY:
+            return None
+        stick = _stick_build(ytop)
+        if saved["stick_build_id"] != str(stick.get("build_id") or ""):
+            return None
+        doc = _validated(saved["doc"])
+        assets = saved["assets"]
+        if not isinstance(assets, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in assets.items()
+        ):
+            return None
+        notes = saved.get("notes")
+        release = AppRelease(
+            version=doc["version"], build_id=doc["build_id"],
+            tag=str(saved.get("tag") or ""),
+            notes=(notes if isinstance(notes, str) else "")[:NOTES_LIMIT],
+            doc=doc, assets=dict(assets),
+        )
+        return release if _judge(stick, release).status == "available" else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, UpdateError):
+        return None
 
 
 # --- installing --------------------------------------------------------------------
@@ -618,6 +704,83 @@ def previous_version(ytop: Path) -> Previous | None:
     return Previous(str(build.get("version") or ""), str(build.get("build_id") or ""))
 
 
+def keeps_previous(ytop: Path) -> bool:
+    """An update of the stick at ``ytop`` keeps a copy to revert to: only
+    a stick whose own file list can be trusted gets one (the switch checks
+    the copy against it)."""
+    return ms.read_trusted_manifest(ytop) is not None
+
+
+def previous_verdict(ytop: Path) -> str:
+    """``"valid"``, ``"invalid"`` or ``"unknown"`` for ``ytop/previous``
+    (``"none"`` when there is none).  Read only.  ``"invalid"`` only on a
+    definitive verdict: no mark (it is written last, so the copy was never
+    finished), or a mark that reads fine naming another ``build.json`` than
+    the stick's, which reads fine too.  Anything that cannot be read for
+    another reason (a slow stick, a file an antivirus holds) is
+    ``"unknown"``, and an unknown copy is never deleted."""
+    previous = ytop / ms.PREVIOUS
+    if not os.path.lexists(previous):
+        return "none"
+    if not previous.is_dir() or previous.is_symlink():
+        return "invalid"
+    try:
+        text = (previous / ms.PREVIOUS_MARK).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "invalid"
+    except OSError:
+        return "unknown"
+    try:
+        mark = json.loads(text)
+        have = sha256_file(ytop / "build.json")
+    except (OSError, ValueError):
+        return "unknown"
+    named = mark.get("build_sha256") if isinstance(mark, dict) else None
+    if not isinstance(named, str):
+        return "unknown"
+    if named != have:
+        return "invalid"
+    return "valid" if ms.read_previous(ytop) is not None else "unknown"
+
+
+def tidy_previous(ytop: Path) -> bool:
+    """Delete what a crash after a switch's commit point can leave inside
+    ``.ytop``: a ``previous.del`` and a ``previous/`` that is definitely
+    no valid rollback copy (:func:`previous_verdict`; it is never
+    offered).  Only under the stick's lock, never while a switch is still
+    to be repaired; best effort, never raises.  True if it tidied."""
+    previous, drop = ytop / ms.PREVIOUS, ytop / ms.PREVIOUS_DROP
+
+    def stale() -> bool:
+        return os.path.lexists(drop) or previous_verdict(ytop) == "invalid"
+
+    target = ytop.parent
+    try:
+        if not stale() or switch_interrupted(target):
+            return False
+        if not _INSTALL_LOCK.acquire(blocking=False):
+            return False
+        try:
+            try:
+                ms._acquire_lock(target)
+            except ms.MakeStickError:
+                return False  # another YTOP is updating or making this stick
+            try:
+                if not stale():  # looked at again under the lock
+                    return False
+                if previous_verdict(ytop) == "invalid":
+                    remove_tree_best_effort(previous)
+                remove_tree_best_effort(drop)
+            finally:
+                ms._release_lock(target)
+        finally:
+            _INSTALL_LOCK.release()
+    except OSError:
+        log.warning("could not tidy the stick's old rollback copy", exc_info=True)
+        return False
+    return True
+
+
 def _stage_revert(ytop: Path, progress: Progress | None) -> Path:
     """``previous/`` overlaid on the stick, staged in ``.ytop.making-src``:
     every file the switch writes, each checked against the previous
@@ -771,7 +934,12 @@ class AppUpdates:
 
     @classmethod
     def for_runtime(cls, config: Callable[[], Config], library_root: Path | None) -> AppUpdates:
-        return cls(stick_image(), config, library_root)
+        updates = cls(stick_image(), config, library_root)
+        ytop = updates.ytop
+        if ytop is not None:  # in the background: never delays the start
+            threading.Thread(target=tidy_previous, args=(ytop,),
+                             name="ytop-tidy-previous", daemon=True).start()
+        return updates
 
     @property
     def available(self) -> bool:
@@ -815,14 +983,18 @@ class AppUpdates:
         self.online = outcome in ONLINE_OUTCOMES
         if not self.available or self.config().updates.check_app is not True:
             return
-        if not (self.online or outcome == "off") or not self._check_due():
+        if not (self.online or outcome == "off"):
+            return
+        if self._restore_offer():  # found less than a day ago: shown again
+            return
+        if not self._check_due():
             return
         result = self.check()
         if result.status not in ("offline", "error"):
             self.online = True
         if result.status in ("up_to_date", "unsupported") and self.library_root is not None:
             # Nothing to offer: the next start-up check waits a day (an
-            # offer is looked for again at every start, so it stays shown).
+            # offer is kept, and shown again for a day, see _keep).
             try:
                 set_updates_option(self.library_root, "last_check", self.clock().isoformat())
             except (OSError, ValueError):
@@ -853,7 +1025,35 @@ class AppUpdates:
             self.last = result
             if not self.busy:
                 self.offer = result.release
+        self._keep(result)
         return result
+
+    def _keep(self, result: AppCheck) -> None:
+        """Keep an offer for the next starts; forget it once the check says
+        there is none.  (No answer from GitHub changes nothing.)"""
+        if self.ytop is None or self.library_root is None:
+            return
+        try:
+            if result.status == "available" and result.release is not None:
+                save_offer(self.library_root, self.ytop, result.release, self.clock())
+            elif result.status in ("up_to_date", "unsupported"):
+                drop_offer(self.library_root)
+        except (OSError, ValueError, UpdateError):
+            log.warning("could not keep the app update offer", exc_info=True)
+
+    def _restore_offer(self) -> bool:
+        """Show the offer a check kept less than ``CHECK_EVERY`` ago."""
+        if self.ytop is None or self.library_root is None or self.busy:
+            return False
+        release = load_offer(self.library_root, self.ytop, self.clock())
+        if release is None:
+            return False
+        with self._lock:
+            if self.busy:
+                return False
+            self.last = AppCheck("available", release)
+            self.offer = release
+        return True
 
     def previous(self) -> Previous | None:
         """The version "Revert to previous version" puts back, if any."""
@@ -965,6 +1165,8 @@ class AppUpdates:
             "phase": self.phase,
             "kind": self.kind,
             "previous": self.previous() if not self.busy else None,
+            # Whether installing the offer keeps a copy to revert to.
+            "revertible": self.ytop is not None and keeps_previous(self.ytop),
             "message": self.message,
             "progress": self.progress,
         }

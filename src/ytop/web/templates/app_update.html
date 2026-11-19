@@ -22,6 +22,13 @@
     downloads, saves, puts the new version in place and quits. Start
     {{ product_name }} again afterwards. Your library is not changed.
   </p>
+  {% if not updates.revertible %}
+  <p class="muted small" data-not-revertible>
+    This stick's file list can't be checked, so no copy of
+    {{ product_name }} {{ updates.version }} is kept: this update can't be
+    reverted afterwards.
+  </p>
+  {% endif %}
   <form action="/app-update/install" method="post"
         data-confirm="Install {{ product_name }} {{ updates.offer.version }} on this stick? {{ product_name }} quits when it is done; start it again afterwards."
         data-confirm-action="Install">

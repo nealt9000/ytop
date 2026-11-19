@@ -650,6 +650,18 @@ def check(
                 result.available.append(Available(
                     BGUTIL_SERVER, installed.get(BGUTIL_SERVER), release.version,
                 ))
+        # A server out of step with the plugin that runs (a plugin rollback
+        # keeps the newer server; a server folder can go missing): the next
+        # update brings back one matching the plugin, so say so.
+        plugin = installed.get("bgutil-plugin")
+        if (
+            BGUTIL_SERVER in current.current and plugin
+            and installed.get(BGUTIL_SERVER) != plugin
+            and not any(a.name == BGUTIL_SERVER for a in result.available)
+        ):
+            result.available.append(Available(
+                BGUTIL_SERVER, installed.get(BGUTIL_SERVER), plugin,
+            ))
         if result.errors and len(result.errors) == len(names):
             result.status = "error"
             result.message = "; ".join(result.errors.values())
@@ -1128,7 +1140,9 @@ def update(
     tested; then those that passed are moved into the store and named in
     one atomic ``current.json`` write, and versions beyond each one's
     ``previous`` (Python components keep one; Deno and the server none)
-    are deleted.  Never raises for the network or a bad download."""
+    are deleted.  Never raises for the network or a bad download: when the
+    network goes away (or rate-limits) part way, what was staged before is
+    still switched in and the rest is reported failed."""
     if not _LOCK.acquire(blocking=False):
         return UpdateResult("busy", message="an update is already running")
     try:
@@ -1176,6 +1190,13 @@ def _update(
     _clear_staging(ytop)
     _clear_temps(ytop)
     staged: dict[str, _Staged] = {}
+    # The network went away (or rate-limited us) during a step: that step
+    # fails, the later ones are not fetched, and what was already staged is
+    # still tested and switched in.  With nothing staged it is the run's
+    # outcome ("offline" / "rate_limited"), as before.
+    network: list[UpdateError] = []
+    # Failures that do not make the run "failed" (see the server step).
+    soft: set[str] = set()
 
     def pins(name: str) -> list[str]:
         return current.pinned_bad.get(name, [])
@@ -1183,13 +1204,17 @@ def _update(
     for name in PYTHON_COMPONENTS:
         if name not in wanted:
             continue
+        if network:
+            failed[name] = str(network[0])
+            continue
         try:
             release = SOURCES[name].latest(http, ep, current=installed.get(name),
                                            pinned=pins(name), platforms=platforms)
             if release is not None:
                 staged[name] = _stage_python(ytop, http, release, progress)
-        except (Offline, RateLimited):
-            raise
+        except (Offline, RateLimited) as exc:
+            network.append(exc)
+            failed[name] = str(exc)
         except (UpdateError, OSError) as exc:
             failed[name] = str(exc)
 
@@ -1208,11 +1233,13 @@ def _update(
         server_version = plugin
     if server_version is not None:
         try:
+            if network:
+                raise network[0]
             staged[BGUTIL_SERVER] = _stage_server(ytop, http, ep, server_version,
                                                   server_install, progress)
-        except (Offline, RateLimited):
-            raise
         except (UpdateError, OSError) as exc:
+            if isinstance(exc, (Offline, RateLimited)) and not network:
+                network.append(exc)
             failed[BGUTIL_SERVER] = str(exc)
             # A stick that had no server keeps getting its plugin updates.
             if "bgutil-plugin" in staged and had_server:
@@ -1220,13 +1247,20 @@ def _update(
                 failed["bgutil-plugin"] = (
                     f"its PO-token server {server_version} could not be prepared: {exc}"
                 )
+            elif not had_server and BGUTIL_SERVER not in wanted:
+                # A stick without a server that cannot get one here is as
+                # up to date as it can be (unless the server was asked for).
+                soft.add(BGUTIL_SERVER)
 
     folders = {
         n: staged[n].folder if n in staged else _source_folder(ytop, current, n)
         for n in ("yt-dlp", "yt-dlp-ejs")
     }
     minimum = deno_minimum(folders)
-    if (DENO in wanted) if explicit else _deno_needed(minimum, installed.get(DENO)):
+    deno_wanted = (DENO in wanted) if explicit else _deno_needed(minimum, installed.get(DENO))
+    if deno_wanted and network:
+        failed[DENO] = str(network[0])
+    elif deno_wanted:
         try:
             release = SOURCES[DENO].latest(http, ep, current=installed.get(DENO),
                                            pinned=pins(DENO), platforms=platforms)
@@ -1238,13 +1272,17 @@ def _update(
                 staged[DENO] = _stage_deno(ytop, http, release, platforms, progress)
             elif not explicit:
                 failed[DENO] = f"yt-dlp needs Deno {minimum}, and no such release is available"
-        except (Offline, RateLimited):
-            raise
+        except (Offline, RateLimited) as exc:
+            network.append(exc)
+            failed[DENO] = str(exc)
         except (UpdateError, OSError) as exc:
             failed[DENO] = str(exc)
 
     if not staged:
-        return UpdateResult("failed" if failed else "up_to_date", failed=failed,
+        if network:
+            raise network[0]
+        hard = {n: w for n, w in failed.items() if n not in soft}
+        return UpdateResult("failed" if hard else "up_to_date", failed=hard,
                             message="; ".join(f"{n}: {w}" for n, w in failed.items()),
                             deno_minimum=minimum)
 

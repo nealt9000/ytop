@@ -1852,6 +1852,7 @@ def _run(
     if plan.mode == "upgrade":
         info = read_library(target)
         library_id = info.id if info is not None else ""
+        copied: list[str] = []
         progress.finish(copied_bytes, copied_files)
     else:
         assert library is not None, "a new stick needs the library"
@@ -1867,16 +1868,30 @@ def _run(
             copied_bytes - merged_bytes, copied_files - merged_files,
             plan.bytes_needed, plan.total_files,
         )
-        if plan.playlists:
+        copied = list(plan.playlists)
+        if copied and cancelled():
+            # Cancelled during the component copy: a cancel stops everything
+            # left, so the chosen playlists are not copied either.
+            titles = []
+            for key in plan.playlists:
+                view = library.playlist_view(key)
+                titles.append(f"“{view.title if view is not None else key}”")
+            warnings.append(
+                f"The playlists you chose ({', '.join(titles)}) were not copied "
+                "because the copy was cancelled; the stick works without them, "
+                "and you can copy them onto it later."
+            )
+            copied = []
+        if copied:
             progress.phase("playlists", "Copying playlists…")
-        for key in plan.playlists:
+        for key in copied:
             _copy_playlist(library, key, ref.id, progress, cancelled)
         progress.finish(plan.bytes_needed + merged_bytes, plan.total_files + merged_files)
     return MakeReport(
         target=target, mode=plan.mode, platforms=list(plan.platforms),
         build_id=build_id, label=plan.label, library_id=library_id,
         bytes_copied=copied_bytes, files_copied=copied_files,
-        playlists=list(plan.playlists), repaired=repaired, warnings=warnings,
+        playlists=copied, repaired=repaired, warnings=warnings,
     )
 
 

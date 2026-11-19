@@ -60,6 +60,7 @@ from ..yt.metadata import (
     CorruptDocumentError,
     fsync_dir,
     human_bytes,
+    prune_legacy_lock_dir,
     prune_lock_sidecars,
 )
 from ..yt.probe import use_library_deno_dir
@@ -2319,6 +2320,7 @@ def serve(
             use_library_deno_dir(root)
         try:
             prune_lock_sidecars()  # empty files left by earlier runs
+            prune_legacy_lock_dir()  # and old builds' <tmp>/ytop-locks
         except OSError:
             log.warning("could not tidy the document lock dir", exc_info=True)
         app = create_app(

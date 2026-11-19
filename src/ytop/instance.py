@@ -236,16 +236,29 @@ def claim(info: InstanceInfo) -> bool:
     """
     ensure_dir()
     fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
-    if not _try_lock(fd):
-        os.close(fd)
-        return False
-    if sys.platform != "win32":
-        # Informational only (the lock is what counts).  On Windows the
-        # locked byte makes the file unwritable through other handles anyway.
-        os.ftruncate(fd, 0)
-        os.write(fd, str(info.pid).encode("ascii"))
-    with _held_guard:
-        _held[info.token] = fd
+    try:
+        if not _try_lock(fd):
+            os.close(fd)
+            return False
+        if sys.platform != "win32":
+            # Informational only (the lock is what counts), so a full disk
+            # here does not fail the claim.  On Windows the locked byte
+            # makes the file unwritable through other handles anyway.
+            try:
+                os.ftruncate(fd, 0)
+                os.write(fd, str(info.pid).encode("ascii"))
+            except OSError:
+                pass
+        with _held_guard:
+            _held[info.token] = fd
+    except BaseException:
+        # Never keep a locked fd nobody can release.
+        _unlock(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
     return True
 
 

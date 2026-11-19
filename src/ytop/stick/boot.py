@@ -277,21 +277,46 @@ def _windows_start(pid: int | None) -> float | None:
     return ticks / 10_000_000 - 11_644_473_600  # FILETIME: 100 ns since 1601
 
 
+def process_start_ticks(pid: int | None = None) -> int | None:
+    """Linux: when process ``pid`` (default: this one) started, in clock
+    ticks since boot (``/proc/<pid>/stat`` field 22); None elsewhere or when
+    there is no such process.  Unlike :func:`process_start_time` it does not
+    move when the wall clock is stepped (NTP just after boot)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(f"/proc/{pid or 'self'}/stat", encoding="ascii") as handle:
+            text = handle.read()
+        return int(text[text.rindex(")") + 2:].split()[19])
+    except Exception:  # unknown: callers fall back to the start time
+        return None
+
+
 def lock_payload() -> dict:
     """What a lock records: this process, never the computer's name."""
-    return {"pid": os.getpid(), "started": process_start_time()}
+    return {
+        "pid": os.getpid(),
+        "started": process_start_time(),
+        "ticks": process_start_ticks(),
+    }
 
 
 def lock_holder(doc: object, alive: Callable[[int], bool] | None = None) -> str:
-    """``"dead"``, ``"verified"`` (pid alive and its start time matches) or
-    ``"unverified"`` (pid alive, a start time unknown) for a lock document.
-    An old lock's ``host`` field is ignored."""
+    """``"dead"``, ``"verified"`` (pid alive and its start matches) or
+    ``"unverified"`` (pid alive, its start unknown) for a lock document.
+    The start is compared in raw ticks where both are known (Linux), else
+    as a wall-clock time.  An old lock's ``host`` field is ignored."""
     try:
         pid = int(doc["pid"])  # type: ignore[index]
     except (KeyError, TypeError, ValueError):
         return "dead"
     if not (alive or pid_alive)(pid):
         return "dead"
+    ticks = doc.get("ticks") if isinstance(doc, dict) else None
+    if isinstance(ticks, int) and not isinstance(ticks, bool):
+        now_ticks = process_start_ticks(pid)
+        if now_ticks is not None:
+            return "verified" if now_ticks == ticks else "dead"
     started = doc.get("started") if isinstance(doc, dict) else None
     now = process_start_time(pid)
     if isinstance(started, (int, float)) and now is not None:
@@ -310,21 +335,100 @@ def lock_live(
     ``unverified_max_age_s`` too, when its start time cannot be checked (a
     recycled pid must not hold a stick for ever).  An unreadable lock is
     live only while it may still be being written."""
-    path = home / LOCK
     try:
-        age = time.time() - os.stat(path).st_mtime
-    except OSError:
+        seen = read_lock(home / LOCK)
+    except FileNotFoundError:
         return False
+    except OSError:
+        # There but unreadable: doubtful, so held (within max_age_s).
+        try:
+            age = time.time() - os.stat(home / LOCK).st_mtime
+        except FileNotFoundError:
+            return False
+        except OSError:
+            age = 0.0
+        return max_age_s is None or age <= max_age_s
+    return _lock_seen_live(seen, max_age_s, unverified_max_age_s)
+
+
+def _lock_seen_live(
+    seen: tuple[bytes, int],
+    max_age_s: float | None = None,
+    unverified_max_age_s: float | None = None,
+) -> bool:
+    data, mtime_ns = seen
+    age = time.time() - mtime_ns / 1e9
     if max_age_s is not None and age > max_age_s:
         return False
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        doc = json.loads(data.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError too
         return age < LOCK_WRITE_GRACE_S
     holder = lock_holder(doc)
     if holder == "unverified" and unverified_max_age_s is not None:
         return age <= unverified_max_age_s
     return holder != "dead"
+
+
+def read_lock(path: Path) -> tuple[bytes, int]:
+    """A lock file's bytes and mtime (ns): what :func:`break_stale_lock`
+    checks it is still breaking.  Raises OSError (FileNotFoundError when
+    there is no lock)."""
+    with open(path, "rb") as handle:
+        return handle.read(), os.fstat(handle.fileno()).st_mtime_ns
+
+
+def break_stale_lock(
+    path: Path, seen: tuple[bytes, int], before: Callable[[], None] | None = None,
+) -> bool:
+    """Remove the lock at ``path`` that was read as ``seen`` and judged
+    stale; True if it is gone (by us or another breaker).
+
+    Not delete-then-check: the lock is first renamed to a name only this
+    process uses (atomic), and deleted only if it is still the very file
+    judged stale.  If another breaker got there first and the renamed file
+    is its fresh lock, it is put back and False returned: treat the lock as
+    held.  ``before`` runs just before the rename (tests)."""
+    aside = path.with_name(f"{path.name}.stale-{os.getpid()}-{os.urandom(4).hex()}")
+    if before is not None:
+        before()
+    try:
+        os.rename(path, aside)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        got: tuple[bytes, int] | None = read_lock(aside)
+    except OSError:
+        got = None
+    if got == seen:
+        try:
+            os.unlink(aside)
+        except OSError:
+            pass
+        return True
+    _put_back(aside, path)
+    return False
+
+
+def _put_back(aside: Path, path: Path) -> None:
+    """Return a live lock renamed by mistake, never over a newer one."""
+    try:
+        os.link(aside, path)
+    except FileExistsError:
+        pass
+    except OSError:  # no hard links (FAT): rename, if the name is still free
+        try:
+            if not os.path.lexists(path):
+                os.rename(aside, path)
+                return
+        except OSError:
+            pass
+    try:
+        os.unlink(aside)
+    except OSError:
+        pass
 
 
 def remove_tree_best_effort(path: Path) -> bool:
@@ -384,15 +488,17 @@ def clear_leftovers(home: Path) -> None:
     rollback copies included).  ``.ytop.old`` loses its journal first, so
     no later start can mistake what is left for an interrupted switch."""
     try:
-        if switch_interrupted(home) or lock_live(
-            home, unverified_max_age_s=SWITCH_LOCK_MAX_AGE_S,
-        ):
+        if switch_interrupted(home):
             return
-        if os.path.lexists(home / LOCK):
-            try:
-                os.unlink(home / LOCK)
-            except OSError:
+        try:
+            seen: tuple[bytes, int] | None = read_lock(home / LOCK)
+        except FileNotFoundError:
+            seen = None
+        if seen is not None:
+            if _lock_seen_live(seen, unverified_max_age_s=SWITCH_LOCK_MAX_AGE_S):
                 return
+            if not break_stale_lock(home / LOCK, seen):
+                return  # another process has just taken the stick
         old = home / OLD
         if old.is_dir():
             journal = old / JOURNAL

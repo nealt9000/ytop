@@ -90,10 +90,61 @@ CACHE="$ROOT/$BUILD_ID"
 LOCK="$CACHE.lock"
 PART="$CACHE.partial.$$"
 HAVE_LOCK=
+# The staging lock is a directory; its "owner" file names the launcher
+# holding it: "<pid> <start ticks since boot>" (ticks: a reused pid, or a
+# wall-clock step, never passes for the holder).
+# (Field 22 of /proc/<pid>/stat, the 20th after "pid (comm) "; sed only:
+# the launcher uses no tools beyond those tools/smoke_stick.py allows.)
+start_ticks() {
+    sed -n 's/.*) //; s/^\([^ ]* \)\{19\}\([0-9]*\).*/\2/p' "/proc/$1/stat" 2>/dev/null
+}
+SELF=
+T=$(start_ticks $$)
+[ -n "$T" ] && SELF="$$ $T"
+release_lock() {
+    [ -n "$HAVE_LOCK" ] || return 0
+    HAVE_LOCK=
+    # Not ours any more (broken and taken by another launcher): leave it.
+    if [ -f "$LOCK/owner" ] && [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$SELF" ]; then
+        return 0
+    fi
+    rm -rf "$LOCK"
+}
 cleanup() {
     rm -rf "$PART"
-    [ -n "$HAVE_LOCK" ] && rmdir "$LOCK" 2>/dev/null
-    HAVE_LOCK=
+    release_lock
+}
+# Is the lock directory $1 stale?  With an owner record: when that process
+# is gone (however old the lock; a copy may take long).  Without one (an
+# older launcher, or one just taking it): when untouched for 10 minutes.
+lock_stale() {
+    owner=
+    [ -f "$1/owner" ] && owner=$(cat "$1/owner" 2>/dev/null)
+    opid=${owner%% *}
+    oticks=${owner#* }
+    [ "$opid" = "$owner" ] && opid=   # no "<pid> <ticks>" pair
+    case "$opid:$oticks" in
+        *[!0-9:]*|:*|*:) ;;
+        *)
+            [ "$(start_ticks "$opid")" != "$oticks" ]
+            return
+            ;;
+    esac
+    [ -n "$(find "$1" -maxdepth 0 -mmin +10 2>/dev/null)" ]
+}
+# Break a stale lock atomically: rename it to a name only this launcher
+# uses, then look again.  Another waiter may have broken it first and taken
+# a fresh lock under the same name; that one is put back, not removed.
+break_lock() {
+    aside="$LOCK.stale.$$"
+    rm -rf "$aside"
+    mv "$LOCK" "$aside" 2>/dev/null || return 0
+    if lock_stale "$aside"; then
+        rm -rf "$aside"
+        return 0
+    fi
+    [ -e "$LOCK" ] || mv "$aside" "$LOCK" 2>/dev/null
+    rm -rf "$aside"
 }
 fail() {
     cleanup
@@ -109,7 +160,7 @@ previous_cache() {
     for d in "$ROOT"/*/; do
         d=${d%/}
         case "$d" in
-            "$CACHE"|*.partial.*|*.lock|*/repair.*) continue ;;
+            "$CACHE"|*.partial.*|*.lock|*.lock.stale.*|*/repair.*) continue ;;
         esac
         [ -f "$d/.complete" ] || continue
         if [ -z "$best" ] || [ "$d/.complete" -nt "$best/.complete" ]; then
@@ -184,19 +235,32 @@ if [ ! -f "$CACHE/.complete" ]; then
     # Serialise staging: only one launcher copies at a time.
     tries=0
     while :; do
+        # Taking the lock and recording that we hold it are one step: an
+        # interrupt in between would orphan the lock, so it waits.
+        INTR=
+        trap 'INTR=1' INT TERM HUP
         if mkdir "$LOCK" 2>/dev/null; then
             HAVE_LOCK=1
-            break
+            if [ -n "$SELF" ]; then
+                printf '%s\n' "$SELF" > "$LOCK/owner.$$" \
+                    && mv "$LOCK/owner.$$" "$LOCK/owner"
+            fi
         fi
+        trap 'cleanup; exit 1' INT TERM HUP
+        if [ -n "$INTR" ]; then
+            cleanup
+            exit 1
+        fi
+        [ -n "$HAVE_LOCK" ] && break
         [ -f "$CACHE/.complete" ] && break
-        if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
-            rmdir "$LOCK" 2>/dev/null   # stale lock from a dead launcher
-            continue
-        fi
         tries=$((tries + 1))
         if [ "$tries" -gt 120 ]; then
             echo "Another YTOP launcher is still copying to $CACHE; try again in a minute."
             exit 4
+        fi
+        if lock_stale "$LOCK"; then
+            break_lock   # left by a launcher that is gone
+            continue
         fi
         sleep 1
     done

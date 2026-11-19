@@ -525,3 +525,54 @@ def test_takeover_waits_out_a_slow_final_sync(portable_root, opened, monkeypatch
     assert waits == [cli.TAKEOVER_WAIT_S] and cli.TAKEOVER_WAIT_S >= 60
     monkeypatch.setattr(app_module, "_sync_filesystems", lambda: None)
     _stop(live, thread, result)
+
+
+# --- #9: a claim that fails half way, a concurrent launch ---------------------
+
+
+def test_claim_survives_a_failed_pid_write_and_never_leaks_its_lock(monkeypatch):
+    first = _info()
+    monkeypatch.setattr(instance.os, "ftruncate", _raise(OSError(28, "No space")))
+    assert instance.claim(first)  # the pid in the file is informational only
+    monkeypatch.undo()
+    instance.release(first)
+    second = _info()
+    monkeypatch.setattr(instance.os, "ftruncate", _raise(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        instance.claim(second)
+    monkeypatch.undo()
+    third = _info()
+    assert instance.claim(third)  # the interrupted claim let go of its lock
+    instance.release(third)
+
+
+def _raise(exc: BaseException):
+    def fail(*args, **kwargs):
+        raise exc
+
+    return fail
+
+
+def test_a_launch_beaten_to_the_lock_still_decides(monkeypatch, tmp_path: Path):
+    """Two launches at once: the one that loses the lock waits for the
+    winner to come up, then decides as usual (here: the winner is older
+    and idle, so it is taken over rather than just opened)."""
+    import ytop.cli as cli
+
+    older = _info(port=1, version="0.0.1")
+    lives = iter([None, older])
+    claims = iter([False, True])
+    posts: list[str] = []
+    monkeypatch.setattr(instance, "read_live", lambda: next(lives))
+    monkeypatch.setattr(instance, "claim_wait", lambda info, timeout: next(claims))
+    monkeypatch.setattr(instance, "post",
+                        lambda live, path, timeout=3.0: posts.append(path) or 202)
+    monkeypatch.setattr(instance, "wait_port_free", lambda port, timeout=10.0: True)
+    monkeypatch.setattr("atexit.register", lambda fn: None)
+    opened: list = []
+    monkeypatch.setattr(cli, "_open_existing", lambda *a, **k: opened.append(a) or 0)
+    kwargs: dict = {}
+    args = SimpleNamespace(open_browser=False)
+    assert cli._portable_instance(args, tmp_path, kwargs) is None
+    assert posts == ["/api/instance/shutdown"] and opened == []
+    assert "instance_token" in kwargs

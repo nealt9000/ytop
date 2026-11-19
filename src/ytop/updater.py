@@ -54,7 +54,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import product
+from . import product, sticklock
 from .bgserver import ServerError, ServerInstall, deno_install, prepare_server
 from .components import (
     BGUTIL_SERVER,
@@ -80,7 +80,7 @@ from .components import (
     write_current,
 )
 from .config import Config
-from .stick.boot import COMPONENTS_DIR
+from .stick.boot import COMPONENTS_DIR, LOCK
 
 __all__ = [
     "COMPONENT_DISTS",
@@ -1117,6 +1117,13 @@ class UpdateResult:
 
 
 _LOCK = threading.Lock()
+STICK_BUSY = (
+    "another YTOP is updating or upgrading this stick; try again when it is done"
+)
+
+
+class _StickBusy(Exception):
+    """Another process holds the stick's lock."""
 
 
 def update(
@@ -1146,22 +1153,39 @@ def update(
     if not _LOCK.acquire(blocking=False):
         return UpdateResult("busy", message="an update is already running")
     try:
-        return _update(
-            ytop, config, names, http=http or Http(), smoke=smoke, progress=progress,
-            ep=endpoints or endpoints_for(config), server_install=server_install,
-            python=python or sys.executable, now=now or datetime.now(UTC),
-        )
-    except Offline as exc:
-        return UpdateResult("offline", message=str(exc))
-    except RateLimited as exc:
-        return UpdateResult("rate_limited", message=str(exc))
-    except (UpdateError, ServerError, OSError) as exc:
-        return UpdateResult("error", message=str(exc))
-    finally:
+        # The stick's lock too, unless this process holds it already (an app
+        # update installing its components): a CLI update and a server's on
+        # one stick must not clear each other's staging.
+        stick_lock = ytop.parent / LOCK
+        locked = False
+        if not sticklock.held(stick_lock):
+            try:
+                sticklock.acquire(stick_lock, lambda: _StickBusy())
+            except _StickBusy:
+                return UpdateResult("busy", message=STICK_BUSY)
+            except OSError as exc:
+                return UpdateResult("error", message=f"could not lock the stick: {exc}")
+            locked = True
         try:
-            _clear_staging(ytop)
+            return _update(
+                ytop, config, names, http=http or Http(), smoke=smoke, progress=progress,
+                ep=endpoints or endpoints_for(config), server_install=server_install,
+                python=python or sys.executable, now=now or datetime.now(UTC),
+            )
+        except Offline as exc:
+            return UpdateResult("offline", message=str(exc))
+        except RateLimited as exc:
+            return UpdateResult("rate_limited", message=str(exc))
+        except (UpdateError, ServerError, OSError) as exc:
+            return UpdateResult("error", message=str(exc))
         finally:
-            _LOCK.release()
+            try:
+                _clear_staging(ytop)
+            finally:
+                if locked:
+                    sticklock.release(stick_lock)
+    finally:
+        _LOCK.release()
 
 
 def _host_platform() -> str | None:

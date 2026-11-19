@@ -83,7 +83,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Literal
 
-from . import fsinfo
+from . import fsinfo, sticklock
 from .components import merge_newest, merge_size
 from .layout import LibraryInfo, _hide, read_library
 from .libraries import PROBE_TIMEOUT_S, LibrarySet, _mount_candidates
@@ -109,8 +109,6 @@ from .stick.boot import (
     OLD,
     PART_SUFFIX,
     ROOT_FILES,
-    lock_holder,
-    lock_payload,
     make_parents,
     pid_alive,
     remove_tree_best_effort,
@@ -671,38 +669,24 @@ def _pid_alive(pid: int) -> bool:
 def _lock_live(target: Path) -> bool:
     """A make by a live process holds ``target``: its pid is alive and, where
     the OS tells, started when the lock says (Ruling R-B8; the same rule as
-    boot.lock_holder, which ignores an old lock's ``host``)."""
-    try:
-        doc = json.loads((target / LOCK).read_text(encoding="utf-8"))
-        pid = int(doc["pid"])
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError, KeyError, TypeError):
-        return False  # unreadable: a torn write from a crash
-    if pid == os.getpid():
-        return _busy(target)
-    return lock_holder(doc, alive=_pid_alive) != "dead"
+    boot.lock_holder, which ignores an old lock's ``host``).  A lock naming
+    this process is live only if this process took it (sticklock)."""
+    return sticklock.live(target / LOCK, alive=lambda pid: _pid_alive(pid))
 
 
-def _acquire_lock(target: Path) -> None:
-    path = target / LOCK
-    payload = json.dumps(lock_payload())  # no host name on the stick
-    for _attempt in range(2):
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            if _lock_live(target):
-                raise MakeStickError(
-                    "another YTOP is making a stick there; wait for it to "
-                    "finish. If no other YTOP is running, delete the file "
-                    f"{LOCK} on {target} and try again"
-                ) from None
-            path.unlink(missing_ok=True)  # stale: left by a crash
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-        return
-    raise MakeStickError(f"could not lock {target} for making a stick")
+def _lock_busy(target: Path) -> MakeStickError:
+    return MakeStickError(
+        "another YTOP is making or updating a stick there; wait for it to "
+        "finish. If no other YTOP is running, delete the file "
+        f"{LOCK} on {target} and try again"
+    )
+
+
+def _acquire_lock(target: Path, before_break: Callable[[], None] | None = None) -> None:
+    sticklock.acquire(
+        target / LOCK, lambda: _lock_busy(target), alive=lambda pid: _pid_alive(pid),
+        before_break=before_break,
+    )
 
 
 def _touch_lock(target: Path) -> None:
@@ -714,10 +698,7 @@ def _touch_lock(target: Path) -> None:
 
 
 def _release_lock(target: Path) -> None:
-    try:
-        (target / LOCK).unlink(missing_ok=True)
-    except OSError:
-        pass
+    sticklock.release(target / LOCK)
 
 
 def _busy(target: Path) -> bool:

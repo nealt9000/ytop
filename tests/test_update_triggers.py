@@ -687,7 +687,7 @@ def test_in_use_marker_holds_no_personal_data(tmp_path: Path):
     assert marker is not None
     assert marker.name.startswith(f"{os.getpid()}-") and marker.name.endswith(".json")
     doc = json.loads(marker.read_text())
-    assert set(doc) == {"pid", "started", "folders"}
+    assert set(doc) == {"pid", "started", "ticks", "folders"}
     host = socket.gethostname()
     assert host not in marker.name and host not in marker.read_text()
     comp.remove_in_use(ytop)

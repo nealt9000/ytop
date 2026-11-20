@@ -1193,3 +1193,10 @@ body.reorder-mode { user-select: none; }
 .field-row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
 .tag-manage-list { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .tag-manage-row { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
+
+/* Settings ----------------------------------------------------------------- */
+.platform-list { list-style: none; margin: 6px 0 12px; padding: 0; }
+.platform-list li { padding: 2px 0; }
+.footer-version { color: #666; }
+section.storage-add + section.storage-add { margin-top: 16px; }
+.stack-form .check-row span { text-transform: none; letter-spacing: normal; font-size: 0.9rem; }

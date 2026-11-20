@@ -113,10 +113,12 @@ class FakeReleases:
         for name, data in assets.items():
             url = self.add(f"/dl/{repo}/{tag}/{name}", data)
             listed.append({"name": name, "browser_download_url": url, "size": len(data)})
-        self.add(f"/api/repos/{repo}/releases/latest", {
+        release = {
             "tag_name": tag, "name": tag, "body": notes, "draft": False,
             "prerelease": False, "assets": listed,
-        })
+        }
+        self.add(f"/api/repos/{repo}/releases/latest", release)
+        self.add(f"/api/repos/{repo}/releases/tags/{tag}", release)
 
     def ytdlp_release(self, version: str, *, tamper: bool = False,
                       prerelease: bool = False) -> bytes:

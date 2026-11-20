@@ -921,3 +921,153 @@ def test_bot_check_is_not_the_age_gate():
     assert is_bot_check("Sign in to confirm you're not a bot")
     assert not is_bot_check("Sign in to confirm your age")
     assert not is_bot_check(None)
+
+
+# --- region-blocked videos read through proxies ---------------------------
+
+def _proxy_cfg(*servers):
+    from dataclasses import replace
+
+    from ytop.config import ProxyServer
+    return replace(Config(), proxies=tuple(ProxyServer(*s) for s in servers))
+
+
+def _geo(countries=("US",)):
+    from ytop.yt.probe import ProbeError
+    return ProbeError(
+        "The uploader has not made this video available in your country",
+        list(countries),
+    )
+
+
+def test_region_blocked_video_is_read_through_a_matching_proxy(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append(active_proxy())
+        if active_proxy() is None:
+            raise _geo()
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://de:89", "DE"), ("https://us:89", "US"))
+    got = probe_mod.probe_video("abc", cfg).items[0]
+    assert got.error is None and got.proxy == "https://us:89"
+    assert "https://de:89" not in seen
+
+
+def test_bot_check_through_a_proxy_tries_the_next_and_does_not_stop_the_playlist(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    entries = [{"id": f"v{i}", "title": f"V{i}"} for i in range(3)]
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": entries}
+        ),
+    )
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        proxy = active_proxy()
+        if proxy is None:
+            raise _geo()
+        if proxy == "https://a:1":
+            raise probe_mod.ProbeError("Sign in to confirm you're not a bot")
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://a:1", "US"), ("https://b:1", "US"))
+    result = probe_mod.probe_playlist("PL1", cfg, probe_jobs=2)
+    assert not result.bot_blocked
+    assert [i.proxy for i in result.items] == ["https://b:1"] * 3
+    assert all(i.error is None for i in result.items)
+
+
+def test_all_proxies_fail(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        if active_proxy() is None:
+            raise _geo()
+        raise probe_mod.ProbeError(
+            "407 Proxy Authentication Required https://u:secret@us:89"
+        )
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", _proxy_cfg(("https://us:89", "US"))).items[0]
+    assert got.error == "Region-blocked: available in US (tried 1 proxy)"
+    assert got.error_kind == "region_blocked"
+    assert "secret" not in got.error
+    assert got.countries == ["US"]
+    assert got.proxy is None
+
+
+def test_no_proxies_set_up(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        raise _geo()
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", Config()).items[0]
+    assert got.error == "Region-blocked: available in US (no proxies set up)"
+    assert got.error_kind == "region_blocked"
+
+
+def test_only_wrong_country_proxies(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append(active_proxy())
+        raise _geo()
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", _proxy_cfg(("https://de:89", "DE"))).items[0]
+    assert got.error == "Region-blocked: available in US (no proxy set up for those countries)"
+    assert set(seen) == {None}
+
+
+def test_resync_does_not_reprobe_existing_region_blocked_videos(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": [{"id": "old"}]}
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        probe_mod, "extract_video_info", lambda *a, **k: calls.append(a),
+    )
+    result = probe_mod.probe_playlist(
+        "PL1", _proxy_cfg(("https://us:89", "US")), probe_jobs=1,
+        have=lambda playlist_id, video_id: True,
+    )
+    assert calls == []
+    assert result.items[0].existing and result.items[0].proxy is None
+
+
+def test_non_region_errors_are_not_retried(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    calls = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        calls.append(quick)
+        raise probe_mod.ProbeError("Private video")
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video(
+        "abc", _proxy_cfg(("https://us:89", "US")),
+    ).items[0]
+    assert len(calls) == 1
+    assert got.error == "Private video" and got.error_kind is None

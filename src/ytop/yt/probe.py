@@ -26,7 +26,16 @@ from .formats import (
     select_format,
 )
 from .pot import apply_auth_options
-from .proxies import active_proxy, countries_of, is_region_blocked
+from .proxies import (
+    active_proxy,
+    countries_of,
+    is_region_blocked,
+    order_proxies,
+    proxy_url,
+    redact,
+    region_blocked_message,
+    using_proxy,
+)
 
 
 class ProbeError(RuntimeError):
@@ -109,6 +118,13 @@ class ProbedItem:
     # Already in the library with its media: not extracted (``info`` and
     # ``selection`` stay empty); the download keeps what is on disk.
     existing: bool = False
+    # A region-blocked video read through a proxy: the proxy's full URL,
+    # login included.  Kept for the download; never rendered.
+    proxy: str | None = None
+    # Where YouTube offers a region-blocked video, when it said.
+    countries: list[str] | None = None
+    # ``"region_blocked"`` when ``error`` is that; else None.
+    error_kind: str | None = None
 
 
 @dataclass
@@ -302,6 +318,54 @@ def analyse_video(
     return info, select_format(info, config.audio_language, max_height, preserve_audio)
 
 
+def analyse_with_fallback(
+    video_id: str,
+    config: Config,
+    cache_root: Path | None = None,
+    *,
+    max_height: int | None = None,
+    preserve_audio: bool = False,
+) -> tuple[dict, Selection, str | None]:
+    """``analyse_video`` direct; when YouTube says the video is region-blocked,
+    again through each configured proxy that fits, in order.  Returns the
+    proxy URL that worked (None: direct).  Any other direct failure is
+    raised unchanged; a video no proxy opens raises a region-blocked
+    ``ProbeError`` carrying the allowed countries."""
+    try:
+        info, selection = analyse_video(
+            video_id, config, cache_root,
+            max_height=max_height, preserve_audio=preserve_audio,
+        )
+        return info, selection, None
+    except (ProbeError, FormatError) as direct:
+        if not is_region_blocked(direct):
+            raise
+        countries = countries_of(direct)
+        servers = order_proxies(config.proxies, countries)
+        tried = len(servers) if config.proxies else -1
+        for server in servers:
+            url = proxy_url(server, config)
+            try:
+                with using_proxy(url):
+                    info, selection = analyse_video(
+                        video_id, config, cache_root,
+                        max_height=max_height, preserve_audio=preserve_audio,
+                    )
+                return info, selection, url
+            except JobCancelled:
+                raise
+            except Exception:  # noqa: BLE001 - this proxy failed; try the next
+                continue
+        raise ProbeError(region_blocked_message(countries, tried), countries) from direct
+
+
+def _record_failure(item: ProbedItem, exc: BaseException) -> None:
+    item.error = redact(str(exc))
+    if is_region_blocked(exc):
+        item.error_kind = "region_blocked"
+        item.countries = countries_of(exc)
+
+
 def probe_video(
     video_id: str,
     config: Config,
@@ -341,7 +405,7 @@ def probe_video(
     try:
         if cancel is not None and cancel():
             raise JobCancelled("cancelled by the user")
-        info, item.selection = analyse_video(
+        info, item.selection, item.proxy = analyse_with_fallback(
             video_id, config, cache_root,
             max_height=max_height, preserve_audio=preserve_audio,
         )
@@ -351,7 +415,7 @@ def probe_video(
     except JobCancelled:
         raise
     except (ProbeError, FormatError) as exc:
-        item.error = str(exc)
+        _record_failure(item, exc)
     except Exception as exc:  # noqa: BLE001 - the job page shows the reason
         item.error = f"{type(exc).__name__}: {exc}"
     if on_item is not None:
@@ -428,7 +492,7 @@ def probe_playlist(
         try:
             # Provisional selection; the playlist-wide budget is allocated
             # after every item has been probed.
-            info, item.selection = analyse_video(
+            info, item.selection, item.proxy = analyse_with_fallback(
                 item.id, config, cache_root,
                 max_height=max_height, preserve_audio=preserve_audio,
             )
@@ -438,7 +502,7 @@ def probe_playlist(
         except JobCancelled:
             raise
         except (ProbeError, FormatError) as exc:
-            item.error = str(exc)
+            _record_failure(item, exc)
         except Exception as exc:  # noqa: BLE001 - record and continue the playlist
             item.error = f"{type(exc).__name__}: {exc}"
         item.seconds = time.monotonic() - started

@@ -66,6 +66,7 @@ from ..yt.metadata import (
     prune_lock_sidecars,
 )
 from ..yt.probe import use_library_deno_dir
+from ..yt.proxies import format_servers, parse_servers, redact
 from .browse import (
     build_home,
     build_videos,
@@ -1547,6 +1548,8 @@ def create_app(
             ),
             download_config=load_config(update_root) if update_root is not None else None,
             download_library=home_ref,
+            proxy_servers_text=(format_servers(load_config(update_root).proxies)
+                                if update_root is not None else ""),
             height_choices=[0, 480, 720, 1080, 1440, 2160],
             floor_choices=[0, 240, 360, 480],
         )
@@ -1599,6 +1602,30 @@ def create_app(
             return _render_settings(request, f"Could not save the settings: {exc}",
                                     status_code=400)
         return RedirectResponse("/settings#downloads", status_code=303)
+
+    @app.post("/settings/proxies")
+    async def settings_proxies(request: Request):
+        form = await request.form()
+        if update_root is None:
+            raise HTTPException(status_code=409, detail="No library is connected.")
+        try:
+            current = load_config(update_root)
+            password = str(form.get("password") or "")
+            if form.get("clear_password") == "1":
+                password = ""
+            elif not password:
+                password = current.proxy_password
+            updated = replace(
+                current,
+                proxies=parse_servers(str(form.get("servers") or ""), current.proxies),
+                proxy_username=str(form.get("username") or "").strip(),
+                proxy_password=password,
+            )
+            save_config(update_root, updated)
+        except (OSError, ValueError) as exc:
+            return _render_settings(request, f"Could not save the proxies: {redact(str(exc))}",
+                                    status_code=400)
+        return RedirectResponse("/settings#proxies", status_code=303)
 
     @app.post("/storage/components/update")
     def components_update():
@@ -1938,7 +1965,8 @@ def create_app(
             return RedirectResponse(f"/move/{job_id}", status_code=303)
         if job.kind == "make_stick":
             return RedirectResponse(f"/make-stick/{job_id}", status_code=303)
-        return render(request, "add.html", job=job)
+        return render(request, "add.html", job=job, proxies_set=bool(
+            update_root is not None and load_config(update_root).proxies))
 
     @app.get("/move/{job_id}")
     def move_status(request: Request, job_id: str):

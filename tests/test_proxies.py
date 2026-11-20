@@ -11,6 +11,8 @@ from dataclasses import replace
 from ytop.config import Config, ProxyServer
 from ytop.yt.probe import base_options
 from ytop.yt.proxies import (
+    format_servers,
+    parse_servers,
     RegionBlockedError,
     covering_countries,
     is_region_blocked,
@@ -156,3 +158,23 @@ def test_base_options_uses_active_proxy():
     with using_proxy("https://h:89"):
         assert base_options(Config())["proxy"] == "https://h:89"
     assert "proxy" not in base_options(Config())
+
+
+def test_format_and_parse_servers_round_trip_with_masked_passwords():
+    servers = (ProxyServer("https://h:89", "US"), ProxyServer("socks5h://a:sekret@s:1080"))
+    text = format_servers(servers)
+    assert text == "US https://h:89\nsocks5h://a:\u2022\u2022\u2022@s:1080"
+    assert "sekret" not in text
+    assert parse_servers(text, servers) == servers
+
+
+def test_parse_servers_normalises_country_and_skips_blank_lines():
+    assert parse_servers("\n us  http://h:1 \n\n", ()) == (ProxyServer("http://h:1", "US"),)
+
+
+@pytest.mark.parametrize("text", [
+    "ftp://x", "host:89", "https://", "US", "a b c", "retry\nsocks5://u:\u2022\u2022\u2022@h:1",
+])
+def test_parse_servers_rejects_bad_lines_with_line_number(text):
+    with pytest.raises(ValueError, match=r"^line \d+: "):
+        parse_servers(text, ())

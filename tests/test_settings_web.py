@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from factories import library_set, make_library
 from ytop import __version__
-from ytop.config import load_config
+from ytop.config import ProxyServer, load_config
 from ytop.stickplatforms import PlatformAdds
 from ytop.web.app import create_app
 
@@ -121,4 +121,78 @@ def test_download_settings_are_saved_and_checked(home):
     assert client.post("/settings/downloads",
                        data={"target_mb_per_hour": "-5"}).status_code == 400
     assert load_config(home.root).target_mb_per_hour == 250.0  # unchanged
+    client.app.state.jobs.close()
+
+
+def test_proxy_settings_saved_and_password_never_rendered(home):
+    client = _client(home, FakeAdds(None))
+    r = client.post("/settings/proxies", data={
+        "servers": "us https://h:89\nsocks5h://a:sekret@s:1080",
+        "username": "u", "password": "pw"}, follow_redirects=False)
+    assert r.status_code == 303
+    cfg = load_config(home.root)
+    assert cfg.proxies[0] == ProxyServer("https://h:89", "US")
+    assert (cfg.proxy_username, cfg.proxy_password) == ("u", "pw")
+    page = client.get("/settings").text
+    assert "pw" not in page.replace("pwa", "") and "sekret" not in page
+    assert "Login saved" in page and "socks5h://a:\u2022\u2022\u2022@s:1080" in page
+    client.app.state.jobs.close()
+
+
+def test_blank_password_keeps_the_stored_one_and_masked_url_round_trips(home):
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/proxies", data={
+        "servers": "socks5h://a:sekret@s:1080", "username": "u", "password": "pw"})
+    client.post("/settings/proxies", data={
+        "servers": "socks5h://a:\u2022\u2022\u2022@s:1080", "username": "u2", "password": ""})
+    cfg = load_config(home.root)
+    assert cfg.proxies == (ProxyServer("socks5h://a:sekret@s:1080"),)
+    assert (cfg.proxy_username, cfg.proxy_password) == ("u2", "pw")
+    client.post("/settings/proxies", data={
+        "servers": "https://h:1", "username": "u2", "clear_password": "1"})
+    assert load_config(home.root).proxy_password == ""
+    assert "Login saved" not in client.get("/settings").text
+    client.app.state.jobs.close()
+
+
+def test_bad_proxy_line_is_rejected_with_its_line_number(home):
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/proxies", data={"servers": "https://ok:1"})
+    bad = client.post("/settings/proxies", data={"servers": "https://ok:2\nftp://x"})
+    assert bad.status_code == 400 and "line 2" in bad.text
+    assert load_config(home.root).proxies == (ProxyServer("https://ok:1"),)
+    client.app.state.jobs.close()
+
+
+def test_proxy_settings_need_a_library():
+    off = TestClient(create_app(None, libraries=library_set(None), platform_adds=FakeAdds(None)))
+    assert off.post("/settings/proxies", data={"servers": ""}).status_code == 409
+    assert "Region-blocked videos" in off.get("/settings").text
+    off.app.state.jobs.close()
+
+
+def _review_job(client, kind):
+    from ytop.web.jobs import Job
+    job = Job(id="j1", status="ready", kind="video", video_count=1)
+    job.items = [{"index": 1, "id": "v", "title": "T", "duration": 1, "duration_label": "0:01",
+                  "error": "Region-blocked: available in US (no proxies set up)",
+                  "error_kind": kind, "status": "failed", "size": 0, "native_size": 0}]
+    with client.app.state.jobs._lock:
+        client.app.state.jobs._jobs[job.id] = job
+    return client.get("/add/j1").text
+
+
+def test_region_blocked_row_links_to_settings_when_no_proxies(home):
+    client = _client(home, FakeAdds(None))
+    page = _review_job(client, "region_blocked")
+    assert "Region-blocked: available in US" in page
+    assert 'href="/settings#proxies"' in page and "Set up proxies" in page
+    client.post("/settings/proxies", data={"servers": "https://h:1"})
+    assert "Set up proxies" not in client.get("/add/j1").text
+    client.app.state.jobs.close()
+
+
+def test_other_failures_get_no_proxy_link(home):
+    client = _client(home, FakeAdds(None))
+    assert "Set up proxies" not in _review_job(client, None)
     client.app.state.jobs.close()

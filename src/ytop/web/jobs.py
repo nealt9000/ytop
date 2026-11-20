@@ -439,6 +439,7 @@ def _compact_probe(
             "duration": duration,
             "duration_label": _duration_label(duration),
             "error": item.error,
+            "error_kind": item.error_kind,
             "status": "failed" if item.error or selection is None else "pending",
             "size": efficient_size,
             "native_size": native_size,

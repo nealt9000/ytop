@@ -1044,3 +1044,14 @@ def test_a_bot_blocked_review_says_so(tmp_path: Path, monkeypatch):
         manager, manager.create_probe("PLTESTJOBS00000000000000000001").id, {"ready"},
     )
     assert job.notice == jobs_module.BOT_BLOCKED_NOTICE
+
+
+def test_review_rows_keep_the_region_blocked_kind(tmp_path: Path):
+    probe = ProbeResult(
+        url="https://www.youtube.com/playlist?list=PL1",
+        playlist={"id": "PL1", "title": "List"},
+        items=[ProbedItem(index=1, id="a", url="u1", error="Region-blocked: x",
+                          error_kind="region_blocked")],
+    )
+    review = jobs_module._compact_probe(probe, Config(), False, tmp_path)
+    assert review["items"][0]["error_kind"] == "region_blocked"

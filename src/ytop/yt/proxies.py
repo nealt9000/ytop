@@ -144,3 +144,63 @@ def covering_countries(blocked: list[list[str] | None],
         chosen.append(best)
         remaining = [have for have in remaining if best not in have]
     return chosen
+
+
+_MASK = "•••"
+_SCHEMES = ("http", "https", "socks5", "socks5h", "socks4")
+
+
+def _server_key(url: str) -> tuple:
+    parts = urlsplit(url)
+    return (parts.scheme, parts.username, parts.hostname, parts.port)
+
+
+def _masked(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.password is None:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=f"{parts.username or ''}:{_MASK}@{host}"))
+
+
+def format_servers(servers: Sequence[ProxyServer]) -> str:
+    """One line per server for the Settings form; embedded passwords hidden."""
+    return "\n".join(
+        f"{s.country} {_masked(s.url)}" if s.country else _masked(s.url) for s in servers
+    )
+
+
+def parse_servers(text: str, previous: Sequence[ProxyServer]) -> tuple[ProxyServer, ...]:
+    """Servers from the Settings form (``[CC ]url`` per line).  A URL whose
+    password is the mask keeps the one of the previous server it came from."""
+    kept = {_server_key(s.url): s.url for s in previous}
+    servers: list[ProxyServer] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        words = line.split()
+        if not words:
+            continue
+        country = ""
+        if len(words) == 2 and re.fullmatch(r"[A-Za-z]{2}", words[0]):
+            country, words = words[0].upper(), words[1:]
+        if len(words) != 1:
+            raise ValueError(f"line {number}: expected an optional country code, then a proxy address")
+        url = words[0]
+        try:
+            parts = urlsplit(url)
+            parts.port  # noqa: B018 - validates the port
+        except ValueError:
+            raise ValueError(f"line {number}: not a valid proxy address") from None
+        if parts.scheme.lower() not in _SCHEMES:
+            raise ValueError(
+                f"line {number}: the address must start with one of "
+                + ", ".join(f"{s}://" for s in _SCHEMES)
+            )
+        if not parts.hostname:
+            raise ValueError(f"line {number}: the address needs a host, like https://host:port")
+        if parts.password == _MASK:
+            old = kept.get(_server_key(url))
+            if old is None:
+                raise ValueError(f"line {number}: retype the password for this proxy")
+            url = old
+        servers.append(ProxyServer(url, country))
+    return tuple(servers)

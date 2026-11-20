@@ -2555,6 +2555,8 @@ def test_new_stick_reports_time_per_step(tmp_path: Path, image: Path):
     assert names[:4] == ["preparing", "copying", "verifying", "switching"]
     assert "tidying" in names and "registering" in names
     assert len(names) == len(set(names))
+    registering = report.timings[names.index("registering")]
+    assert (registering.count, registering.bytes) == (0, 0)
     assert all(phase.seconds >= 0 for phase in report.timings)
     copying = report.timings[1]
     assert copying.count == len(plan.files)

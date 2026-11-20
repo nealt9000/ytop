@@ -82,6 +82,16 @@ class ItemResult:
     countries: list[str] | None = None  # where a region-blocked video is offered
 
 
+def _failure_kind(exc: BaseException, item: ProbedItem) -> str | None:
+    """``"region_blocked"`` or ``"youtube_changed"`` for a failed download.  A
+    video read through a proxy is never ``"youtube_changed"``: a flaky proxy
+    must not trigger a component update."""
+    kind = classify_failure(exc)
+    if kind == "region_blocked" or (kind == "youtube_changed" and not item.proxy):
+        return kind
+    return None
+
+
 def _ytdlp_download(url: str, opts: dict) -> None:
     """yt-dlp downloads ``url``: here, or in the retry's child Python."""
     runner = ytdlp_runner.active()
@@ -571,6 +581,7 @@ def _process_item_body(
     media: Path | None = None
     status = "skipped"
     error: str | None = None
+    error_kind: str | None = None
     try:
         media, status = _download_media(
             item, layout, playlist_id, config, force, lock,
@@ -581,6 +592,7 @@ def _process_item_body(
         raise
     except Exception as exc:  # noqa: BLE001 - keep metadata and other items
         error = redact(str(exc))
+        error_kind = _failure_kind(exc, item)
         media = find_media(layout, vdir)
 
     alternates: list[tuple[dict, Path]] = []
@@ -669,7 +681,7 @@ def _process_item_body(
         return (
             ItemResult(item.index, item.id, title, "failed", path=str(vdir),
                        size=media.stat().st_size if media else 0, error=error,
-                       transcript=transcript),
+                       transcript=transcript, error_kind=error_kind),
             entry,
         )
 
@@ -905,10 +917,7 @@ def download_probe(
             result = ItemResult(
                 item.index, item.id, item.title or item.id, "failed",
                 error=error,
-                error_kind="fat32_limit" if fat else (
-                    "youtube_changed" if classify_failure(exc) == "youtube_changed"
-                    else None
-                ),
+                error_kind="fat32_limit" if fat else _failure_kind(exc, item),
             )
             media = find_media(
                 layout, video_directory(layout, playlist_id, item.id)

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -27,6 +28,7 @@ from .formats import (
 )
 from .pot import apply_auth_options
 from .proxies import (
+    REGION_BLOCKED,
     active_proxy,
     countries_of,
     is_region_blocked,
@@ -36,6 +38,8 @@ from .proxies import (
     region_blocked_message,
     using_proxy,
 )
+
+log = logging.getLogger(__name__)
 
 
 class ProbeError(RuntimeError):
@@ -318,6 +322,19 @@ def analyse_video(
     return info, select_format(info, config.audio_language, max_height, preserve_audio)
 
 
+def _proxy_failure_reason(redacted: str) -> str:
+    """A short, password-free reason a proxy could not read the video."""
+    low = redacted.lower()
+    if "407" in low or "proxy authentication" in low:
+        return "proxy login refused"
+    if is_bot_check(redacted):
+        return "proxy was asked to confirm it is not a bot"
+    if any(w in low for w in ("connection refused", "timed out", "unreachable",
+                              "name resolution", "name or service not known")):
+        return "proxy unreachable"
+    return redacted[:80]
+
+
 def analyse_with_fallback(
     video_id: str,
     config: Config,
@@ -343,20 +360,26 @@ def analyse_with_fallback(
         countries = countries_of(direct)
         servers = order_proxies(config.proxies, countries)
         tried = len(servers) if config.proxies else -1
+        # A dead proxy should cost one socket timeout, not ``retries`` of them.
+        proxied = replace(config, retries=1)
+        last: str | None = None
         for server in servers:
             url = proxy_url(server, config)
             try:
                 with using_proxy(url):
                     info, selection = analyse_video(
-                        video_id, config, cache_root,
+                        video_id, proxied, cache_root,
                         max_height=max_height, preserve_audio=preserve_audio,
                     )
                 return info, selection, url
             except JobCancelled:
                 raise
-            except Exception:  # noqa: BLE001 - this proxy failed; try the next
-                continue
-        raise ProbeError(region_blocked_message(countries, tried), countries) from direct
+            except Exception as exc:  # noqa: BLE001 - this proxy failed; try the next
+                text = redact(str(exc))
+                log.warning("proxy failed for %s: %s", video_id, text)
+                # not is_region_blocked(): its cause chain reaches the direct failure
+                last = None if REGION_BLOCKED.search(text) else _proxy_failure_reason(text)
+        raise ProbeError(region_blocked_message(countries, tried, last), countries) from direct
 
 
 def _record_failure(item: ProbedItem, exc: BaseException) -> None:

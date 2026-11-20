@@ -228,9 +228,15 @@
           {% if entry.chapter_count %}<span class="tag">{{ entry.chapter_count }} chapters</span>{% endif %}
           {% if entry.has_transcript %}<span class="tag">transcript</span>{% endif %}
         </span>
+        {% if entry.error.startswith("Region-blocked") %}
+          <span class="muted small">{{ entry.error }}</span>
+        {% endif %}
       </span>
     </a>
     <div class="row-tools">
+      {% if entry.error.startswith("Region-blocked") and not proxies_set %}
+        <a href="/settings#proxies" class="small">Set up proxies</a>
+      {% endif %}
       <details class="row-rename">
         <summary class="link-button">Rename</summary>
         <form action="/playlist/{{ playlist.key }}/videos/{{ entry.id }}/title" method="post">

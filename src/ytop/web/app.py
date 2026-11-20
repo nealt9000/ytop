@@ -92,6 +92,9 @@ TEMPLATE_DIR = WEB_ROOT / "templates"
 STATIC_DIR = WEB_ROOT / "static"
 
 log = logging.getLogger(__name__)
+# Control characters other than tab; the server list may also hold line breaks.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+_CONTROL_CHARS_MULTILINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 TAGS_READ_ONLY_MESSAGE = "This library is read-only, so its tags can't be changed."
@@ -1025,6 +1028,7 @@ def create_app(
             tag_vocabulary=vocabulary,
             category_names=category_names,
             can_edit_tags=ref is not None and _tags_writable(ref),
+            proxies_set=bool(update_root is not None and load_config(update_root).proxies),
         )
 
     @app.post("/playlist/{playlist_id}/title")
@@ -1608,6 +1612,16 @@ def create_app(
         form = await request.form()
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
+        for field_name in ("servers", "username", "password"):
+            # Never echo the value: it may be the password.
+            pattern = _CONTROL_CHARS_MULTILINE if field_name == "servers" else _CONTROL_CHARS
+            if pattern.search(str(form.get(field_name) or "")):
+                return _render_settings(
+                    request,
+                    f"Could not save the proxies: the {field_name} contains "
+                    "a control character.",
+                    status_code=400,
+                )
         try:
             current = load_config(update_root)
             password = str(form.get("password") or "")

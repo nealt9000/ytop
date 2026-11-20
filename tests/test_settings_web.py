@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from factories import library_set, make_library
+from factories import add_playlist, library_set, make_library
 from ytop import __version__
 from ytop.config import ProxyServer, load_config
 from ytop.stickplatforms import PlatformAdds
@@ -128,13 +128,13 @@ def test_proxy_settings_saved_and_password_never_rendered(home):
     client = _client(home, FakeAdds(None))
     r = client.post("/settings/proxies", data={
         "servers": "us https://h:89\nsocks5h://a:sekret@s:1080",
-        "username": "u", "password": "pw"}, follow_redirects=False)
+        "username": "u", "password": "pw-secret-123"}, follow_redirects=False)
     assert r.status_code == 303
     cfg = load_config(home.root)
     assert cfg.proxies[0] == ProxyServer("https://h:89", "US")
-    assert (cfg.proxy_username, cfg.proxy_password) == ("u", "pw")
+    assert (cfg.proxy_username, cfg.proxy_password) == ("u", "pw-secret-123")
     page = client.get("/settings").text
-    assert "pw" not in page.replace("pwa", "") and "sekret" not in page
+    assert "pw-secret-123" not in page and "sekret" not in page
     assert "Login saved" in page and "socks5h://a:\u2022\u2022\u2022@s:1080" in page
     client.app.state.jobs.close()
 
@@ -142,12 +142,12 @@ def test_proxy_settings_saved_and_password_never_rendered(home):
 def test_blank_password_keeps_the_stored_one_and_masked_url_round_trips(home):
     client = _client(home, FakeAdds(None))
     client.post("/settings/proxies", data={
-        "servers": "socks5h://a:sekret@s:1080", "username": "u", "password": "pw"})
+        "servers": "socks5h://a:sekret@s:1080", "username": "u", "password": "pw-secret-123"})
     client.post("/settings/proxies", data={
         "servers": "socks5h://a:\u2022\u2022\u2022@s:1080", "username": "u2", "password": ""})
     cfg = load_config(home.root)
     assert cfg.proxies == (ProxyServer("socks5h://a:sekret@s:1080"),)
-    assert (cfg.proxy_username, cfg.proxy_password) == ("u2", "pw")
+    assert (cfg.proxy_username, cfg.proxy_password) == ("u2", "pw-secret-123")
     client.post("/settings/proxies", data={
         "servers": "https://h:1", "username": "u2", "clear_password": "1"})
     assert load_config(home.root).proxy_password == ""
@@ -161,6 +161,24 @@ def test_bad_proxy_line_is_rejected_with_its_line_number(home):
     bad = client.post("/settings/proxies", data={"servers": "https://ok:2\nftp://x"})
     assert bad.status_code == 400 and "line 2" in bad.text
     assert load_config(home.root).proxies == (ProxyServer("https://ok:1"),)
+    client.app.state.jobs.close()
+
+
+def test_control_characters_in_proxy_settings_are_refused_without_echo(home):
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/proxies", data={"servers": "https://ok:1", "username": "u"})
+    for field, value in (("username", "u\x00x"), ("password", "pw-secret-1\x1b[2J"),
+                         ("servers", "https://ok:2\x07")):
+        data = {"servers": "https://h:9", "username": "u2", "password": "x"}
+        data[field] = value
+        bad = client.post("/settings/proxies", data=data)
+        assert bad.status_code == 400 and "control character" in bad.text
+        assert "pw-secret-1" not in bad.text
+    # Tabs and line breaks in the server list stay fine.
+    ok = client.post("/settings/proxies", data={
+        "servers": "us\thttps://h:1\r\nhttps://h:2", "username": "u"}, follow_redirects=False)
+    assert ok.status_code == 303
+    assert load_config(home.root).proxies[0] == ProxyServer("https://h:1", "US")
     client.app.state.jobs.close()
 
 
@@ -195,4 +213,42 @@ def test_region_blocked_row_links_to_settings_when_no_proxies(home):
 def test_other_failures_get_no_proxy_link(home):
     client = _client(home, FakeAdds(None))
     assert "Set up proxies" not in _review_job(client, None)
+    client.app.state.jobs.close()
+
+
+def _blocked_playlist(home):
+    import json as _json
+    meta = add_playlist(home, "PLb", "Blocked list", [("v1", "One"), ("v2", "Two")], media=False)
+    doc_path = meta / "playlist.json"
+    doc = _json.loads(doc_path.read_text())
+    doc["entries"][0]["error"] = "Region-blocked: available in US (no proxies set up)"
+    doc["entries"][0]["available"] = False
+    doc["entries"][1]["error"] = "Private video"
+    doc_path.write_text(_json.dumps(doc))
+
+
+def test_playlist_page_shows_region_block_and_links_to_proxy_setup(home):
+    _blocked_playlist(home)
+    client = _client(home, FakeAdds(None))
+    page = client.get("/playlist/PLb").text
+    assert "Region-blocked: available in US" in page
+    assert page.count("Set up proxies") == 1 and 'href="/settings#proxies"' in page
+    assert "Private video" not in page
+    client.post("/settings/proxies", data={"servers": "https://h:1"})
+    page = client.get("/playlist/PLb").text
+    assert "Region-blocked: available in US" in page and "Set up proxies" not in page
+    client.app.state.jobs.close()
+
+
+def test_single_video_failure_links_to_proxy_setup(home):
+    from ytop.web.jobs import Job
+    client = _client(home, FakeAdds(None))
+    job = Job(id="j2", status="failed", kind="video", video_count=1,
+              error="Region-blocked: available in US (no proxies set up)")
+    with client.app.state.jobs._lock:
+        client.app.state.jobs._jobs[job.id] = job
+    page = client.get("/add/j2").text
+    assert "Region-blocked: available in US" in page and "Set up proxies" in page
+    job.error = "Private video"
+    assert "Set up proxies" not in client.get("/add/j2").text
     client.app.state.jobs.close()

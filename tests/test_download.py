@@ -1000,11 +1000,59 @@ def test_all_proxies_fail(monkeypatch):
 
     monkeypatch.setattr(probe_mod, "extract_video_info", video)
     got = probe_mod.probe_video("abc", _proxy_cfg(("https://us:89", "US"))).items[0]
-    assert got.error == "Region-blocked: available in US (tried 1 proxy)"
+    assert got.error == (
+        "Region-blocked: available in US (tried 1 proxy; last: proxy login refused)"
+    )
     assert got.error_kind == "region_blocked"
     assert "secret" not in got.error
     assert got.countries == ["US"]
     assert got.proxy is None
+
+
+def test_failed_proxy_is_logged_redacted(monkeypatch, caplog):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        if active_proxy() is None:
+            raise _geo()
+        raise probe_mod.ProbeError("tunnel failed via https://u:secret@us:89")
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    with caplog.at_level("WARNING", logger="ytop.yt.probe"):
+        got = probe_mod.probe_video("abc", _proxy_cfg(("https://us:89", "US"))).items[0]
+    assert "secret" not in caplog.text and "https://***@us:89" in caplog.text
+    assert got.error.endswith("(tried 1 proxy; last: tunnel failed via https://***@us:89)")
+
+
+def test_proxy_failure_reasons():
+    from ytop.yt.probe import _proxy_failure_reason as why
+
+    assert why("Connection refused") == "proxy unreachable"
+    assert why("read timed out") == "proxy unreachable"
+    assert why("Sign in to confirm you're not a bot") == (
+        "proxy was asked to confirm it is not a bot"
+    )
+    assert why("x" * 200) == "x" * 80
+
+
+def test_proxied_attempts_use_one_retry(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append((active_proxy(), config.retries))
+        if active_proxy() is None:
+            raise _geo()
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://us:89", "US"))
+    probe_mod.probe_video("abc", cfg)
+    assert (None, cfg.retries) in seen and cfg.retries != 1
+    assert ("https://us:89", 1) in seen
 
 
 def test_no_proxies_set_up(monkeypatch):
@@ -1133,3 +1181,36 @@ def test_region_blocked_result_kind_and_cli_summary(tmp_path: Path, fake_network
     assert result.items[0].error_kind == "region_blocked"
     assert result.items[0].countries == ["US"]
     assert "1 region-blocked; countries that would cover them: US" in capsys.readouterr().out
+
+
+def _failing_download(state, message):
+    def hook(video_id, template):
+        raise RuntimeError(message)
+    state["on_download"] = hook
+
+
+def test_direct_region_blocked_download_failure_is_classified(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    _failing_download(
+        state, "The uploader has not made this video available in your country"
+    )
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].error_kind == "region_blocked"
+
+
+def test_proxied_download_failure_is_never_youtube_changed(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    state["items"][0].proxy = "https://us:89"
+    _failing_download(state, "Unable to extract player; Signature extraction failed")
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].status == "failed" and result.items[0].error_kind is None
+
+
+def test_direct_download_failure_can_be_youtube_changed(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    _failing_download(state, "Unable to extract player; Signature extraction failed")
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].error_kind == "youtube_changed"

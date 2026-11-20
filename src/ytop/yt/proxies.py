@@ -109,9 +109,10 @@ def redact(text: str) -> str:
     return _USERINFO.sub(r"\1***@", text)
 
 
-def region_blocked_message(countries: list[str] | None, tried: int) -> str:
+def region_blocked_message(countries: list[str] | None, tried: int,
+                           last: str | None = None) -> str:
     """The user-facing reason; ``tried`` is the proxies attempted, or -1
-    when none are set up."""
+    when none are set up.  ``last``: a short reason the last proxy failed."""
     if countries:
         shown = ", ".join(countries[:_SHOWN_COUNTRIES])
         extra = len(countries) - _SHOWN_COUNTRIES
@@ -122,7 +123,8 @@ def region_blocked_message(countries: list[str] | None, tried: int) -> str:
         return text + " (no proxies set up)"
     if tried == 0:
         return text + " (no proxy set up for those countries)"
-    return text + f" (tried {tried} {'proxy' if tried == 1 else 'proxies'})"
+    suffix = f"; last: {last}" if last else ""
+    return text + f" (tried {tried} {'proxy' if tried == 1 else 'proxies'}{suffix})"
 
 
 def covering_countries(blocked: list[list[str] | None],

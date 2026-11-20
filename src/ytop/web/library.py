@@ -587,6 +587,7 @@ class Entry:
     audio_codec: str = ""
     audio_detail: str = ""
     audio_label: str = ""
+    error: str = ""  # why the last sync could not fetch it, when it said
 
 
 @dataclass
@@ -1106,6 +1107,7 @@ class Library:
                 audio_codec=quality["audio_codec"],
                 audio_detail=quality["audio_detail"],
                 audio_label=quality["audio_label"],
+                error=str(raw.get("error") or ""),
             ))
 
         next_entry = next(

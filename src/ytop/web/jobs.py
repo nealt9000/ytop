@@ -1581,9 +1581,13 @@ class JobManager:
                 cache_root=self._job_cache_root(job),
             )
             fresh = again.items[0] if again.items else None
+            if fresh is not None and fresh.error:
+                item.error, item.error_kind = fresh.error, fresh.error_kind
+                item.countries = fresh.countries
             if fresh is None or fresh.error:
                 return False
             item.info, item.selection, item.error = fresh.info, fresh.selection, None
+            item.proxy = fresh.proxy
             item.title = fresh.title or item.title
             item.duration = fresh.duration or item.duration
             return True
@@ -2351,7 +2355,9 @@ class JobManager:
         broken: list[str] = []
 
         def on_done(result: ItemResult) -> None:
-            if result.status == "failed" and (
+            # A flaky proxy never triggers a component update.
+            via_proxy = any(i.proxy for i in probe.items if i.id == result.id)
+            if result.status == "failed" and not via_proxy and (
                 result.error_kind == "youtube_changed" or self._fixable(result.error)
             ):
                 broken.append(result.id)

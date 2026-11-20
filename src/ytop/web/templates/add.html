@@ -319,7 +319,7 @@
 {% else %}
 <section class="empty-state">
   <h1>{% if job.kind == "video" %}Could not add this video{% else %}Could not add this playlist{% endif %}</h1>
-  <p>{{ job.error or "Unknown error" }}</p>
+  <p>{{ job.error or "Unknown error" }}{% if (job.error or "").startswith("Region-blocked") and not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}</p>
   <div class="hero-actions" style="justify-content: center">
     {% if job.items %}
     <form action="/jobs/{{ job.id }}/download" method="post">

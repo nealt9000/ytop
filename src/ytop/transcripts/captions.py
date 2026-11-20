@@ -26,6 +26,9 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterable
+from urllib.parse import urlsplit
+
+from ..yt.proxies import active_proxy
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -404,8 +407,18 @@ def fetch_transcript_api(
     if not preferred:
         preferred = ["en"]
 
+    proxy_config = None
+    proxy = active_proxy()
+    if proxy:
+        if urlsplit(proxy).scheme not in ("http", "https"):
+            # requests has no SOCKS support here; the yt-dlp fallback copes.
+            return None
+        from youtube_transcript_api.proxies import GenericProxyConfig
+
+        proxy_config = GenericProxyConfig(http_url=proxy, https_url=proxy)
+
     try:
-        api = YouTubeTranscriptApi()
+        api = YouTubeTranscriptApi(proxy_config=proxy_config)
         tracks = list(api.list(video_id))
     except permanent:
         return None

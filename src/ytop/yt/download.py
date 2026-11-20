@@ -64,6 +64,7 @@ from .probe import (
     extract_video_info,
     probe_playlist,
 )
+from .proxies import covering_countries, redact, using_proxy
 from .rawinfo import trim_raw_info
 
 
@@ -77,7 +78,8 @@ class ItemResult:
     size: int = 0
     error: str | None = None
     transcript: TranscriptResult | None = None
-    error_kind: str | None = None  # e.g. "fat32_limit"
+    error_kind: str | None = None  # e.g. "fat32_limit", "region_blocked"
+    countries: list[str] | None = None  # where a region-blocked video is offered
 
 
 def _ytdlp_download(url: str, opts: dict) -> None:
@@ -477,7 +479,14 @@ def _keep_existing(
     )
 
 
-def _process_item(
+def _process_item(item: ProbedItem, *args, **kwargs) -> tuple[ItemResult, dict]:
+    """Process one item; a video read through a proxy is fetched through it
+    too, because YouTube's stream URLs are bound to the IP that read them."""
+    with using_proxy(item.proxy):
+        return _process_item_body(item, *args, **kwargs)
+
+
+def _process_item_body(
     item: ProbedItem,
     playlist: dict,
     layout: LibraryLayout,
@@ -528,7 +537,8 @@ def _process_item(
             ItemResult(item.index, item.id, title, "failed",
                        path=str(vdir) if media else None,
                        size=media.stat().st_size if media else 0,
-                       error=item.error or "no usable format"),
+                       error=item.error or "no usable format",
+                       error_kind=item.error_kind, countries=item.countries),
             _entry(item, available=media is not None,
                    error=item.error or "no usable format"),
         )
@@ -570,7 +580,7 @@ def _process_item(
     except JobCancelled:
         raise
     except Exception as exc:  # noqa: BLE001 - keep metadata and other items
-        error = str(exc)
+        error = redact(str(exc))
         media = find_media(layout, vdir)
 
     alternates: list[tuple[dict, Path]] = []
@@ -594,7 +604,8 @@ def _process_item(
         except Exception as exc:  # noqa: BLE001 - alternate audio is optional
             if not quiet:
                 with lock:
-                    print(f"    alternate audio failed: {exc}", flush=True)
+                    print(f"    alternate audio failed: {redact(str(exc))}",
+                          flush=True)
 
     tracks = _audio_track_rows(item, vdir, alternates)
     if audio_mismatch:
@@ -647,7 +658,7 @@ def _process_item(
         except Exception as exc:  # noqa: BLE001 - media stays usable
             transcript = TranscriptResult(
                 id=item.id, title=title, status="failed",
-                error=f"{type(exc).__name__}: {exc}",
+                error=redact(f"{type(exc).__name__}: {exc}"),
             )
 
     entry = _entry(item, available=media is not None, error=error)
@@ -886,7 +897,7 @@ def download_probe(
             raise
         except Exception as exc:  # noqa: BLE001 - one bad item must not stop the batch
             fat = isinstance(exc, FatLimitError)
-            error = str(exc) if fat else f"{type(exc).__name__}: {exc}"
+            error = redact(str(exc) if fat else f"{type(exc).__name__}: {exc}")
             if not quiet:
                 with lock:
                     print(f"  {item.index:02d} {item.title or item.id}: "
@@ -992,6 +1003,11 @@ def download_probe(
         print()
         print(f"done: {downloaded} downloaded, {skipped} skipped, "
               f"{failed} failed; {human_bytes(total)} on disk")
+        blocked = [i for i in items if i.error_kind == "region_blocked"]
+        if blocked:
+            where = ", ".join(covering_countries([i.countries for i in blocked]))
+            print(f"{len(blocked)} region-blocked; countries that would cover "
+                  f"them: {where or 'unknown'}")
     return FetchResult(pdir, playlist_doc, items, total)
 
 

@@ -1071,3 +1071,65 @@ def test_non_region_errors_are_not_retried(monkeypatch):
     ).items[0]
     assert len(calls) == 1
     assert got.error == "Private video" and got.error_kind is None
+
+
+# --- downloads through the proxy that read the video ----------------------
+
+def _record_proxies(monkeypatch):
+    from ytop.yt.proxies import active_proxy
+
+    recorded = []
+
+    def fake_download(url, opts):
+        recorded.append((opts.get("proxy"), active_proxy()))
+        template = opts["outtmpl"]
+        if isinstance(template, dict):
+            template = template["default"]
+        path = Path(template.replace("%(ext)s", "webm"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+
+    monkeypatch.setattr(download_mod, "_ytdlp_download", fake_download)
+    return recorded
+
+
+def _two_track_item(proxy):
+    entry = item(1, "vid1")
+    entry.proxy = proxy
+    entry.selection.alternates = [{
+        "format_id": "249-0", "vcodec": "none", "acodec": "opus",
+        "abr": 50, "language": "en-US", "ext": "webm", "filesize": 1000,
+    }]
+    return entry
+
+
+def test_proxied_item_downloads_through_its_proxy(tmp_path: Path, fake_network, monkeypatch):
+    _, state = fake_network
+    state["items"] = [_two_track_item("https://us:89")]
+    recorded = _record_proxies(monkeypatch)
+    download_mod.fetch_playlist("PL1", Config(), library_root=make_library(tmp_path).root,
+                                quiet=True)
+    assert recorded and {r[0] for r in recorded} == {"https://us:89"}
+    assert len(recorded) >= 2  # media and the alternate audio
+
+
+def test_direct_item_downloads_direct(tmp_path: Path, fake_network, monkeypatch):
+    _, state = fake_network
+    state["items"] = [item(1, "vid1")]
+    recorded = _record_proxies(monkeypatch)
+    download_mod.fetch_playlist("PL1", Config(), library_root=make_library(tmp_path).root,
+                                quiet=True)
+    assert recorded == [(None, None)]
+
+
+def test_region_blocked_result_kind_and_cli_summary(tmp_path: Path, fake_network, capsys):
+    _, state = fake_network
+    blocked = ProbedItem(index=1, id="vid1", url="u", title="T",
+                         error="Region-blocked: available in US (no proxies set up)",
+                         error_kind="region_blocked", countries=["US"])
+    state["items"] = [blocked]
+    result = download_mod.fetch_playlist("PL1", Config(),
+                                         library_root=make_library(tmp_path).root)
+    assert result.items[0].error_kind == "region_blocked"
+    assert result.items[0].countries == ["US"]
+    assert "1 region-blocked; countries that would cover them: US" in capsys.readouterr().out

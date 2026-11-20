@@ -222,17 +222,57 @@ def extract_playlist_info(
     return url, info
 
 
+# Analysis needs each video's format list, not playable stream URLs, so it
+# can skip YouTube's player JavaScript: no Deno run per video to solve the
+# signature/"n" challenges (measured: ~6 s -> ~3.5 s a video, same picks).
+# Only the legacy muxed 360p mp4 (format 18) goes missing.  Downloads always
+# read the video fully again.
+QUICK_EXTRACTOR_ARGS = {"youtube": {"player_skip": ["js"]}}
+
+
 def extract_video_info(
-    video_id: str, config: Config, cache_root: Path | None = None
+    video_id: str, config: Config, cache_root: Path | None = None,
+    *, quick: bool = False,
 ) -> dict:
+    """``quick``: formats only, without solving YouTube's JS challenges (the
+    stream URLs it returns are not meant for downloading)."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    info = _extract(url, base_options(config, cache_root) | {"skip_download": True})
+    opts = base_options(config, cache_root) | {"skip_download": True}
+    if quick:
+        args = dict(opts.get("extractor_args") or {})
+        for key, value in QUICK_EXTRACTOR_ARGS.items():
+            args[key] = {**args.get(key, {}), **value}
+        opts["extractor_args"] = args
+    info = _extract(url, opts)
     if info.get("_type") == "playlist":
         nested = (info.get("entries") or [None])[0]
         if not nested:
             raise ProbeError(f"video {video_id} resolved to an empty playlist")
         info = nested
     return info
+
+
+def analyse_video(
+    video_id: str,
+    config: Config,
+    cache_root: Path | None = None,
+    *,
+    max_height: int | None = None,
+    preserve_audio: bool = False,
+) -> tuple[dict, Selection]:
+    """Read one video and choose its format.  With ``config.quick_analysis``
+    the quick read is tried first; a video it leaves without a usable format
+    is read fully."""
+    if config.quick_analysis:
+        try:
+            info = extract_video_info(video_id, config, cache_root, quick=True)
+            return info, select_format(
+                info, config.audio_language, max_height, preserve_audio
+            )
+        except FormatError:
+            pass
+    info = extract_video_info(video_id, config, cache_root)
+    return info, select_format(info, config.audio_language, max_height, preserve_audio)
 
 
 def probe_video(
@@ -274,13 +314,13 @@ def probe_video(
     try:
         if cancel is not None and cancel():
             raise JobCancelled("cancelled by the user")
-        info = extract_video_info(video_id, config, cache_root)
+        info, item.selection = analyse_video(
+            video_id, config, cache_root,
+            max_height=max_height, preserve_audio=preserve_audio,
+        )
         item.info = info
         item.title = str(info.get("title") or video_id)
         item.duration = info.get("duration")
-        item.selection = select_format(
-            info, config.audio_language, max_height, preserve_audio
-        )
     except JobCancelled:
         raise
     except (ProbeError, FormatError) as exc:
@@ -353,15 +393,15 @@ def probe_playlist(
             return item
         started = time.monotonic()
         try:
-            info = extract_video_info(item.id, config, cache_root)
+            # Provisional selection; the playlist-wide budget is allocated
+            # after every item has been probed.
+            info, item.selection = analyse_video(
+                item.id, config, cache_root,
+                max_height=max_height, preserve_audio=preserve_audio,
+            )
             item.info = info
             item.title = str(info.get("title") or item.title)
             item.duration = info.get("duration") or item.duration
-            # Provisional selection; the playlist-wide budget is allocated
-            # after every item has been probed.
-            item.selection = select_format(
-                info, config.audio_language, max_height, preserve_audio
-            )
         except JobCancelled:
             raise
         except (ProbeError, FormatError) as exc:

@@ -273,6 +273,7 @@ target_mb_per_hour = 100  # efficient budget; 0 = native maximum
 min_height = 240        # legibility floor when the source offers it
 max_height = 0          # optional hard cap; 0 = no cap
 request_interval = 0.5
+quick_analysis = true   # analyse without YouTube's player JS (~40% faster)
 audio_language = "en"
 
 [pot]

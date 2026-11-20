@@ -193,3 +193,9 @@ def test_save_config_keeps_paths_pot_and_web(tmp_path: Path):
     assert again.detect_removable is False
     assert again.pot_provider == "off"
     assert again.web.port == 9999 and again.web.open_browser is True
+
+
+def test_quick_analysis_defaults_on_and_round_trips(tmp_path: Path):
+    assert load_config(tmp_path).quick_analysis is True
+    save_config(tmp_path, Config(quick_analysis=False))
+    assert load_config(tmp_path).quick_analysis is False

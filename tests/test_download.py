@@ -882,3 +882,42 @@ def test_quick_extraction_skips_the_player_js(monkeypatch):
     assert quick["extractor_args"]["youtube"] == {"player_skip": ["js"]}
     assert quick["extractor_args"]["youtubepot-bgutilscript"] == {"server_home": ["/s"]}
     assert "youtube" not in full["extractor_args"]
+
+
+def test_probe_stops_reading_after_a_bot_check(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    entries = [{"id": f"v{i}", "title": f"V{i}"} for i in range(6)]
+    extracted: list[str] = []
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": entries}
+        ),
+    )
+
+    def video(video_id, config, cache_root=None, **kwargs):
+        extracted.append(video_id)
+        if video_id == "v2":
+            raise probe_mod.ProbeError(
+                "ERROR: [youtube] v2: Sign in to confirm you’re not a bot."
+            )
+        if video_id == "v1":
+            raise probe_mod.ProbeError("Sign in to confirm your age.")
+        return item(1, video_id).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    probe = probe_mod.probe_playlist("PL1", Config(), probe_jobs=1)
+    assert extracted == ["v0", "v1", "v2"]  # an age gate does not stop it
+    assert probe.bot_blocked
+    assert [i.error == probe_mod.BOT_CHECK_STOPPED for i in probe.items] == [
+        False, False, False, True, True, True,
+    ]
+
+
+def test_bot_check_is_not_the_age_gate():
+    from ytop.yt.probe import is_bot_check
+
+    assert is_bot_check("Sign in to confirm you're not a bot")
+    assert not is_bot_check("Sign in to confirm your age")
+    assert not is_bot_check(None)

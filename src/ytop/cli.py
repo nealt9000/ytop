@@ -208,6 +208,10 @@ def cmd_probe(args) -> int:
               f"{selection:<38} {size:>9}  {item.title}")
     print()
     _print_timings(result.timings)
+    if result.bot_blocked:
+        print("\nYouTube started asking whether this computer is a bot; the "
+              "remaining videos were not read. Wait a while, or pass "
+              "--cookies-from-browser.", file=sys.stderr)
     if result.failures:
         print(f"\n{len(result.failures)} item(s) failed to probe", file=sys.stderr)
         return 1

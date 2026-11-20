@@ -106,6 +106,14 @@ def default_config_for(root: Path | None) -> Config:
     return SESSION_AUTH.apply(load_config(root))
 
 
+BOT_BLOCKED_NOTICE = (
+    "YouTube started asking whether this computer is a bot, so YTOP stopped "
+    "reading the rest of the playlist (more requests make the block last "
+    "longer). Wait a while and review it again, or sign in with your browser "
+    "for this session."
+)
+
+
 def _job_from_row(row: dict, library_id: str) -> Job:
     """Build a job from a stored row, mapping pre-library keys."""
     values = dict(row)
@@ -1525,6 +1533,7 @@ class JobManager:
             current_id=None,
             current_title=None,
             timings=[phase.as_dict() for phase in timings],
+            **({"notice": BOT_BLOCKED_NOTICE} if probe.bot_blocked else {}),
         )
 
     def _retry_playlist_probe(

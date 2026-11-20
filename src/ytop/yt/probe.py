@@ -26,10 +26,16 @@ from .formats import (
     select_format,
 )
 from .pot import apply_auth_options
+from .proxies import countries_of, is_region_blocked
 
 
 class ProbeError(RuntimeError):
-    """The playlist or video could not be read."""
+    """The playlist or video could not be read.  ``countries``: where YouTube
+    offers a region-blocked video, when it said."""
+
+    def __init__(self, message: str = "", countries: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.countries = countries
 
 
 class JobCancelled(RuntimeError):
@@ -70,8 +76,9 @@ def is_bot_check(text: str | None) -> bool:
 
 
 def classify_failure(exc: BaseException | str | None) -> str:
-    """``"youtube_changed"`` when yt-dlp's error looks like YouTube changed
-    under it (see ``YOUTUBE_CHANGED``), else ``"other"``."""
+    """``"region_blocked"`` for a video YouTube does not offer in this
+    country, ``"youtube_changed"`` when yt-dlp's error looks like YouTube
+    changed under it (see ``YOUTUBE_CHANGED``), else ``"other"``."""
     texts: list[str] = []
     seen: set[int] = set()
     current: object = exc
@@ -80,6 +87,8 @@ def classify_failure(exc: BaseException | str | None) -> str:
         texts.append(str(current))
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     text = "\n".join(texts)
+    if is_region_blocked(exc):
+        return "region_blocked"
     if any(pattern.search(text) for _what, pattern in YOUTUBE_CHANGED):
         return "youtube_changed"
     return "other"
@@ -213,7 +222,7 @@ def _extract(url: str, opts: dict) -> dict:
         else:  # a retry with other components, in a child Python
             info = runner.extract(url, opts)
     except (DownloadError, ExtractorError) as exc:
-        raise ProbeError(str(exc)) from exc
+        raise ProbeError(str(exc), countries_of(exc)) from exc
     if not info:
         raise ProbeError(f"no metadata returned for {url}")
     return info

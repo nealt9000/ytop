@@ -255,8 +255,11 @@ ytop serve [--open] [--port N]         # local web UI
 ytop --library <path> <command>        # pick the launch library
 ```
 
-`fetch` syncs: new items are added, descriptions/metadata are refreshed, existing
-media is not re-downloaded, and nothing is deleted. Playlist order, descriptions,
+`fetch` syncs: new items are added, existing media is not re-downloaded, and
+nothing is deleted. Videos already downloaded are not read from YouTube again
+(only a changed title is taken from the playlist listing), so a sync costs only
+the new videos; `--refresh` re-reads their descriptions, thumbnails, audio
+tracks and missing transcripts too. Playlist order, descriptions,
 thumbnails and chapters are stored beside each video. A metadata sync preserves
 the transcript blocks written by `ytop transcripts`.
 

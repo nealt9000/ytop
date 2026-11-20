@@ -35,7 +35,7 @@ from ..config import SESSION_AUTH, Config, load_config
 from ..fsinfo import fits_on, free_bytes
 from ..libraries import READ_ONLY_MESSAGE, LibraryRef, LibrarySet
 from ..timing import Phase, summary_lines
-from ..yt.download import ItemResult, download_probe, media_destination
+from ..yt.download import ItemResult, download_probe, media_destination, media_lookup
 from ..yt.formats import allocate_efficient, audio_detail, select_format
 from ..yt.metadata import (
     CorruptDocumentError,
@@ -201,6 +201,10 @@ class Job:
     free_bytes: int | None = None
     # The quality the review preselects (the playlist's last choice).
     suggested_policy: str = "efficient"
+    # A sync: videos already downloaded (not re-read for the review), and
+    # whether the download re-reads their details anyway.
+    existing_count: int = 0
+    refresh_existing: bool = False
     # Videos whose selected rendition exceeds FAT32's 4 GB file limit on the
     # destination drive (the download refuses them).
     fat32_warning: bool = False
@@ -269,11 +273,9 @@ class Job:
                     (key, f"{key} max", int(self.estimate_tiers[key]))
                 )
         options.append(("native", "Native", self.estimate_native_bytes))
-        # A sync only fetches new videos, so its totals overstate the need;
-        # a single video is always new.
-        show_fit = self.free_bytes is not None and (
-            not self.in_library or self.kind == "video"
-        )
+        # The totals count only videos not already downloaded (a sync's
+        # existing videos are left out of the analysis).
+        show_fit = self.free_bytes is not None
         return [
             {
                 "policy": policy,
@@ -370,7 +372,28 @@ def _compact_probe(
     native_total = 0
     tier_totals = {height: 0 for height in QUALITY_TIERS}
     fat32_count = 0
+    existing_count = 0
     for item in probe.items:
+        if item.existing:
+            existing_count += 1
+            duration = item.duration or 0
+            total_duration += duration
+            items.append({
+                "index": item.index,
+                "id": item.id,
+                "title": item.title or item.id,
+                "duration": duration,
+                "duration_label": _duration_label(duration),
+                "error": None,
+                "status": "pending",
+                "existing": True,
+                "size": 0,
+                "native_size": 0,
+                "native_height": None,
+                "native_codec": None,
+                "fat32_warning": False,
+            })
+            continue
         selection = item.selection
         native = None
         if item.info is not None:
@@ -445,6 +468,7 @@ def _compact_probe(
         "free_bytes": free_bytes(destination) if destination is not None else None,
         "fat32_warning": fat32_count > 0,
         "fat32_count": fat32_count,
+        "existing_count": existing_count,
         "items": items,
     }
 
@@ -551,6 +575,12 @@ class JobManager:
         not connected)."""
         ref = self._lib.libraries.get(job.library_id) if job.library_id else None
         return self._config_for_ref(ref)
+
+    def _media_lookup(self, job: Job) -> Callable[[str, str], bool] | None:
+        """Videos already downloaded into the job's library, which a probe
+        does not re-read (``None``: the library is not known or online)."""
+        ref = self._lib.libraries.get(job.library_id) if job.library_id else None
+        return media_lookup(ref.layout) if ref is not None else None
 
     def _job_cache_root(self, job: Job) -> Path | None:
         """Where yt-dlp's cache lives: the job's destination library, else
@@ -1424,6 +1454,7 @@ class JobManager:
                 cancel=cancel.is_set,
                 preserve_audio=job.preserve_audio,
                 cache_root=self._job_cache_root(job),
+                have=self._media_lookup(job),
             )
 
         try:
@@ -1488,6 +1519,7 @@ class JobManager:
             free_bytes=review["free_bytes"],
             fat32_warning=review["fat32_warning"],
             fat32_count=review["fat32_count"],
+            existing_count=review["existing_count"],
             items=review["items"],
             in_library=resolved is not None,
             current_id=None,
@@ -1905,6 +1937,7 @@ class JobManager:
         policy: str = "efficient",
         *,
         preserve_audio: bool | None = None,
+        refresh_existing: bool = False,
     ) -> Job:
         # List first, outside the job lock: a re-plugged library whose
         # recovery was deferred (it cannot wait for PUBLISH_LOCK under the
@@ -1977,10 +2010,9 @@ class JobManager:
                     )
             config = self._job_config(job)
             target_mb, max_height = policy_settings(policy, config)
-            # "Sync again" and retries fetch fresh remote metadata.
-            if job.in_library or job.status in {
-                "done", "failed", "cancelled", PAUSED,
-            }:
+            # "Sync again" and retries fetch fresh remote metadata; a review
+            # just made ("ready") is used as it is, never read twice.
+            if job.status in {"done", "failed", "cancelled", PAUSED}:
                 self._probes.pop(job_id, None)
             self._cancel[job_id] = threading.Event()
             for row in job.items:
@@ -1990,6 +2022,7 @@ class JobManager:
             job.status = "queued"
             job.paused_from = ""
             job.policy = policy
+            job.refresh_existing = bool(refresh_existing)
             job.target_mb_per_hour = target_mb
             job.max_height = max_height
             job.error = None
@@ -2206,6 +2239,7 @@ class JobManager:
                         cancel=cancel.is_set,
                         preserve_audio=job.preserve_audio,
                         cache_root=self._job_cache_root(job),
+                        have=self._media_lookup(job),
                     )
                 break
             except JobCancelled:
@@ -2350,6 +2384,7 @@ class JobManager:
                 min_height=config.min_height,
                 fetch_transcripts=True,
                 preserve_audio=job.preserve_audio,
+                refresh_existing=job.refresh_existing,
                 # A single video added to a playlist leaves its quality alone.
                 quality=None if job.kind == "video" else job.policy,
                 library_root=location.root,

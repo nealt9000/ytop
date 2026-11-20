@@ -69,7 +69,7 @@
     <h1>{{ job.title }}</h1>
     <p class="muted">
       {{ job.channel or "Unknown channel" }}
-      <span class="dot">·</span>{{ job.video_count }} video{% if job.video_count != 1 %}s{% endif %}
+      <span class="dot">·</span>{{ job.video_count }} video{% if job.video_count != 1 %}s{% endif %}{% if job.existing_count %} ({{ job.video_count - job.existing_count }} new){% endif %}
       <span class="dot">·</span>{{ job.total_duration|duration }}
       {% if job.library_label %}<span class="dot">·</span> storing on {{ job.library_label }}{% endif %}
     </p>
@@ -92,7 +92,7 @@
   {% endfor %}
 </div>
 {% if job.free_bytes is not none %}
-<p class="muted small">{{ job.free_bytes|bytes }} free on the destination drive{% if job.in_library and job.kind != "video" %}; only videos not already downloaded are fetched{% endif %}.</p>
+<p class="muted small">{{ job.free_bytes|bytes }} free on the destination drive{% if job.existing_count %}; the sizes count only the videos not yet downloaded{% endif %}.</p>
 {% endif %}
 {% if job.fat32_warning %}
 <p class="form-error">⚠ {{ job.fat32_count }} videos exceed FAT32's 4 GB limit on this drive</p>
@@ -117,7 +117,8 @@
     For a predictable size, the fixed caps (such as 720p max) take the best rendition at or below
     that height for every video.
     {% if job.in_library %}This playlist is already in your
-    library; syncing adds new videos and refreshes metadata without deleting existing media.{% endif %}
+    library; syncing adds new videos without touching existing media, and the refresh tick below also
+    updates the details of the videos you already have.{% endif %}
   </p>
 </details>
 {% endif %}
@@ -138,6 +139,13 @@
     <input type="checkbox" name="preserve_audio" value="1" {% if job.preserve_audio %}checked{% endif %}>
     <span>Keep high-quality audio <small class="muted">(music playlists)</small></span>
   </label>
+  {% if job.existing_count %}
+  <label class="check-row">
+    <input type="checkbox" name="refresh_existing" value="1" {% if job.refresh_existing %}checked{% endif %}>
+    <span>Also refresh the {{ job.existing_count }} video{% if job.existing_count != 1 %}s{% endif %} already downloaded
+      <small class="muted">(descriptions, thumbnails, extra audio and missing transcripts; reads each one from YouTube, so it’s slower)</small></span>
+  </label>
+  {% endif %}
   <button type="submit" class="btn primary">
     {% if job.kind == "video" %}Add to {{ job.target_playlist_title }}
     {% elif job.in_library %}Sync playlist{% else %}Download playlist{% endif %}
@@ -168,6 +176,7 @@
       <td class="muted">{{ item.duration_label }}</td>
       <td class="muted small">
         {% if item.error %}unavailable
+        {% elif item.existing %}already downloaded
         {% else %}{{ item.height }}p {{ item.video_codec }}{% if item.fps %} {{ item.fps|round|int }}fps{% endif %}{% if item.container %} · {{ item.container }}{% endif %}{% if item.audio_detail %} · {{ item.audio_detail }}{% endif %}{% if item.audio_alternates %} · +{{ item.audio_alternates }} alt audio{% endif %}
         {% endif %}
       </td>

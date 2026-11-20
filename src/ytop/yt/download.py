@@ -436,6 +436,46 @@ def _entry(
     }
 
 
+def _keep_existing(
+    item: ProbedItem,
+    layout: LibraryLayout,
+    playlist_id: str,
+    vdir: Path,
+    media: Path,
+    lock: threading.Lock,
+    *,
+    quiet: bool = False,
+) -> tuple[ItemResult, dict]:
+    """A video already in the library, not re-read from YouTube: keep its
+    stored details, taking only a changed title from the playlist listing."""
+    listed = (item.title or "").strip()
+    # The listing names unavailable videos "[Private video]", "[Deleted video]".
+    real_title = bool(listed) and not (listed.startswith("[") and listed.endswith("]"))
+    stored = read_json(vdir / "meta.json")
+    if real_title and stored is not None and stored.get("title") != listed:
+        with PUBLISH_LOCK:
+            stored = read_json(vdir / "meta.json")
+            if stored is not None:
+                stored["title"] = listed
+                write_json(vdir / "meta.json", stored)
+        refresh_video_quietly(layout, playlist_id, item.id)
+    title = (
+        listed if real_title
+        else str((stored or {}).get("title") or listed or item.id)
+    )
+    item.title = title
+    if not quiet:
+        with lock:
+            print(f"  {item.index:02d} {title}: already downloaded", flush=True)
+    entry = _entry(item, available=True, error=None)
+    entry["metadata_ok"] = stored is not None
+    return (
+        ItemResult(item.index, item.id, title, "skipped", path=str(vdir),
+                   size=media.stat().st_size),
+        entry,
+    )
+
+
 def _process_item(
     item: ProbedItem,
     playlist: dict,
@@ -449,10 +489,34 @@ def _process_item(
     cancel: Callable[[], bool] | None = None,
     fetch_transcripts: bool = True,
     preserve_audio: bool = False,
+    refresh_existing: bool = False,
+    max_height: int | None = None,
 ) -> tuple[ItemResult, dict]:
     title = item.title or item.id
     playlist_id = str(playlist.get("id") or "")
     vdir = video_directory(layout, playlist_id, item.id)
+    if item.existing:
+        media = None if force else find_media(layout, vdir)
+        if media is not None and not refresh_existing:
+            return _keep_existing(item, layout, playlist_id, vdir, media, lock,
+                                  quiet=quiet)
+        # A refresh, a forced download, or media gone since the review:
+        # read the video now, as a full analysis would have.
+        if cancel is not None and cancel():
+            raise JobCancelled("cancelled by the user")
+        try:
+            item.info = extract_video_info(item.id, config, layout.root)
+            item.title = str(item.info.get("title") or item.title)
+            item.duration = item.info.get("duration") or item.duration
+            item.selection = select_format(
+                item.info, config.audio_language, max_height, preserve_audio
+            )
+        except JobCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported like a failed probe
+            item.error = str(exc)
+        item.existing = False
+        title = item.title or item.id
     if item.error or item.info is None or item.selection is None:
         media = find_media(layout, vdir)
         if not quiet:
@@ -625,6 +689,7 @@ def download_probe(
     fetch_transcripts: bool = True,
     preserve_audio: bool | None = None,
     quality: str | None = None,
+    refresh_existing: bool = False,
     library_root: Path | None = None,
     cancel: Callable[[], bool] | None = None,
     on_item_start: StartCallback | None = None,
@@ -635,7 +700,8 @@ def download_probe(
 
     ``quality`` (a review choice such as ``"720p"``) is remembered on the
     playlist so the next sync's review starts from it; ``None`` keeps the
-    stored choice.
+    stored choice.  Videos the probe found already downloaded (``existing``)
+    keep their stored details unless ``refresh_existing`` re-reads them.
     """
     lock = threading.Lock()
     if library_root is None:
@@ -657,7 +723,8 @@ def download_probe(
     if dry_run:
         items = [
             ItemResult(i.index, i.id, i.title,
-                       "failed" if i.error or not i.selection else "skipped",
+                       "failed" if i.error or not (i.selection or i.existing)
+                       else "skipped",
                        error=i.error)
             for i in probe.items
         ]
@@ -811,6 +878,8 @@ def download_probe(
                 quiet=quiet, progress=callback, cancel=cancel,
                 fetch_transcripts=fetch_transcripts,
                 preserve_audio=bool(preserve_audio),
+                refresh_existing=refresh_existing,
+                max_height=max_height or None,
             )
         except JobCancelled:
             raise
@@ -925,6 +994,19 @@ def download_probe(
     return FetchResult(pdir, playlist_doc, items, total)
 
 
+def media_lookup(layout: LibraryLayout) -> Callable[[str, str], bool]:
+    """``have(playlist_id, video_id)`` for :func:`probe_playlist`: whether
+    the video's media is already in ``layout``'s library."""
+
+    def have(playlist_id: str, video_id: str) -> bool:
+        try:
+            return find_media(layout, video_directory(layout, playlist_id, video_id)) is not None
+        except (OSError, ValueError):
+            return False
+
+    return have
+
+
 def fetch_playlist(
     value: str,
     config: Config,
@@ -939,18 +1021,23 @@ def fetch_playlist(
     min_height: int = 240,
     fetch_transcripts: bool = True,
     preserve_audio: bool | None = None,
+    refresh_existing: bool = False,
     library_root: Path | None = None,
     cancel: Callable[[], bool] | None = None,
     on_item_start: StartCallback | None = None,
     on_item_done: ItemCallback | None = None,
     on_progress: Callable[[ProbedItem, int, int], None] | None = None,
 ) -> FetchResult:
+    """Probe and download a playlist.  Videos already downloaded are not
+    re-read from YouTube unless ``refresh_existing`` (or ``force``)."""
     lock = threading.Lock()
 
     def probe_status(item: ProbedItem) -> None:
         if quiet:
             return
-        if item.error:
+        if item.existing:
+            detail = "already downloaded"
+        elif item.error:
             detail = f"ERROR: {item.error}"
         elif target_mb_per_hour and target_mb_per_hour > 0:
             detail = "probed (efficient policy applied after the playlist)"
@@ -971,6 +1058,11 @@ def fetch_playlist(
         cancel=cancel,
         preserve_audio=bool(preserve_audio),
         cache_root=library_root,
+        have=(
+            media_lookup(LibraryLayout(Path(library_root).expanduser()))
+            if library_root is not None and not (force or refresh_existing)
+            else None
+        ),
     )
     return download_probe(
         probe, config,
@@ -984,6 +1076,7 @@ def fetch_playlist(
         min_height=min_height,
         fetch_transcripts=fetch_transcripts,
         preserve_audio=preserve_audio,
+        refresh_existing=refresh_existing,
         library_root=library_root,
         cancel=cancel,
         on_item_start=on_item_start,

@@ -665,3 +665,169 @@ def test_probe_reports_time_per_step(monkeypatch):
     assert "mean" in videos.note and "2 at a time" in videos.note
     assert "1 failed" in videos.note
     assert all(item.seconds >= 0 for item in probe.items)
+
+
+# -- re-sync: videos already downloaded are not re-read (#31) ----------------
+
+@pytest.fixture
+def real_probe(monkeypatch, fake_network):
+    """fake_network, but through the real probe_playlist: only the listing
+    and per-video extraction are faked, and every extraction is recorded."""
+    from ytop.yt import probe as probe_mod
+
+    calls, state = fake_network
+    extracted: list[str] = []
+
+    def listing(value, config, limit=None, cache_root=None):
+        entries = [{"id": i.id, "title": state.get("titles", {}).get(i.id, i.title),
+                    "duration": i.duration} for i in state["items"]]
+        return value, {"id": "PL1", "title": "Test List", "channel": "Channel",
+                       "entries": entries}
+
+    def video(video_id, config, cache_root=None):
+        extracted.append(video_id)
+        info = next(i.info for i in state["items"] if i.id == video_id)
+        return dict(info)
+
+    monkeypatch.setattr(download_mod, "probe_playlist", probe_mod.probe_playlist)
+    monkeypatch.setattr(probe_mod, "extract_playlist_info", listing)
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    monkeypatch.setattr(download_mod, "extract_video_info", video)
+    return calls, state, extracted
+
+
+def test_resync_reads_only_new_videos(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    assert extracted == ["vid1"]
+
+    extracted.clear()
+    calls.clear()
+    state["items"] = [item(1, "vid1"), item(2, "vid2")]
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+
+    assert extracted == ["vid2"]
+    assert calls == ["vid2"]
+    assert [i.status for i in result.items] == ["skipped", "downloaded"]
+    doc = json.loads((result.playlist_dir / "playlist.json").read_text())
+    assert [e["id"] for e in doc["entries"]] == ["vid1", "vid2"]
+    assert all(e["available"] and e["metadata_ok"] for e in doc["entries"])
+    meta = json.loads((result.playlist_dir / "videos/vid1/meta.json").read_text())
+    assert meta["description"] == "Description for vid1"  # stored details kept
+
+
+def test_resync_takes_a_new_title_from_the_listing(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist("PL1", cfg, library_root=root)
+
+    state["titles"] = {"vid1": "Renamed upstream"}
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    meta = json.loads((result.playlist_dir / "videos/vid1/meta.json").read_text())
+    assert meta["title"] == "Renamed upstream"
+    doc = json.loads((result.playlist_dir / "playlist.json").read_text())
+    assert doc["entries"][0]["title"] == "Renamed upstream"
+
+    # A video that went private keeps its real title.
+    state["titles"] = {"vid1": "[Private video]"}
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    meta = json.loads((result.playlist_dir / "videos/vid1/meta.json").read_text())
+    assert meta["title"] == "Renamed upstream"
+    assert result.items[0].status == "skipped"
+
+
+def test_refresh_rereads_existing_videos(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist("PL1", cfg, library_root=root)
+
+    extracted.clear()
+    calls.clear()
+    state["items"][0].info["description"] = "Updated upstream"
+    result = download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, refresh_existing=True,
+    )
+    assert extracted == ["vid1"]
+    assert calls == []  # media kept
+    assert [i.status for i in result.items] == ["skipped"]
+    meta = json.loads((result.playlist_dir / "videos/vid1/meta.json").read_text())
+    assert meta["description"] == "Updated upstream"
+
+
+def test_existing_video_whose_media_vanished_is_read_and_downloaded(
+    tmp_path: Path, real_probe,
+):
+    from ytop.layout import LibraryLayout
+    from ytop.yt import probe as probe_mod
+
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    first = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+
+    layout = LibraryLayout(root)
+    probe = probe_mod.probe_playlist(
+        "PL1", cfg, have=download_mod.media_lookup(layout),
+    )
+    assert [i.existing for i in probe.items] == [True]
+    assert probe.failures == []
+    # Deleted between the review and the download.
+    media = download_mod.find_media(layout, first.playlist_dir / "videos/vid1")
+    assert media is not None
+    media.unlink()
+
+    extracted.clear()
+    calls.clear()
+    result = download_mod.download_probe(probe, cfg, quiet=True, library_root=root)
+    assert extracted == ["vid1"]
+    assert calls == ["vid1"]
+    assert [i.status for i in result.items] == ["downloaded"]
+
+
+def test_dry_run_counts_existing_as_skipped(tmp_path: Path, real_probe):
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    result = download_mod.fetch_playlist("PL1", cfg, library_root=root, dry_run=True)
+    assert [i.status for i in result.items] == ["skipped"]
+
+
+def test_probe_skips_videos_the_library_has(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    entries = [{"id": "old", "title": "Old", "duration": 5},
+               {"id": "new", "title": "New", "duration": 6}]
+    extracted: list[str] = []
+    started: list[str] = []
+
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": entries}
+        ),
+    )
+
+    def video(video_id, config, cache_root=None):
+        extracted.append(video_id)
+        return item(1, video_id).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    probe = probe_mod.probe_playlist(
+        "PL1", Config(), probe_jobs=1,
+        have=lambda playlist_id, video_id: (playlist_id, video_id) == ("PL1", "old"),
+        on_item_start=lambda i: started.append(i.id),
+    )
+    assert extracted == ["new"]
+    assert started == ["old", "new"]
+    old, new = probe.items
+    assert old.existing and old.info is None and old.title == "Old"
+    assert old.duration == 5
+    assert not new.existing and new.selection is not None
+    assert probe.failures == []
+    assert [i.id for i in probe.existing] == ["old"]
+    assert probe.estimated_bytes == new.selection.estimated_bytes
+    assert "1 already in the library" in probe.timings[1].note

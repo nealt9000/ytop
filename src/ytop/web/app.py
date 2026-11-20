@@ -1848,9 +1848,11 @@ def create_app(
             None if raw_preserve is None
             else str(raw_preserve) == "1"
         )
+        refresh = str(form.get("refresh_existing") or "") == "1"
         try:
             app.state.jobs.start_download(
-                job_id, policy=policy, preserve_audio=preserve
+                job_id, policy=policy, preserve_audio=preserve,
+                refresh_existing=refresh,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc

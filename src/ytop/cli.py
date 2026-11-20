@@ -252,6 +252,7 @@ def cmd_fetch(args) -> int:
             limit=args.limit,
             jobs=args.jobs,
             force=args.force,
+            refresh_existing=args.refresh,
             dry_run=args.dry_run,
             max_height=cfg.max_height,
             target_mb_per_hour=cfg.target_mb_per_hour,
@@ -1000,6 +1001,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=None, help="fetch only the first N videos")
     p.add_argument("--jobs", type=int, default=None, help="parallel downloads (default: config)")
     p.add_argument("--force", action="store_true", help="re-download media that already exists")
+    p.add_argument("--refresh", action="store_true",
+                   help="re-read descriptions, thumbnails, audio tracks and missing "
+                        "transcripts of videos already downloaded (slower; by "
+                        "default only new videos are read)")
     p.add_argument("--dry-run", action="store_true", help="probe and estimate only")
     p.add_argument("--max-height", type=int, default=None,
                    help="optional hard height cap (0 = no cap; default: config)")

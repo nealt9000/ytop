@@ -419,6 +419,9 @@ def test_build_seeds_bgutil_server(tmp_path):
     server = _server_folder(yt)
     assert (server / "src/generate_once.ts").read_text() == "// script\n"
     assert (server / "node_modules/axios/index.js").is_file()
+    # Declarations, source maps and docs are pruned; code and licences stay.
+    axios = server / "node_modules/axios"
+    assert sorted(p.name for p in axios.iterdir()) == ["History.js", "LICENSE", "index.js"]
     # The WebAssembly side module is not a native binary.
     assert (server / "node_modules/quickjs-wasi/base64.so").is_file()
     # Only what the script needs, and the licence travels with it.
@@ -540,3 +543,18 @@ def test_github_asset_without_a_token_is_fetched_as_a_plain_download(
     assert [r.full_url for r in seen] == [url]
     assert "Authorization" not in seen[0].headers
     assert dest.read_bytes() == b"data"
+
+
+def test_prune_node_modules_matches_suffixes_only(tmp_path):
+    from ytop.bgserver import prune_node_modules
+
+    keep = ["a/map.js", "a/History.js", "a/types.ts", "a/LICENSE", "a/data.json",
+            "a/README", "a/markdown.js"]
+    drop = ["a/index.d.ts", "a/x.d.mts", "a/x.d.cts", "a/index.js.map",
+            "a/README.md", "a/CHANGELOG.MD", "a/notes.markdown"]
+    for rel in keep + drop:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x")
+    assert prune_node_modules(tmp_path) == len(drop)
+    left = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+    assert left == sorted(keep)

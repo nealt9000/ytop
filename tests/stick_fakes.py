@@ -141,6 +141,12 @@ def fake_server_install(deno: Path, server: Path) -> None:
     pkg = server / "node_modules" / "axios"
     pkg.mkdir(parents=True)
     (pkg / "index.js").write_text("module.exports = 1\n")
+    # Never loaded at run time: the build prunes them (licences stay).
+    (pkg / "index.d.ts").write_text("export {}\n")
+    (pkg / "index.js.map").write_text("{}\n")
+    (pkg / "README.md").write_text("# axios\n")
+    (pkg / "LICENSE").write_text("MIT\n")
+    (pkg / "History.js").write_text("module.exports = 2\n")
     (server / "node_modules/quickjs-wasi").mkdir()
     # A WebAssembly side module named .so: not a native binary.
     (server / "node_modules/quickjs-wasi/base64.so").write_bytes(b"\0asm\x01\0\0\0")

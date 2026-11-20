@@ -79,6 +79,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import Literal
@@ -1359,6 +1360,12 @@ def _check_cancel(cancelled: Callable[[], bool]) -> None:
         raise JobCancelled("cancelled by the user")
 
 
+# Files copied at once.  A USB stick on FAT (Linux mounts it with ``flush``)
+# spends most of each small file waiting for the drive; overlapping those
+# waits measured 8 files/s with one copy, 28 with 4 and 33 with 8.
+COPY_WORKERS = 8
+
+
 def _copy_files(
     source: Path,
     making: Path,
@@ -1369,18 +1376,55 @@ def _copy_files(
     move: bool = False,
 ) -> None:
     """Copy ``rels`` from ``source`` into ``making`` (``move``: rename them,
-    for a source staged on the same stick)."""
-    for rel in rels:
+    for a source staged on the same stick).  Copies run ``COPY_WORKERS`` at
+    a time; when this returns or raises, none is still writing."""
+    if move or len(rels) < 2 or COPY_WORKERS < 2:
+        for rel in rels:
+            _check_cancel(cancelled)
+            destination = making / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if move:
+                size = os.stat(source / rel).st_size
+                os.replace(source / rel, destination)
+                progress.chunk(size)
+            else:
+                copy_file(source / rel, destination, on_chunk=progress.chunk,
+                          cancel=cancelled)
+            progress.file()
+        return
+
+    lock = threading.Lock()
+    failed = threading.Event()
+
+    def chunk(size: int) -> None:
+        with lock:
+            progress.chunk(size)
+
+    def stop() -> bool:
+        return failed.is_set() or cancelled()
+
+    def one(rel: str) -> None:
+        if failed.is_set():
+            return
         _check_cancel(cancelled)
         destination = making / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if move:
-            size = os.stat(source / rel).st_size
-            os.replace(source / rel, destination)
-            progress.chunk(size)
-        else:
-            copy_file(source / rel, destination, on_chunk=progress.chunk, cancel=cancelled)
-        progress.file()
+        copy_file(source / rel, destination, on_chunk=chunk, cancel=stop)
+        with lock:
+            progress.file()
+
+    pool = ThreadPoolExecutor(max_workers=COPY_WORKERS, thread_name_prefix="ytop-copy")
+    futures = [pool.submit(one, rel) for rel in rels]
+    try:
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except BaseException:
+                failed.set()  # the others stop at their next chunk
+                raise
+    finally:
+        # The barrier: nothing writes into ``making`` once this returns.
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _verify(

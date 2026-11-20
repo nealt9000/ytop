@@ -630,6 +630,65 @@ def precompile(yt: Path, platforms: list[str]) -> None:
         )
 
 
+# Stdlib folders that stay loose: extension modules and the (empty) site dir.
+STDLIB_LOOSE = ("lib-dynload", "site-packages")
+# Zip entries get one fixed time so an unchanged stdlib zips to the same bytes
+# and an upgrade skips it.
+ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+
+
+def stdlib_zip(python_dir: Path, plat: str) -> Path:
+    """Where CPython looks for its zipped stdlib: beside python312.dll on
+    Windows (as the embeddable distribution has it), ``lib/`` elsewhere."""
+    if plat.startswith("windows"):
+        return python_dir / "python312.zip"
+    return python_dir / "lib/python312.zip"
+
+
+def zip_stdlib(yt: Path, platforms: list[str]) -> None:
+    """Move each runtime's pure-Python stdlib into ``python312.zip``.
+
+    A stick copies ~8 small files a second to FAT, and the stdlib is ~1,050
+    files a platform; one zip is one file.  CPython puts the zip on
+    ``sys.path`` itself.  zipimport never reads ``__pycache__``, so each
+    build pyc goes in as ``<module>.pyc`` beside its source (sources stay
+    for tracebacks): start-up is as fast as from loose files.  Run after
+    :func:`precompile`."""
+    for plat in platforms:
+        python_dir = yt / "runtime" / plat / "python"
+        std = stdlib_dir(python_dir, plat)
+        if not std.is_dir():
+            continue
+        files = [
+            path for path in sorted(std.rglob("*"))
+            if path.is_file() and path.relative_to(std).parts[0] not in STDLIB_LOOSE
+        ]
+        target = stdlib_zip(python_dir, plat)
+        entries: dict[str, Path] = {}
+        for path in files:
+            rel = path.relative_to(std)
+            if rel.parent.name == "__pycache__":
+                name, _tag, ext = rel.name.partition(".cpython-312")
+                if ext != ".pyc":
+                    continue  # an optimised or foreign pyc: never imported
+                arc = (rel.parent.parent / f"{name}.pyc").as_posix()
+            elif rel.suffix == ".pyc":
+                continue
+            else:
+                arc = rel.as_posix()
+            entries[arc] = path
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as zf:
+            for arc in sorted(entries):
+                info = zipfile.ZipInfo(arc, date_time=ZIP_EPOCH)
+                info.external_attr = 0o644 << 16
+                zf.writestr(info, entries[arc].read_bytes())
+        for path in files:
+            path.unlink()
+        for folder in sorted((p for p in std.rglob("*") if p.is_dir()), reverse=True):
+            if not any(folder.iterdir()):
+                folder.rmdir()
+
+
 def dir_size(path: Path) -> int:
     if path.is_file():
         return path.stat().st_size
@@ -769,6 +828,7 @@ def build(
         )
     copy_app(yt)
     precompile(yt, platforms)
+    zip_stdlib(yt, list(platforms))
     copy_launchers(out)
     check_case_collisions(yt)
 

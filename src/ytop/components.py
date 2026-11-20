@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .parallel import run_all
 from .stick.boot import (
     COMPLETE,
     COMPONENTS_DIR,
@@ -552,19 +553,28 @@ def _copy_in(copy: _Copy, on_file: Callable[[int], None] | None = None) -> None:
     if temp.exists():
         shutil.rmtree(temp)
     temp.mkdir(parents=True)
-    for path in _files(copy.source):
+    lock = threading.Lock()
+    paths = [
+        path for path in _files(copy.source)
+        # The marker is written last, below.
+        if not (copy.marker and path.relative_to(copy.source).as_posix() == COMPLETE)
+    ]
+
+    def one(path: Path, _stopping: Callable[[], bool]) -> None:
         rel = path.relative_to(copy.source)
-        if copy.marker and rel.as_posix() == COMPLETE:
-            continue  # written last, below
         (temp / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, temp / rel)  # no metadata: FAT refuses some
-        if on_file is not None:
-            on_file(path.stat().st_size)
         if copy.executable:
             try:
                 os.chmod(temp / rel, 0o755)
             except OSError:
                 pass  # FAT: Mac and Windows run it anyway
+        if on_file is not None:
+            with lock:  # it may raise to cancel: that stops the rest
+                on_file(path.stat().st_size)
+
+    # A few at a time: thousands of small files (ytop.parallel).
+    run_all(paths, one)
     if copy.marker:
         mark_complete(temp)
         if on_file is not None:

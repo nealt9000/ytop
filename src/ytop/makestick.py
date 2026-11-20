@@ -99,6 +99,7 @@ from .manifest import (
     sha256_file,
     write_manifest,
 )
+from .parallel import COPY_WORKERS, run_all
 from .product import NAME
 from .runtime import PLATFORMS
 from .stick.boot import (
@@ -1323,6 +1324,7 @@ class _Progress:
             self._emit()
 
     def finish(self, total_bytes: int, total_files: int) -> None:
+        self.clock.stop()  # the jump to the totals below is no step's work
         self.total_bytes, self.total_files = total_bytes, total_files
         self.bytes, self.files = total_bytes, total_files
         self.phase("done", "")
@@ -1369,18 +1371,31 @@ def _copy_files(
     move: bool = False,
 ) -> None:
     """Copy ``rels`` from ``source`` into ``making`` (``move``: rename them,
-    for a source staged on the same stick)."""
-    for rel in rels:
+    for a source staged on the same stick).  Copies run a few at a time
+    (:mod:`ytop.parallel`); when this returns or raises, none is still
+    writing."""
+    lock = threading.Lock()
+
+    def chunk(size: int) -> None:
+        with lock:
+            progress.chunk(size)
+
+    def one(rel: str, stopping: Callable[[], bool]) -> None:
         _check_cancel(cancelled)
         destination = making / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         if move:
             size = os.stat(source / rel).st_size
             os.replace(source / rel, destination)
-            progress.chunk(size)
+            chunk(size)
         else:
-            copy_file(source / rel, destination, on_chunk=progress.chunk, cancel=cancelled)
-        progress.file()
+            copy_file(source / rel, destination, on_chunk=chunk,
+                      cancel=lambda: stopping() or cancelled())
+        with lock:
+            progress.file()
+
+    # Renames on the same stick are instant: no point overlapping them.
+    run_all(rels, one, workers=1 if move else COPY_WORKERS)
 
 
 def _verify(
@@ -1877,6 +1892,7 @@ def _run(
         progress.finish(copied_bytes, copied_files)
     else:
         assert library is not None, "a new stick needs the library"
+        progress.mark("registering")
         try:
             # The library marker is the stick's last write.
             ref = library.libraries.add_folder(target, plan.label)
@@ -1885,7 +1901,6 @@ def _run(
                 f"YTOP was copied but the library could not be created: {exc}"
             ) from exc
         library_id = ref.id
-        progress.mark("registering")
         progress.resume(
             copied_bytes - merged_bytes, copied_files - merged_files,
             plan.bytes_needed, plan.total_files,

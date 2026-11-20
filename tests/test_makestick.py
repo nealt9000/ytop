@@ -2555,6 +2555,8 @@ def test_new_stick_reports_time_per_step(tmp_path: Path, image: Path):
     assert names[:4] == ["preparing", "copying", "verifying", "switching"]
     assert "tidying" in names and "registering" in names
     assert len(names) == len(set(names))
+    registering = report.timings[names.index("registering")]
+    assert (registering.count, registering.bytes) == (0, 0)
     assert all(phase.seconds >= 0 for phase in report.timings)
     copying = report.timings[1]
     assert copying.count == len(plan.files)
@@ -2577,3 +2579,60 @@ def test_upgrade_reports_time_per_step(tmp_path: Path, image: Path):
     names = [phase.name for phase in report.timings]
     assert names[:2] == ["preparing", "checking"]
     assert "tidying" in names
+
+
+def _copy_fixture(tmp_path: Path, count: int = 40):
+    src = tmp_path / "src"
+    rels = [f"d{i % 5}/f{i}.bin" for i in range(count)]
+    for i, rel in enumerate(rels):
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_bytes(bytes([i % 256]) * (100 + i))
+    making = tmp_path / "making"
+    making.mkdir()
+    events: list = []
+    progress = ms._Progress(events.append, sum(100 + i for i in range(count)), count)
+    return src, making, rels, progress
+
+
+def test_parallel_copy_copies_everything_and_counts_it(tmp_path: Path):
+    src, making, rels, progress = _copy_fixture(tmp_path)
+    ms._copy_files(src, making, rels, progress, lambda: False)
+    for rel in rels:
+        assert (making / rel).read_bytes() == (src / rel).read_bytes()
+    assert progress.files == len(rels)
+    assert progress.bytes == sum((src / rel).stat().st_size for rel in rels)
+
+
+def test_parallel_copy_failure_raises_and_nothing_keeps_writing(
+    tmp_path: Path, monkeypatch,
+):
+    src, making, rels, progress = _copy_fixture(tmp_path)
+    real = ms.copy_file
+    calls: list[str] = []
+
+    def flaky(source, destination, **kwargs):
+        calls.append(source.name)
+        if source.name == "f7.bin":
+            raise OSError(28, "No space left on device")
+        time.sleep(0.02)  # a slow stick: the failure is seen long before the end
+        real(source, destination, **kwargs)
+
+    monkeypatch.setattr(ms, "copy_file", flaky)
+    with pytest.raises(OSError, match="No space"):
+        ms._copy_files(src, making, rels, progress, lambda: False)
+    done = len(calls)
+    time.sleep(0.2)
+    assert len(calls) == done  # the barrier held: no copy after the raise
+    assert done < len(rels)  # queued copies did not start
+
+
+def test_parallel_copy_honours_cancel(tmp_path: Path):
+    src, making, rels, progress = _copy_fixture(tmp_path)
+
+    def cancelled() -> bool:
+        return progress.files >= 3
+
+    with pytest.raises(ms.JobCancelled):
+        ms._copy_files(src, making, rels, progress, cancelled)
+    copied = sum(1 for p in making.rglob("*") if p.is_file())
+    assert copied < len(rels)

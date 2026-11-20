@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import progress_bar %}
+{% from "_macros.html" import progress_bar, timings %}
 {% block title %}{% if job %}Stick {{ job.title }}{% else %}Make a stick{% endif %} · {{ product_name }}{% endblock %}
 {% block body_attrs %}{% if job and job.active %} data-live-job="{{ job.id }}" data-live-page="move" data-live-state="{{ job.status }}"{% endif %}{% endblock %}
 {% block content %}
@@ -22,6 +22,7 @@
       It starts {{ product_name }} on {{ job.stick_platforms|join(", ") }}.
     </p>
     {% if job.notice %}<p class="small job-notice" role="status">⚠ {{ job.notice }}</p>{% endif %}
+    {{ timings(job) }}
   </div>
 </section>
 <div class="hero-actions">

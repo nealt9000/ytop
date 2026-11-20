@@ -34,6 +34,7 @@ from ..autoupdate import AutoUpdate
 from ..config import SESSION_AUTH, Config, load_config
 from ..fsinfo import fits_on, free_bytes
 from ..libraries import READ_ONLY_MESSAGE, LibraryRef, LibrarySet
+from ..timing import Phase, summary_lines
 from ..yt.download import ItemResult, download_probe, media_destination
 from ..yt.formats import allocate_efficient, audio_detail, select_format
 from ..yt.metadata import (
@@ -227,11 +228,27 @@ class Job:
     # The status a paused job had: a paused review ("ready") goes back to
     # its review on Resume instead of downloading unconfirmed.
     paused_from: str = ""
+    # Wall-clock per step of the last make-stick or analysis (see
+    # ytop.timing): [{"name", "seconds", "count", "unit", "bytes", "note"}].
+    timings: list[dict] = field(default_factory=list)
     items: list[dict] = field(default_factory=list)
 
     @property
     def active(self) -> bool:
         return self.status in ACTIVE
+
+    @property
+    def timing_lines(self) -> list[str]:
+        """The stored timings as aligned lines (empty if none)."""
+        phases = []
+        for row in self.timings:
+            try:
+                phases.append(Phase(**{
+                    key: row[key] for key in Phase.__dataclass_fields__ if key in row
+                }))
+            except (TypeError, KeyError):
+                continue
+        return summary_lines(phases)
 
     @property
     def estimate_label(self) -> str:
@@ -1446,7 +1463,11 @@ class JobManager:
         destination = self._review_destination(
             job_id, str(probe.playlist.get("id") or "")
         )
+        started = time.monotonic()
         review = _compact_probe(probe, config, preserve, destination)
+        timings = [*probe.timings, Phase("reviewing", time.monotonic() - started)]
+        for line in summary_lines(timings):
+            log.info("analyse %s: %s", job_id, line)
         suggested = _suggested_policy(stored_quality, review)
         self._install_probe(job_id, probe)
         self._update(
@@ -1471,6 +1492,7 @@ class JobManager:
             in_library=resolved is not None,
             current_id=None,
             current_title=None,
+            timings=[phase.as_dict() for phase in timings],
         )
 
     def _retry_playlist_probe(
@@ -1774,6 +1796,8 @@ class JobManager:
             )
             for warning in report.warnings:
                 log.warning("make stick %s: %s", plan.target, warning)
+            for line in summary_lines(report.timings):
+                log.info("make stick %s: %s", plan.target, line)
         except JobCancelled:
             raise
         except (ValueError, OSError, CorruptDocumentError) as exc:
@@ -1799,6 +1823,7 @@ class JobManager:
             # e.g. the YouTube parts were not copied: the stick still works.
             notice=" ".join(report.warnings),
             in_library=plan.mode == "new",
+            timings=[phase.as_dict() for phase in report.timings],
         )
 
     # -- component updates -------------------------------------------------

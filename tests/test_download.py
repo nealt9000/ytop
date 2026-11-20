@@ -627,3 +627,41 @@ def test_raw_json_is_trimmed_and_resync_trims_an_old_one(
     again = download_mod.fetch_playlist("PL1", cfg, library_root=root)
     assert [i.status for i in again.items] == ["skipped"]
     check()
+
+
+
+def test_probe_reports_time_per_step(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    entries = [{"id": "vid1", "title": "One"}, {"id": "vid2", "title": "Two"},
+               {"id": "bad", "title": "Bad"}]
+
+    def fake_listing(value, config, limit=None, cache_root=None):
+        return value, {"id": "PL1", "title": "List", "entries": entries}
+
+    def fake_video(video_id, config, cache_root=None):
+        if video_id == "bad":
+            raise probe_mod.ProbeError("gone")
+        return {
+            "id": video_id, "title": video_id, "duration": 60,
+            "formats": [
+                {"format_id": "18", "vcodec": "avc1", "acodec": "none",
+                 "height": 360, "width": 640, "tbr": 500, "ext": "mp4"},
+                {"format_id": "140", "vcodec": "none", "acodec": "mp4a.40.2",
+                 "abr": 128, "ext": "m4a"},
+            ],
+        }
+
+    monkeypatch.setattr(probe_mod, "extract_playlist_info", fake_listing)
+    monkeypatch.setattr(probe_mod, "extract_video_info", fake_video)
+    probe = probe_mod.probe_playlist("PL1", Config(), probe_jobs=2)
+
+    names = [phase.name for phase in probe.timings]
+    assert names[:2] == ["listing", "videos"]
+    listing, videos = probe.timings[:2]
+    assert listing.count == 3
+    assert videos.count == 3
+    assert videos.unit == "videos"
+    assert "mean" in videos.note and "2 at a time" in videos.note
+    assert "1 failed" in videos.note
+    assert all(item.seconds >= 0 for item in probe.items)

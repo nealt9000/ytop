@@ -990,6 +990,8 @@ body.reorder-mode { user-select: none; }
 }
 .policy-explainer summary { cursor: pointer; color: var(--text-soft); font-weight: 600; }
 .policy-explainer p { margin-top: 8px; }
+.timings { margin-top: 10px; }
+.timings pre { margin: 8px 0 0; overflow-x: auto; white-space: pre; }
 
 @media (max-width: 560px) {
   /* Keep the speed control reachable; hide the less essential readout first. */

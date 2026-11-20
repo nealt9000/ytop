@@ -42,3 +42,12 @@
   {%- else %}Failed{% endif -%}
 {%- endif -%}
 {%- endmacro %}
+
+{% macro timings(job) -%}
+{%- if job.timing_lines %}
+<details class="policy-explainer timings">
+  <summary>How long each step took</summary>
+  <pre class="small">{{ job.timing_lines|join("\n") }}</pre>
+</details>
+{%- endif %}
+{%- endmacro %}

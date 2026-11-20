@@ -1030,3 +1030,17 @@ def test_review_page_offers_refreshing_existing_videos(tmp_path: Path, monkeypat
     while not seen and time.time() < deadline:
         time.sleep(0.02)
     assert seen and seen[0]["refresh_existing"] is True
+
+
+def test_a_bot_blocked_review_says_so(tmp_path: Path, monkeypatch):
+    def blocked_probe(*args, **kwargs):
+        result = fake_probe(*args, **kwargs)
+        result.bot_blocked = True
+        return result
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", blocked_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(
+        manager, manager.create_probe("PLTESTJOBS00000000000000000001").id, {"ready"},
+    )
+    assert job.notice == jobs_module.BOT_BLOCKED_NOTICE

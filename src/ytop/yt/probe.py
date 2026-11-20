@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,6 +57,18 @@ YOUTUBE_CHANGED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+_BOT_CHECK = dict(YOUTUBE_CHANGED)["bot-check"]
+BOT_CHECK_STOPPED = (
+    "not read: YouTube asked to confirm this computer is not a bot, so "
+    "YTOP stopped asking. Try again later, or sign in for this session."
+)
+
+
+def is_bot_check(text: str | None) -> bool:
+    """YouTube's "Sign in to confirm you're not a bot" (not the age gate)."""
+    return bool(text) and bool(_BOT_CHECK.search(text or ""))
+
+
 def classify_failure(exc: BaseException | str | None) -> str:
     """``"youtube_changed"`` when yt-dlp's error looks like YouTube changed
     under it (see ``YOUTUBE_CHANGED``), else ``"other"``."""
@@ -96,6 +109,8 @@ class ProbeResult:
     items: list[ProbedItem] = field(default_factory=list)
     # Wall-clock per step (listing, videos, allocating); see ytop.timing.
     timings: list[Phase] = field(default_factory=list)
+    # YouTube started bot-checking: the videos after that were not read.
+    bot_blocked: bool = False
 
     @property
     def estimated_bytes(self) -> int:
@@ -373,6 +388,9 @@ def probe_playlist(
     result = ProbeResult(url=url, playlist=playlist)
     workers = max(1, probe_jobs if probe_jobs is not None else config.probe_jobs)
     playlist_id = str(playlist.get("id") or "")
+    # Every request after YouTube starts bot-checking only deepens the
+    # block: stop reading once it does.
+    blocked = threading.Event()
 
     def probe_one(index: int, entry: dict) -> ProbedItem | None:
         if cancel is not None and cancel():
@@ -390,6 +408,9 @@ def probe_playlist(
             on_item_start(item)  # every item, so started - done stays in flight
         if have is not None and playlist_id and have(playlist_id, item.id):
             item.existing = True
+            return item
+        if blocked.is_set():
+            item.error = BOT_CHECK_STOPPED
             return item
         started = time.monotonic()
         try:
@@ -409,6 +430,8 @@ def probe_playlist(
         except Exception as exc:  # noqa: BLE001 - record and continue the playlist
             item.error = f"{type(exc).__name__}: {exc}"
         item.seconds = time.monotonic() - started
+        if is_bot_check(item.error):
+            blocked.set()
         return item
 
     indexed = [
@@ -452,6 +475,7 @@ def probe_playlist(
             # worker can still invoke a callback.
             pool.shutdown(wait=True, cancel_futures=True)
     result.items.sort(key=lambda item: item.index)
+    result.bot_blocked = blocked.is_set()
     clock.stop()
     clock.phases[-1].count = len(result.items)
     clock.phases[-1].note = _per_video_note(result.items, workers)

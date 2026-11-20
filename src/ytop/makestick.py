@@ -115,6 +115,7 @@ from .stick.boot import (
     rollback_upgrade,
     switch_interrupted,
 )
+from .timing import Phase, PhaseClock
 from .web import fsops
 from .web.fsops import canonical, copy_file, is_within
 from .web.library import Library
@@ -1257,6 +1258,14 @@ class _Progress:
         self.phase_name = "copying"
         self.label = ""
         self._last = 0.0
+        # Wall-clock per phase (the report's timings); ``mark`` adds steps
+        # the progress display does not show on their own.
+        self.clock = PhaseClock(lambda: (self.files, self.bytes), unit="files")
+        self.clock.start("preparing")
+
+    def mark(self, name: str) -> None:
+        """Start timing step ``name`` without changing what is displayed."""
+        self.clock.start(name)
 
     def phase(
         self,
@@ -1267,12 +1276,19 @@ class _Progress:
         total_bytes: int | None = None,
     ) -> None:
         """Start ``phase``; given totals restart the counts from zero."""
+        same = self.clock.current == phase
+        if not same:
+            self.clock.stop()  # counted before any reset below
         self.phase_name = phase
         self.label = label
         if total_files is not None:
             self.total_files, self.files = total_files, 0
         if total_bytes is not None:
             self.total_bytes, self.bytes = total_bytes, 0
+        if same:
+            self.clock.rebase()
+        elif phase != "done":
+            self.clock.start(phase)
         self._emit()
 
     def resume(self, done_bytes: int, done_files: int, total_bytes: int,
@@ -1281,6 +1297,7 @@ class _Progress:
         the image copy)."""
         self.bytes, self.files = done_bytes, done_files
         self.total_bytes, self.total_files = total_bytes, total_files
+        self.clock.rebase()
 
     def chunk(self, size: int) -> None:
         self.bytes += size
@@ -1333,6 +1350,8 @@ class MakeReport:
     repaired: list[str] = field(default_factory=list)
     # Things that went wrong after YTOP itself was in place.
     warnings: list[str] = field(default_factory=list)
+    # Wall-clock per step, in order.
+    timings: list[Phase] = field(default_factory=list)
 
 
 def _check_cancel(cancelled: Callable[[], bool]) -> None:
@@ -1789,10 +1808,10 @@ def _run(
                 f"{target} already has {', '.join(foreign)}, not made by YTOP; "
                 "move or rename it first (nothing on the drive is overwritten)"
             )
+    progress = _Progress(progress_cb, plan.bytes_needed, plan.total_files)
     repaired = recover_target(target)
     build = read_build(source)
     build_id = str(build.get("build_id") or "")
-    progress = _Progress(progress_cb, plan.bytes_needed, plan.total_files)
     # Cleanup runs for errors, not for a crash: what a crash leaves is
     # repaired by the next inspect.  A switch stopped by an error is rolled
     # back here, before the error goes on.
@@ -1830,6 +1849,7 @@ def _run(
             )
     # YTOP is in place: what is left is tidying up, never an undo.  Files
     # still in use (Windows) stay for boot.py to delete at the next start.
+    progress.mark("tidying")
     if plan.image_root is not None:
         _keep_previous(target)  # self mode: what was set aside is kept
     else:
@@ -1841,6 +1861,7 @@ def _run(
         warnings: list[str] = []  # self mode: the stick keeps its own store
         merged_bytes = merged_files = 0
     else:
+        progress.mark("components")
         warnings, merged_bytes, merged_files = _merge_components(
             plan, source, progress, cancelled
         )
@@ -1864,6 +1885,7 @@ def _run(
                 f"YTOP was copied but the library could not be created: {exc}"
             ) from exc
         library_id = ref.id
+        progress.mark("registering")
         progress.resume(
             copied_bytes - merged_bytes, copied_files - merged_files,
             plan.bytes_needed, plan.total_files,
@@ -1892,6 +1914,7 @@ def _run(
         build_id=build_id, label=plan.label, library_id=library_id,
         bytes_copied=copied_bytes, files_copied=copied_files,
         playlists=copied, repaired=repaired, warnings=warnings,
+        timings=progress.clock.snapshot(),
     )
 
 

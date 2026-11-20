@@ -2541,3 +2541,39 @@ def test_new_stick_rechecks_foreign_files_at_run_time(tmp_path: Path, image: Pat
     assert (target / "start-ytop-linux.sh").read_text() == "echo mine\n"
     assert not (target / ".ytop").exists()
     assert not (target / ms.MAKING).exists()
+
+
+def test_new_stick_reports_time_per_step(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    plan = ms.plan_make(
+        target, image, library, platforms=["linux-x86_64"], playlists=[],
+    )
+    report = ms.run_make(plan, image, library, lambda update: None)
+
+    names = [phase.name for phase in report.timings]
+    assert names[:4] == ["preparing", "copying", "verifying", "switching"]
+    assert "tidying" in names and "registering" in names
+    assert len(names) == len(set(names))
+    assert all(phase.seconds >= 0 for phase in report.timings)
+    copying = report.timings[1]
+    assert copying.count == len(plan.files)
+    assert copying.bytes == sum(size for _rel, size in plan.files)
+    assert copying.unit == "files"
+
+
+def test_upgrade_reports_time_per_step(tmp_path: Path, image: Path):
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    plan = ms.plan_make(
+        target, image, library, platforms=["linux-x86_64"], playlists=[],
+    )
+    ms.run_make(plan, image, library, lambda update: None)
+    plan = ms.plan_make(
+        target, image, library, platforms=["linux-x86_64"], playlists=[],
+        mode="upgrade",
+    )
+    report = ms.run_make(plan, image, library, lambda update: None)
+    names = [phase.name for phase in report.timings]
+    assert names[:2] == ["preparing", "checking"]
+    assert "tidying" in names

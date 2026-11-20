@@ -151,6 +151,7 @@ def _probe_payload(result, cfg) -> dict:
         "max_height": cfg.max_height,
         "estimated_bytes": result.estimated_bytes,
         "estimate_native_bytes": native_bytes,
+        "timings": [phase.as_dict() for phase in result.timings],
         "items": items,
     }
 
@@ -205,6 +206,8 @@ def cmd_probe(args) -> int:
             size = "-"
         print(f"{item.index:>3}  {item.id:<12} {_duration(item.duration):>8}  "
               f"{selection:<38} {size:>9}  {item.title}")
+    print()
+    _print_timings(result.timings)
     if result.failures:
         print(f"\n{len(result.failures)} item(s) failed to probe", file=sys.stderr)
         return 1
@@ -854,7 +857,18 @@ def cmd_make_stick(args) -> int:
     print(f"{done} the stick “{report.label}” (build {report.build_id}): "
           f"{report.files_copied} files, {human_bytes(report.bytes_copied)}"
           + (f", {len(report.playlists)} playlist(s)" if report.playlists else ""))
+    _print_timings(report.timings)
     return 0
+
+
+def _print_timings(phases) -> None:
+    from .timing import summary_lines
+
+    lines = summary_lines(phases)
+    if lines:
+        print("timings:")
+        for line in lines:
+            print(f"  {line}")
 
 
 def _appupdate():

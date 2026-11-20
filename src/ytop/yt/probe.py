@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 
 from ..config import Config
+from ..timing import Phase, PhaseClock, human_seconds, percentile
 from ..toolchain import deno_path
 from . import runner as ytdlp_runner
 from .formats import (
@@ -79,6 +81,8 @@ class ProbedItem:
     info: dict | None = None
     selection: Selection | None = None
     error: str | None = None
+    # Wall-clock of this video's extraction.
+    seconds: float = 0.0
 
 
 @dataclass
@@ -86,6 +90,8 @@ class ProbeResult:
     url: str
     playlist: dict
     items: list[ProbedItem] = field(default_factory=list)
+    # Wall-clock per step (listing, videos, allocating); see ytop.timing.
+    timings: list[Phase] = field(default_factory=list)
 
     @property
     def estimated_bytes(self) -> int:
@@ -294,10 +300,14 @@ def probe_playlist(
     preserve_audio: bool = False,
     cache_root: Path | None = None,
 ) -> ProbeResult:
+    clock = PhaseClock(unit="videos")
+    clock.start("listing")
     url, playlist = extract_playlist_info(value, config, limit, cache_root)
     entries = list(playlist.get("entries") or [])
     if limit is not None:
         entries = entries[:limit]
+    clock.stop()
+    clock.phases[-1].count = len(entries)
     if on_total is not None:
         on_total(len(entries))
     if cancel is not None and cancel():
@@ -320,6 +330,7 @@ def probe_playlist(
         )
         if on_item_start is not None:
             on_item_start(item)
+        started = time.monotonic()
         try:
             info = extract_video_info(item.id, config, cache_root)
             item.info = info
@@ -336,12 +347,14 @@ def probe_playlist(
             item.error = str(exc)
         except Exception as exc:  # noqa: BLE001 - record and continue the playlist
             item.error = f"{type(exc).__name__}: {exc}"
+        item.seconds = time.monotonic() - started
         return item
 
     indexed = [
         (index, entry)
         for index, entry in enumerate(entries, start=1)
     ]
+    clock.start("videos")
     if workers == 1:
         for index, entry in indexed:
             item = probe_one(index, entry)
@@ -378,7 +391,11 @@ def probe_playlist(
             # worker can still invoke a callback.
             pool.shutdown(wait=True, cancel_futures=True)
     result.items.sort(key=lambda item: item.index)
+    clock.stop()
+    clock.phases[-1].count = len(result.items)
+    clock.phases[-1].note = _per_video_note(result.items, workers)
     if target_mb_per_hour and target_mb_per_hour > 0:
+        clock.start("allocating")
         allocate_efficient(
             result.items,
             target_mb_per_hour=target_mb_per_hour,
@@ -387,4 +404,20 @@ def probe_playlist(
             max_height=max_height or 0,
             preserve_audio=preserve_audio,
         )
+        clock.stop()
+    result.timings = clock.snapshot()
     return result
+
+
+def _per_video_note(items: list[ProbedItem], workers: int) -> str:
+    """``each 3.2 s mean, 5.1 s p90, 9.0 s max; 4 at a time; 2 failed``."""
+    seconds = [item.seconds for item in items]
+    if not seconds:
+        return ""
+    note = (
+        f"each {human_seconds(sum(seconds) / len(seconds))} mean, "
+        f"{human_seconds(percentile(seconds, 0.9))} p90, "
+        f"{human_seconds(max(seconds))} max; {workers} at a time"
+    )
+    failed = sum(1 for item in items if item.error)
+    return note + (f"; {failed} failed" if failed else "")

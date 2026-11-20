@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import progress_bar %}
+{% from "_macros.html" import progress_bar, timings %}
 {% block title %}{% if job and job.kind == "video" %}Add video{% elif job %}{{ job.title or "Add playlist" }}{% else %}Add playlist{% endif %} · {{ product_name }}{% endblock %}
 {% block body_class %}{% endblock %}
 {% block body_attrs %}{% if job and job.active %} data-live-job="{{ job.id }}" data-live-page="add" data-live-state="{{ job.status }}"{% endif %}{% endblock %}
@@ -121,6 +121,7 @@
   </p>
 </details>
 {% endif %}
+{{ timings(job) }}
 
 <form action="/jobs/{{ job.id }}/download" method="post" class="download-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

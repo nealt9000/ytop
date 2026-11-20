@@ -907,3 +907,34 @@ def test_a_single_video_review_shows_fits():
         estimate_native_bytes=100, free_bytes=50,
     )
     assert [o["fits"] for o in job.quality_options] == [True, False]
+
+
+def test_probe_job_keeps_its_timings(tmp_path: Path, monkeypatch):
+    from ytop.timing import Phase
+
+    def timed_probe(*args, **kwargs):
+        result = fake_probe(*args, **kwargs)
+        result.timings = [Phase("listing", 1.5, count=2, unit="videos"),
+                          Phase("videos", 12.0, count=2, unit="videos")]
+        return result
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", timed_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    job = wait_for(manager, job.id, {"ready"})
+
+    assert [row["name"] for row in job.timings] == ["listing", "videos", "reviewing"]
+    lines = job.timing_lines
+    assert lines[0].startswith("listing") and lines[-1].startswith("total")
+
+    again = JobManager(lib_root(tmp_path)).get(job.id)
+    assert again is not None
+    assert [row["name"] for row in again.timings] == ["listing", "videos", "reviewing"]
+
+
+def test_timing_lines_skip_bad_rows():
+    from ytop.web.jobs import Job
+
+    job = Job(id="x", timings=[{"name": "a", "seconds": 2}, {"bogus": 1}, "nope"])
+    assert job.timing_lines[0].startswith("a")
+    assert len(job.timing_lines) == 2  # a + total

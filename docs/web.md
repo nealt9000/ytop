@@ -458,7 +458,12 @@ refreshes while probing and then shows:
 - every video with duration, the chosen efficient resolution/codec/container, its
   efficient size and its native size;
 - an “already in your library” notice when the playlist id is present, with the
-  button relabelled **Sync playlist**;
+  button relabelled **Sync playlist**. A sync reads only the videos not yet
+  downloaded: the others are listed as “already downloaded”, left out of the
+  size estimates, and keep their stored details (a changed title is taken from
+  the playlist listing). **Also refresh the N videos already downloaded**
+  re-reads them during the download (descriptions, thumbnails, extra audio,
+  missing transcripts);
 - a policy choice (**Efficient** or **Native**), an optional **Keep
   high-quality audio** tick for music playlists, then **Download playlist**.
 
@@ -702,7 +707,7 @@ Against the real GEB library:
 ## Limitations
 
 - Once a playlist is in the library, its entry order is owned locally. A sync
-  refreshes metadata and appends new videos, but it does not apply a reorder made
+  appends new videos (and, with the refresh tick, refreshes existing ones), but it does not apply a reorder made
   on YouTube, and it does not drop a local entry that YouTube no longer returns.
   Use **✎ Edit order** to drag entries into place and **Remove** to delete one.
 - Local playlists (`/playlist/new`) reference media; a shared video is stored

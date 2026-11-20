@@ -758,8 +758,9 @@ def test_quality_options_order_labels_and_fits():
     ]
     assert [o["bytes"] for o in opts] == [10, 30, 50, 100]
     assert [o["fits"] for o in opts] == [True, True, False, False]
+    # A sync's totals count only new videos, so it shows fits too.
     job.in_library = True
-    assert all(o["fits"] is None for o in job.quality_options)
+    assert [o["fits"] for o in job.quality_options] == [True, True, False, False]
     job.in_library = False
     job.free_bytes = None
     assert all(o["fits"] is None for o in job.quality_options)
@@ -938,3 +939,94 @@ def test_timing_lines_skip_bad_rows():
     job = Job(id="x", timings=[{"name": "a", "seconds": 2}, {"bogus": 1}, "nope"])
     assert job.timing_lines[0].startswith("a")
     assert len(job.timing_lines) == 2  # a + total
+
+
+def test_sync_review_leaves_out_existing_videos_and_is_read_once(
+    tmp_path: Path, monkeypatch,
+):
+    probes: list[dict] = []
+
+    def probe_with_existing(value, config, **kwargs):
+        probes.append(kwargs)
+        result = fake_probe(value, config, **kwargs)
+        first = result.items[0]
+        first.existing, first.info, first.selection = True, None, None
+        return result
+
+    downloads: list[dict] = []
+
+    def fake_download(probe, config, **kwargs):
+        downloads.append(kwargs)
+        return FetchResult(tmp_path, probe.playlist, [], total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", probe_with_existing)
+    monkeypatch.setattr(jobs_module, "download_probe", fake_download)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(
+        manager, manager.create_probe("PLTESTJOBS00000000000000000001").id,
+        {"ready"},
+    )
+    assert callable(probes[0]["have"])
+    assert job.existing_count == 1
+    assert job.items[0]["existing"] is True
+    assert job.items[0]["size"] == 0
+    assert job.estimate_bytes == job.items[1]["size"]  # only the new video
+
+    monkeypatch.setattr(manager, "_job_playlist", lambda job, playlist_id: (None, None, {}))
+    manager._update(job.id, in_library=True)
+    manager.start_download(job.id, refresh_existing=True)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert len(probes) == 1  # the review's analysis was used, not redone
+    assert downloads[0]["refresh_existing"] is True
+    assert job.refresh_existing is True
+
+
+def test_a_sync_review_shows_fits_too():
+    job = jobs_module.Job(
+        id="j", kind="playlist", in_library=True, estimate_bytes=10,
+        estimate_native_bytes=100, free_bytes=50, existing_count=3,
+    )
+    assert [o["fits"] for o in job.quality_options] == [True, False]
+
+
+def test_review_page_offers_refreshing_existing_videos(tmp_path: Path, monkeypatch):
+    def probe_with_existing(value, config, **kwargs):
+        result = fake_probe(value, config, **kwargs)
+        first = result.items[0]
+        first.existing, first.info, first.selection = True, None, None
+        return result
+
+    seen: list[dict] = []
+
+    def fake_download(probe, config, **kwargs):
+        seen.append(kwargs)
+        return FetchResult(tmp_path, probe.playlist, [], total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", probe_with_existing)
+    monkeypatch.setattr(jobs_module, "download_probe", fake_download)
+    client = TestClient(create_app(lib_root(tmp_path), libraries=library_set(lib_root(tmp_path))))
+    response = client.post(
+        "/add", data={"url": "PLTESTJOBS00000000000000000001"},
+        follow_redirects=False,
+    )
+    location = response.headers["location"]
+    deadline = time.time() + 5
+    page = client.get(location)
+    while "Ready to add" not in page.text and time.time() < deadline:
+        time.sleep(0.02)
+        page = client.get(location)
+    assert 'name="refresh_existing"' in page.text
+    assert "Also refresh the 1 video already downloaded" in page.text
+    assert "already downloaded" in page.text
+    assert "(1 new)" in page.text
+
+    job_id = location.rsplit("/", 1)[1]
+    client.post(
+        f"/jobs/{job_id}/download",
+        data={"policy": "efficient", "refresh_existing": "1"},
+        follow_redirects=False,
+    )
+    deadline = time.time() + 5
+    while not seen and time.time() < deadline:
+        time.sleep(0.02)
+    assert seen and seen[0]["refresh_existing"] is True

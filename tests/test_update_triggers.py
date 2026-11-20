@@ -340,8 +340,9 @@ def test_youtube_failure_during_download_retries_the_item(tmp_path: Path, monkey
     job = wait_for(manager, job.id, {"done", "failed"})
 
     assert downloads == [("abc12345678", "1.0"), ("abc12345678", "2.0")], job
-    # Read for review, again for the download, then with 2.0 for the retry.
-    assert seen_probe == ["1.0", "1.0", "2.0"]
+    # Read for review (the download uses that review), then with 2.0 for
+    # the retry.
+    assert seen_probe == ["1.0", "2.0"]
     assert fake.calls == 1
     assert job.status == "done"
     assert (job.downloaded, job.failed) == (1, 0)

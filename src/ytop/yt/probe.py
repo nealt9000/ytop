@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,9 @@ class ProbedItem:
     error: str | None = None
     # Wall-clock of this video's extraction.
     seconds: float = 0.0
+    # Already in the library with its media: not extracted (``info`` and
+    # ``selection`` stay empty); the download keeps what is on disk.
+    existing: bool = False
 
 
 @dataclass
@@ -99,7 +103,14 @@ class ProbeResult:
 
     @property
     def failures(self) -> list[ProbedItem]:
-        return [i for i in self.items if i.error or i.selection is None]
+        return [
+            i for i in self.items
+            if i.error or (i.selection is None and not i.existing)
+        ]
+
+    @property
+    def existing(self) -> list[ProbedItem]:
+        return [i for i in self.items if i.existing]
 
 
 def deno_dir(library_root: Path) -> Path:
@@ -299,7 +310,13 @@ def probe_playlist(
     cancel=None,
     preserve_audio: bool = False,
     cache_root: Path | None = None,
+    have: Callable[[str, str], bool] | None = None,
 ) -> ProbeResult:
+    """Read the playlist, then extract each video's formats.
+
+    ``have(playlist_id, video_id)`` names videos already in the library with
+    their media: they are not extracted (a re-sync then costs only the new
+    videos) and come back with ``existing`` set."""
     clock = PhaseClock(unit="videos")
     clock.start("listing")
     url, playlist = extract_playlist_info(value, config, limit, cache_root)
@@ -315,6 +332,7 @@ def probe_playlist(
 
     result = ProbeResult(url=url, playlist=playlist)
     workers = max(1, probe_jobs if probe_jobs is not None else config.probe_jobs)
+    playlist_id = str(playlist.get("id") or "")
 
     def probe_one(index: int, entry: dict) -> ProbedItem | None:
         if cancel is not None and cancel():
@@ -329,7 +347,10 @@ def probe_playlist(
             duration=entry.get("duration"),
         )
         if on_item_start is not None:
-            on_item_start(item)
+            on_item_start(item)  # every item, so started - done stays in flight
+        if have is not None and playlist_id and have(playlist_id, item.id):
+            item.existing = True
+            return item
         started = time.monotonic()
         try:
             info = extract_video_info(item.id, config, cache_root)
@@ -410,14 +431,19 @@ def probe_playlist(
 
 
 def _per_video_note(items: list[ProbedItem], workers: int) -> str:
-    """``each 3.2 s mean, 5.1 s p90, 9.0 s max; 4 at a time; 2 failed``."""
-    seconds = [item.seconds for item in items]
+    """``each 3.2 s mean, 5.1 s p90, 9.0 s max; 4 at a time; 2 failed;
+    40 already in the library``."""
+    kept = sum(1 for item in items if item.existing)
+    seconds = [item.seconds for item in items if not item.existing]
     if not seconds:
-        return ""
+        return f"{kept} already in the library" if kept else ""
     note = (
         f"each {human_seconds(sum(seconds) / len(seconds))} mean, "
         f"{human_seconds(percentile(seconds, 0.9))} p90, "
         f"{human_seconds(max(seconds))} max; {workers} at a time"
     )
     failed = sum(1 for item in items if item.error)
-    return note + (f"; {failed} failed" if failed else "")
+    return (
+        note + (f"; {failed} failed" if failed else "")
+        + (f"; {kept} already in the library" if kept else "")
+    )

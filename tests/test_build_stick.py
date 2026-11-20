@@ -2,6 +2,7 @@ import importlib.util
 import json
 import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -33,9 +34,9 @@ LAUNCHERS = [
 ]
 
 
-def _unchecked_hash_pyc(path) -> bool:
+def _unchecked_hash_pyc(path, data: bytes | None = None) -> bool:
     """A CPython 3.12 pyc validated by neither mtime nor hash (PEP 552)."""
-    data = path.read_bytes()
+    data = path.read_bytes() if data is None else data
     return (
         data[:4] == importlib.util.MAGIC_NUMBER
         and int.from_bytes(data[4:8], "little") == 0b01  # hash-based, unchecked
@@ -143,20 +144,28 @@ def test_dedupe_common(tmp_path):
     assert not (yt / "lib/common/nativepkg").exists()
 
 
+def _stdlib_entries(yt, plat) -> dict[str, bytes]:
+    import zipfile
+
+    with zipfile.ZipFile(bs.stdlib_zip(yt / f"runtime/{plat}/python", plat)) as zf:
+        return {name: zf.read(name) for name in zf.namelist()}
+
+
 def test_stdlib_pruned(tmp_path):
     yt = build(tmp_path) / ".ytop"
     for plat in PLATS:
-        std = yt / f"runtime/{plat}/python" / stdlib_dir(plat)
+        entries = _stdlib_entries(yt, plat)
         for rel in KEPT_STDLIB:
-            assert (std / rel).is_file(), rel
+            assert rel in entries, rel
         for rel in PRUNED_STDLIB:
-            assert not (std / rel).exists(), rel
-        # Every pyc left is the build's own (Ruling R12); stale ones from
-        # the tarball are replaced and source-less ones dropped.
-        for rel in STALE_STDLIB_PYC:
-            assert _unchecked_hash_pyc(std / rel), rel
-        for pyc in std.rglob("*.pyc"):
-            assert _unchecked_hash_pyc(pyc), pyc
+            assert rel not in entries, rel
+        # Every pyc is the build's own (Ruling R12), beside its source where
+        # zipimport looks; stale ones from the tarball are replaced.
+        assert STALE_STDLIB_PYC == ["__pycache__/os.cpython-312.pyc"]
+        assert _unchecked_hash_pyc(None, entries["os.pyc"])
+        pycs = [name for name in entries if name.endswith(".pyc")]
+        assert pycs and all(_unchecked_hash_pyc(None, entries[n]) for n in pycs)
+        assert not [name for name in entries if "__pycache__" in name]
         python = yt / f"runtime/{plat}/python"
         fam = os_family(plat)
         for rel in KEPT_PYTHON[fam]:
@@ -296,8 +305,9 @@ def test_bytecode_for_app_lib_and_stdlib(tmp_path):
         assert _unchecked_hash_pyc(
             yt / f"lib/{plat}/nativepkg/__pycache__/__init__.cpython-312.pyc"
         )
-        std = yt / f"runtime/{plat}/python" / stdlib_dir(plat)
-        assert _unchecked_hash_pyc(std / "json/__pycache__/__init__.cpython-312.pyc")
+        entries = _stdlib_entries(yt, plat)
+        assert _unchecked_hash_pyc(None, entries["json/__init__.pyc"])
+        assert entries["json/__init__.py"]  # sources stay for tracebacks
 
 
 def test_bytecode_needs_cpython_312(tmp_path, monkeypatch):
@@ -558,3 +568,19 @@ def test_prune_node_modules_matches_suffixes_only(tmp_path):
     assert prune_node_modules(tmp_path) == len(drop)
     left = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
     assert left == sorted(keep)
+
+
+def test_stdlib_is_one_reproducible_zip(tmp_path):
+    first = build(tmp_path / "a") / ".ytop"
+    second = build(tmp_path / "b") / ".ytop"
+    for plat in PLATS:
+        python = first / f"runtime/{plat}/python"
+        std = python / stdlib_dir(plat)
+        # Only the loose parts are left as files.
+        left = {p.relative_to(std).parts[0] for p in std.rglob("*") if p.is_file()}
+        assert left <= set(bs.STDLIB_LOOSE), left
+        zip_a = bs.stdlib_zip(python, plat)
+        zip_b = bs.stdlib_zip(second / f"runtime/{plat}/python", plat)
+        assert zip_a.read_bytes() == zip_b.read_bytes()  # upgrades skip it
+    assert bs.stdlib_zip(Path("p"), "windows-x86_64") == Path("p/python312.zip")
+    assert bs.stdlib_zip(Path("p"), "linux-x86_64") == Path("p/lib/python312.zip")

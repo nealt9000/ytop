@@ -1201,7 +1201,8 @@ def test_storage_page_shows_components(tmp_path: Path):
     auto = AutoUpdate(ytop, Config, loaded=[], base_path=[])
     client = TestClient(create_app(home.root, libraries=library_set(home), autoupdate=auto))
 
-    page = client.get("/storage").text
+    assert "YouTube parts" not in client.get("/storage").text  # moved to Settings
+    page = client.get("/settings").text
     assert "YouTube parts" in page
     assert "2026.10.26" in page and "0.3.0" in page
     assert "14 Nov 2026" in page
@@ -1215,7 +1216,7 @@ def test_storage_page_shows_components(tmp_path: Path):
     # A checkout without a store says so, and offers no Update now.
     bare = TestClient(create_app(home.root, libraries=library_set(home),
                                  autoupdate=AutoUpdate(None, Config)))
-    page = bare.get("/storage").text
+    page = bare.get("/settings").text
     assert "YouTube parts" in page
     assert 'action="/storage/components/update"' not in page
     client.app.state.jobs.close()

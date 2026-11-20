@@ -700,7 +700,7 @@ def test_asks_once_then_respects_the_answer(stick: Path):
         response = client.post("/app-update/check", follow_redirects=False)
         assert response.status_code == 303 and fake.checks == 1
         assert "up to date" in client.get("/app-update").text
-        assert "Check now" in client.get("/storage").text
+        assert "Check now" in client.get("/settings").text
 
     # Yes: stored, and the start-up check then looks for a release.
     (stick / ".ytop/config.toml").unlink(missing_ok=True)
@@ -1093,7 +1093,7 @@ def test_storage_offers_revert_only_with_a_valid_previous(stick: Path, server, t
                                    check=FakeUpdater().check)
     _app, client = _client(stick, updates)
     with client:
-        page = client.get("/storage").text
+        page = client.get("/settings").text
         assert "Revert to previous version" not in page
         assert client.post("/app-update/revert", data={"build_id": OLD_ID}).status_code == 409
     assert _install(stick, server).status == "updated"
@@ -1119,7 +1119,7 @@ def test_storage_offers_revert_only_with_a_valid_previous(stick: Path, server, t
     stopped = threading.Event()
     with client:
         app.state.request_stop = stopped.set
-        page = client.get("/storage").text
+        page = client.get("/settings").text
         assert "Revert to previous version" in page and "0.0.9" in page
         assert 'action="/app-update/revert"' in page and "data-confirm" in page
         # Only the rollback copy shown may be reverted to.

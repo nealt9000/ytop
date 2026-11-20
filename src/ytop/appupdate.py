@@ -284,6 +284,12 @@ def _fetch(ytop: Path, config: Config, http: Http) -> AppCheck:
                                  product.repo(config))
     if latest is None:
         return AppCheck("up_to_date", message=NO_RELEASE)
+    return _judge(stick, verified_release(http, latest))
+
+
+def verified_release(http: Http, latest: dict[str, Any]) -> AppRelease:
+    """The GitHub release ``latest`` as an :class:`AppRelease`, once its
+    ``ytop-release.json`` matches its ``SHA256SUMS`` (raises otherwise)."""
     assets = {
         name: str(entry["browser_download_url"])
         for name, entry in updater._gh_assets(latest).items()
@@ -301,13 +307,12 @@ def _fetch(ytop: Path, config: Config, http: Http) -> AppCheck:
     except ValueError:
         raise UpdateError(f"{RELEASE_JSON}: not JSON") from None
     notes = latest.get("body")
-    release = AppRelease(
+    return AppRelease(
         version=doc["version"], build_id=doc["build_id"],
         tag=str(latest.get("tag_name") or ""),
         notes=(notes if isinstance(notes, str) else "")[:NOTES_LIMIT],
         doc=doc, assets=assets,
     )
-    return _judge(stick, release)
 
 
 def _judge(stick: dict[str, Any], release: AppRelease) -> AppCheck:

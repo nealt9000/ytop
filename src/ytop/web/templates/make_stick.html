@@ -214,10 +214,11 @@
     {% for plat, size in platform_sizes.items() %}
     <label class="check-row">
       <input type="checkbox" name="platforms" value="{{ plat }}"{% if plat in checked_platforms %} checked{% endif %}>
-      <span>{{ plat }}{% if size %} <small class="muted">{{ size|bytes }}</small>{% endif %}</span>
+      <span>{{ plat|platform }}{% if size %} <small class="muted">{{ size|bytes }}</small>{% endif %}</span>
     </label><br>
     {% endfor %}
     {% if base_size %}<p class="muted tiny">Plus {{ base_size|bytes }} shared by all of them.</p>{% endif %}
+    {% if not upgrade %}<p class="muted tiny">Fewer platforms make the stick faster to fill; a stick can add more later from its Settings page.</p>{% endif %}
   </fieldset>
   {% if not upgrade %}
   <label class="field">

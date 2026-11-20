@@ -503,6 +503,28 @@ new library, a folder that already holds one is remembered on this computer.
 **Forget** drops a remembered folder without touching its files and is disabled
 while a download or move uses it. **Rescan drives** bypasses the detection
 cache. The page also shows the total media size across online libraries.
+Updates and download settings are on Settings.
+
+### Settings (`/settings`)
+
+- **This stick** (only when running from a stick): its name and description,
+  the platforms it starts on, and **Add a platform**. Adding downloads only that
+  platform's pieces (`lib-<plat>`, `runtime-<plat>-python`, `runtime-<plat>-bin`)
+  of the published release whose `build_id` is the stick's own (found by its tag
+  `v<version>` and verified like an app update), checks every file against the
+  release manifest, renames the new folders in, and rewrites the manifest and
+  `build.json` last; no restart is needed. A development build is not a
+  published release, so it says to make the stick again instead
+  (`ytop.stickplatforms`).
+- **YouTube parts** and **YTOP updates**: versions, *Update now* / *Check now*,
+  the automatic-check settings and *Revert* (moved here from Storage).
+- **Downloads**: the default library's efficient budget (MB/h), height cap and
+  floor, audio language, videos downloaded at once (1–4) and quick playlist
+  reading, saved to its `config.toml`.
+
+**Make a stick** pre-ticks this computer's platform and Windows; the others
+can be ticked, or added to the stick later from its Settings page. Every page's
+footer shows the YTOP version (and build id on a stick).
 
 ### Downloads (`/downloads`)
 
@@ -589,7 +611,7 @@ page at the matching moment.
 
 ## HTTP surface
 
-Pages: `/`, `/add`, `/add/{job_id}`, `/add/video`, `/downloads`, `/storage`,
+Pages: `/`, `/add`, `/add/{job_id}`, `/add/video`, `/downloads`, `/storage`, `/settings`,
 `/playlist/new`, `/playlist/{playlist_id}`, `/move/{job_id}`,
 `/watch/{playlist_id}/{video_id}`, `/search`.
 
@@ -617,6 +639,9 @@ JSON:
 | `POST /storage/add` | Form: `path`, `label`; create a library in an empty folder or remember an existing one |
 | `POST /storage/{id}/label` | Form: `label`, `description`; rename a library |
 | `POST /storage/{id}/remove` | Forget a remembered library; rejected while a job uses it, and its files stay on disk |
+| `GET /settings` | This stick (platforms), updates, download settings |
+| `POST /settings/platforms` | Form: repeated `platforms=<key>`; download and add them to the running stick (background; the page refreshes while it runs) |
+| `POST /settings/downloads` | Form: `target_mb_per_hour`, `max_height`, `min_height`, `audio_language`, `jobs`, `quick_analysis=1`; save the default library's download settings |
 | `GET /api/jobs` | All recent jobs, with derived `active` and `percent` |
 | `GET /api/jobs/{job_id}` | One job, including review items, progress, `active` and `percent` |
 | `GET /api/transcript/{playlist}/{video}` | Transcript segments + language/kind |

@@ -41,6 +41,7 @@ from ..config import (
     Config,
     is_loopback_host,
     load_config,
+    save_config,
     set_updates_option,
 )
 from ..index import index_for
@@ -51,8 +52,9 @@ from ..libraries import (
     RecoveryDeferred,
 )
 from ..publish import PUBLISH_LOCK, recover_rename_journal
-from ..runtime import active_runtime
+from ..runtime import PLATFORMS, UnsupportedPlatform, active_runtime, current_platform
 from ..startup import StartupClock, from_environment
+from ..stickplatforms import PlatformAdds, platform_label
 from ..tags import TagStore, apply_edits, effective_category, normalize_tag
 from ..targets import TargetError, parse_target
 from ..toolchain import deno_path, ffmpeg_path, ffprobe_path, toolchain_source
@@ -318,6 +320,7 @@ def create_app(
     autoupdate: AutoUpdate | None = None,
     update_poll_s: float = autoupdate_mod.IDLE_POLL_S,
     app_updates: AppUpdates | None = None,
+    platform_adds: PlatformAdds | None = None,
 ) -> FastAPI:
     """Build the app.
 
@@ -406,6 +409,9 @@ def create_app(
         app_updates = AppUpdates.for_runtime(lambda: app_config(update_root), update_root)
         app_updates.update_components = lambda names: auto.update(names=names)
     releases = app_updates
+    if platform_adds is None:
+        platform_adds = PlatformAdds.for_runtime(lambda: app_config(update_root))
+    adds = platform_adds
     csrf_token = secrets.token_urlsafe(32)
     control_token = instance_token or secrets.token_urlsafe(32)
 
@@ -716,6 +722,7 @@ def create_app(
     templates.env.filters["date"] = format_date
     templates.env.filters["finished"] = format_finished
     templates.env.filters["bytes"] = human_bytes
+    templates.env.filters["platform"] = platform_label
     # Job pages link to a playlist by its key within the job's library.
     templates.env.globals["playlist_key"] = lib.key_for
     # The product name has one source of truth (ytop.product).
@@ -729,10 +736,15 @@ def create_app(
         ref = home_library()
         return ref.label if ref is not None else "library"
 
+    version_label = f"{product.NAME} {ytop_version}" + (
+        f" (build {ytop_build})" if ytop_build else ""
+    )
+
     def chrome_context() -> dict:
-        """What base.html shows on every page (the portable banner)."""
+        """What base.html shows on every page (the portable banner, the
+        version in the footer)."""
         if not portable:
-            return {"portable": False}
+            return {"portable": False, "version_label": version_label}
         launch = next((ref for ref in libs.libraries() if ref.is_launch), None)
         label = (
             launch.label if launch is not None
@@ -741,6 +753,7 @@ def create_app(
         )
         return {
             "portable": True,
+            "version_label": version_label,
             "launch_label": label,
             "launch_connected": launch is not None,
             "runs_from_cache": runs_from_cache,
@@ -1500,6 +1513,93 @@ def create_app(
             )
         return RedirectResponse("/storage", status_code=303)
 
+    # -- settings ----------------------------------------------------------
+    def _render_settings(request: Request, error: str = "", status_code: int = 200):
+        home_ref = home_library()
+        have = adds.platforms()
+        build: dict = {}
+        if adds.ytop is not None:
+            try:
+                build = json.loads((adds.ytop / "build.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                build = {}
+        sizes = build.get("sizes") if isinstance(build.get("sizes"), dict) else {}
+        response = render(
+            request,
+            "settings.html",
+            error=error,
+            stick=adds.available,
+            stick_ref=home_ref,
+            platforms=[
+                {"key": plat, "label": platform_label(plat),
+                 "size": int(sizes.get(plat) or 0)}
+                for plat in have
+            ],
+            missing_platforms=[
+                {"key": plat, "label": platform_label(plat)}
+                for plat in PLATFORMS if plat not in have
+            ],
+            adding=adds.status(),
+            components=auto.status(),
+            app_updates=releases.status(),
+            update_running=any(
+                job.active and job.kind == "update" for job in app.state.jobs.list()
+            ),
+            download_config=load_config(update_root) if update_root is not None else None,
+            download_library=home_ref,
+            height_choices=[0, 480, 720, 1080, 1440, 2160],
+            floor_choices=[0, 240, 360, 480],
+        )
+        response.status_code = status_code
+        return response
+
+    @app.get("/settings")
+    def settings_page(request: Request):
+        return _render_settings(request)
+
+    @app.post("/settings/platforms")
+    async def settings_add_platforms(request: Request):
+        form = await request.form()
+        wanted = [str(value) for value in form.getlist("platforms")]
+        try:
+            adds.start(wanted)
+        except ValueError as exc:
+            return _render_settings(request, str(exc), status_code=409)
+        return RedirectResponse("/settings#this-stick", status_code=303)
+
+    @app.post("/settings/downloads")
+    async def settings_downloads(request: Request):
+        form = await request.form()
+        if update_root is None:
+            raise HTTPException(status_code=409, detail="No library is connected.")
+
+        def number(name: str, kind: type, default: float) -> float:
+            raw = str(form.get(name) or "").strip()
+            try:
+                return kind(raw) if raw else default
+            except ValueError:
+                raise ValueError(f"{name.replace('_', ' ')}: {raw!r} is not a number") from None
+
+        try:
+            current = load_config(update_root)
+            updated = replace(
+                current,
+                target_mb_per_hour=float(number("target_mb_per_hour", float,
+                                                current.target_mb_per_hour)),
+                max_height=int(number("max_height", int, 0)),
+                min_height=int(number("min_height", int, 0)),
+                jobs=int(number("jobs", int, current.jobs)),
+                audio_language=str(form.get("audio_language") or "").strip()[:20],
+                quick_analysis=form.get("quick_analysis") == "1",
+            )
+            if not 1 <= updated.jobs <= 4:
+                raise ValueError("parallel downloads must be between 1 and 4")
+            save_config(update_root, updated)
+        except (OSError, ValueError) as exc:
+            return _render_settings(request, f"Could not save the settings: {exc}",
+                                    status_code=400)
+        return RedirectResponse("/settings#downloads", status_code=303)
+
     @app.post("/storage/components/update")
     def components_update():
         try:
@@ -1518,8 +1618,8 @@ def create_app(
                 update_root, "check_components", form.get("check_components") == "1"
             )
         except (OSError, ValueError) as exc:
-            return _render_storage(request, f"Could not save the setting: {exc}")
-        return RedirectResponse("/storage", status_code=303)
+            return _render_settings(request, f"Could not save the setting: {exc}")
+        return RedirectResponse("/settings", status_code=303)
 
     # -- app updates -------------------------------------------------------
     @app.post("/app-update/answer")
@@ -1544,8 +1644,8 @@ def create_app(
         try:
             set_updates_option(update_root, "check_app", form.get("check_app") == "1")
         except (OSError, ValueError) as exc:
-            return _render_storage(request, f"Could not save the setting: {exc}")
-        return RedirectResponse("/storage", status_code=303)
+            return _render_settings(request, f"Could not save the setting: {exc}")
+        return RedirectResponse("/settings", status_code=303)
 
     @app.post("/app-update/check")
     async def app_update_check():
@@ -1651,12 +1751,20 @@ def create_app(
         )
         available = [str(plat) for plat in (build or {}).get("platforms") or []]
         # Ticked platforms: the ones asked for, else (upgrading) the ones the
-        # stick already starts on, else all of them.  The upgrade summary is
-        # counted for exactly these, not for every platform the image has.
+        # stick already starts on, else this computer's and Windows (more
+        # can be added later from Settings), else all of them.  The upgrade
+        # summary is counted for exactly these, not for every platform the
+        # image has.
         checked = [plat for plat in available if plat in set(platforms or [])]
         if not checked and info is not None and info.mode == "upgrade":
             have = (info.image_build or {}).get("platforms") or []
             checked = [plat for plat in available if plat in set(map(str, have))]
+        if not checked:
+            try:
+                here = current_platform()
+            except UnsupportedPlatform:
+                here = ""
+            checked = [plat for plat in available if plat in (here, "windows-x86_64")]
         if not checked:
             checked = available
         upgrade_line = ""

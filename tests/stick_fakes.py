@@ -49,11 +49,13 @@ PRUNED_PYTHON = {
         "share/man/man1/python3.12.1",
         # Case-only twins, as in python-build-standalone's terminfo.
         "share/terminfo/p/putty", "share/terminfo/P/P12",
+        "include/python3.12/Python.h",
     ],
     "windows": [
         "Scripts/pip.exe", "Lib/site-packages/pip/__init__.py",
         "DLLs/_tkinter.pyd", "DLLs/tcl86t.dll", "DLLs/tk86t.dll",
         "DLLs/_testcapi.pyd", "DLLs/_ctypes_test.pyd", "tcl/tcl8.6/init.tcl",
+        "include/Python.h", "libs/python312.lib",
     ],
 }
 KEPT_PYTHON = {

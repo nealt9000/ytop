@@ -111,11 +111,15 @@ PRUNE_UNIX = (
     # Man pages and curses terminfo, which YTOP never uses; terminfo also has
     # names differing only by case (p/ and P/) that no stick filesystem holds.
     "share",
+    # C headers, only for compiling extensions (214 files a platform).
+    "include",
 )
 PRUNE_WINDOWS = (
     "tcl", "Scripts", "Lib/site-packages/pip*",
     "DLLs/_tkinter.pyd", "DLLs/tcl*.dll", "DLLs/tk*.dll",
     "DLLs/_test*.pyd", "DLLs/_ctypes_test.pyd",
+    # C headers and import libraries, only for compiling extensions.
+    "include", "libs",
 )
 # Paths of the image that the builder owns (rebuilt from scratch every run).
 IMAGE_PARTS = ("app", "lib", "runtime", "boot.py", *LEGAL_FILES, "build.json")

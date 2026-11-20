@@ -133,6 +133,10 @@ def test_redact():
     assert redact("socks5h://user@h:1 and http://a:b@c") == "socks5h://***@h:1 and http://***@c"
 
 
+def test_redact_password_containing_at_sign():
+    assert redact("x https://u:p@ss@h:89/y") == "x https://***@h:89/y"
+
+
 def test_region_blocked_message():
     assert region_blocked_message(["US", "CA"], 2) == "Region-blocked: available in US, CA (tried 2 proxies)"
     assert region_blocked_message(["US"], 1).endswith("(tried 1 proxy)")

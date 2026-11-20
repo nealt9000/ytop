@@ -65,7 +65,7 @@ def is_region_blocked(error: BaseException | str | None) -> bool:
 
 
 _proxy: contextvars.ContextVar[str | None] = contextvars.ContextVar("ytop_proxy", default=None)
-_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]*@")
 _SHOWN_COUNTRIES = 8
 
 

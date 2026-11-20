@@ -732,9 +732,12 @@ Against the real GEB library:
   timings from that DOM instead of a second JSON copy. A 1-hour lecture is still
   ~600 KiB, which is fine on localhost; a later version can render it from the
   transcript API in bounded batches.
-- Probing a large playlist performs one full metadata extraction per video. It is
-  parallelised (`probe_jobs`, default 4) and runs in the background with progress,
-  but it is intentionally not instant (~2 minutes for 121 videos here).
+- Probing a large playlist performs one metadata extraction per video not yet
+  downloaded. It reads formats only, without running YouTube's player JavaScript
+  (`quick_analysis`, default on; a video left without a usable format is read
+  fully), is parallelised (`probe_jobs`, default 4) and runs in the background
+  with progress. **How long each step took** on the review shows where the time
+  went.
 - The efficient policy trades resolution for storage. It keeps a 240p floor and
   shows both estimates before download; choose **Native** for the best available
   rendition. No re-encoding is performed in either mode.

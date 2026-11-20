@@ -113,6 +113,9 @@ class Config:
     request_interval: float = 0.5
     # A stalled socket must not leave a probe job "running" forever.
     socket_timeout: float = 30.0
+    # Analyse videos without running YouTube's player JavaScript (the
+    # format list is the same; downloads still read each video fully).
+    quick_analysis: bool = True
     audio_language: str = "en"
     # Treat mounted volumes with a ytop layout as library locations.
     detect_removable: bool = True
@@ -226,6 +229,7 @@ def load_config(library_root: Path | None = None) -> Config:
         retries=int(download.get("retries", 3)),
         request_interval=float(download.get("request_interval", 0.5)),
         socket_timeout=float(download.get("socket_timeout", 30.0)),
+        quick_analysis=bool(download.get("quick_analysis", True)),
         audio_language=str(download.get("audio_language") or ""),
         detect_removable=bool(paths.get("detect_removable", True)),
         pot_provider=str(pot.get("provider", "auto")),
@@ -277,6 +281,7 @@ def save_config(library_root: Path, cfg: Config) -> None:
         "retries": cfg.retries,
         "request_interval": cfg.request_interval,
         "socket_timeout": cfg.socket_timeout,
+        "quick_analysis": cfg.quick_analysis,
         "audio_language": cfg.audio_language,
     }
     t = cfg.transcripts

@@ -639,7 +639,7 @@ def test_probe_reports_time_per_step(monkeypatch):
     def fake_listing(value, config, limit=None, cache_root=None):
         return value, {"id": "PL1", "title": "List", "entries": entries}
 
-    def fake_video(video_id, config, cache_root=None):
+    def fake_video(video_id, config, cache_root=None, **kwargs):
         if video_id == "bad":
             raise probe_mod.ProbeError("gone")
         return {
@@ -684,7 +684,7 @@ def real_probe(monkeypatch, fake_network):
         return value, {"id": "PL1", "title": "Test List", "channel": "Channel",
                        "entries": entries}
 
-    def video(video_id, config, cache_root=None):
+    def video(video_id, config, cache_root=None, **kwargs):
         extracted.append(video_id)
         info = next(i.info for i in state["items"] if i.id == video_id)
         return dict(info)
@@ -811,7 +811,7 @@ def test_probe_skips_videos_the_library_has(monkeypatch):
         ),
     )
 
-    def video(video_id, config, cache_root=None):
+    def video(video_id, config, cache_root=None, **kwargs):
         extracted.append(video_id)
         return item(1, video_id).info
 
@@ -831,3 +831,54 @@ def test_probe_skips_videos_the_library_has(monkeypatch):
     assert [i.id for i in probe.existing] == ["old"]
     assert probe.estimated_bytes == new.selection.estimated_bytes
     assert "1 already in the library" in probe.timings[1].note
+
+
+def test_analysis_reads_formats_only_and_falls_back(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    calls: list[tuple[str, bool]] = []
+    good = item(1, "x").info
+
+    def video(video_id, config, cache_root=None, *, quick=False):
+        calls.append((video_id, quick))
+        if quick and video_id == "muxed-only":
+            return {"id": video_id, "formats": []}  # only format 18 had video
+        return dict(good, id=video_id)
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    info, selection = probe_mod.analyse_video("plain", Config())
+    assert calls == [("plain", True)]
+    assert selection.video["format_id"] == "395"
+
+    calls.clear()
+    info, selection = probe_mod.analyse_video("muxed-only", Config())
+    assert calls == [("muxed-only", True), ("muxed-only", False)]
+    assert info["id"] == "muxed-only"
+
+    calls.clear()
+    probe_mod.analyse_video("plain", Config(quick_analysis=False))
+    assert calls == [("plain", False)]
+
+
+def test_quick_extraction_skips_the_player_js(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    seen: list[dict] = []
+
+    def extract(url, opts):
+        seen.append(opts)
+        return {"id": "v", "formats": []}
+
+    monkeypatch.setattr(probe_mod, "_extract", extract)
+    monkeypatch.setattr(
+        probe_mod, "base_options",
+        lambda config, cache_root=None: {
+            "extractor_args": {"youtubepot-bgutilscript": {"server_home": ["/s"]}},
+        },
+    )
+    probe_mod.extract_video_info("v", Config(), quick=True)
+    probe_mod.extract_video_info("v", Config())
+    quick, full = seen
+    assert quick["extractor_args"]["youtube"] == {"player_skip": ["js"]}
+    assert quick["extractor_args"]["youtubepot-bgutilscript"] == {"server_home": ["/s"]}
+    assert "youtube" not in full["extractor_args"]

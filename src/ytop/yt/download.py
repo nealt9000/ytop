@@ -58,6 +58,7 @@ from .probe import (
     JobCancelled,
     ProbedItem,
     ProbeResult,
+    analyse_video,
     base_options,
     classify_failure,
     extract_video_info,
@@ -505,12 +506,12 @@ def _process_item(
         if cancel is not None and cancel():
             raise JobCancelled("cancelled by the user")
         try:
-            item.info = extract_video_info(item.id, config, layout.root)
+            item.info, item.selection = analyse_video(
+                item.id, config, layout.root,
+                max_height=max_height, preserve_audio=preserve_audio,
+            )
             item.title = str(item.info.get("title") or item.title)
             item.duration = item.info.get("duration") or item.duration
-            item.selection = select_format(
-                item.info, config.audio_language, max_height, preserve_audio
-            )
         except JobCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - reported like a failed probe

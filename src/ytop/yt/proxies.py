@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import contextvars
 import re
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from yt_dlp.utils import DownloadError, GeoRestrictedError
+
+from ..config import Config, ProxyServer
 
 REGION_BLOCKED = re.compile(
     r"not made this video available in your country"
@@ -56,3 +62,85 @@ def is_region_blocked(error: BaseException | str | None) -> bool:
             return True
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return False
+
+
+_proxy: contextvars.ContextVar[str | None] = contextvars.ContextVar("ytop_proxy", default=None)
+_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]*@")
+_SHOWN_COUNTRIES = 8
+
+
+@contextmanager
+def using_proxy(url: str | None) -> Iterator[None]:
+    """Route this context's yt-dlp calls through ``url`` (None: direct)."""
+    token = _proxy.set(url)
+    try:
+        yield
+    finally:
+        _proxy.reset(token)
+
+
+def active_proxy() -> str | None:
+    return _proxy.get()
+
+
+def proxy_url(server: ProxyServer, config: Config) -> str:
+    """The server's URL with the shared login added when it has none."""
+    if not config.proxy_username:
+        return server.url
+    parts = urlsplit(server.url)
+    if "@" in parts.netloc:
+        return server.url
+    login = f"{quote(config.proxy_username, safe='')}:{quote(config.proxy_password, safe='')}"
+    return urlunsplit(parts._replace(netloc=f"{login}@{parts.netloc}"))
+
+
+def order_proxies(servers: Sequence[ProxyServer],
+                  countries: list[str] | None) -> list[ProxyServer]:
+    """Servers worth trying for a video offered in ``countries``."""
+    if not countries:
+        return list(servers)
+    wanted = {c.upper() for c in countries}
+    matching = [s for s in servers if s.country and s.country.upper() in wanted]
+    return matching + [s for s in servers if not s.country]
+
+
+def redact(text: str) -> str:
+    """Hide proxy logins (``scheme://user:pass@``) in any text."""
+    return _USERINFO.sub(r"\1***@", text)
+
+
+def region_blocked_message(countries: list[str] | None, tried: int) -> str:
+    """The user-facing reason; ``tried`` is the proxies attempted, or -1
+    when none are set up."""
+    if countries:
+        shown = ", ".join(countries[:_SHOWN_COUNTRIES])
+        extra = len(countries) - _SHOWN_COUNTRIES
+        text = f"Region-blocked: available in {shown}" + (f" and {extra} more" if extra > 0 else "")
+    else:
+        text = "Region-blocked: available only in other countries"
+    if tried < 0:
+        return text + " (no proxies set up)"
+    if tried == 0:
+        return text + " (no proxy set up for those countries)"
+    return text + f" (tried {tried} {'proxy' if tried == 1 else 'proxies'})"
+
+
+def covering_countries(blocked: list[list[str] | None],
+                       offered: set[str] | None = None) -> list[str]:
+    """Few countries that together offer every video with a known list
+    (greedy; ties go to the alphabetically first code)."""
+    remaining = []
+    for codes in blocked:
+        have = {c for c in (codes or []) if offered is None or c in offered}
+        if have:
+            remaining.append(have)
+    chosen: list[str] = []
+    while remaining:
+        counts: dict[str, int] = {}
+        for have in remaining:
+            for code in have:
+                counts[code] = counts.get(code, 0) + 1
+        best = min(counts, key=lambda c: (-counts[c], c))
+        chosen.append(best)
+        remaining = [have for have in remaining if best not in have]
+    return chosen

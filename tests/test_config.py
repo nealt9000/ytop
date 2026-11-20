@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from ytop.config import SESSION_AUTH, Config, load_config, save_config
+from dataclasses import replace
+
+from ytop.config import SESSION_AUTH, Config, ProxyServer, load_config, save_config
 from ytop.layout import LibraryLayout
 
 
@@ -199,3 +201,17 @@ def test_quick_analysis_defaults_on_and_round_trips(tmp_path: Path):
     assert load_config(tmp_path).quick_analysis is True
     save_config(tmp_path, Config(quick_analysis=False))
     assert load_config(tmp_path).quick_analysis is False
+
+
+def test_proxies_round_trip(tmp_path: Path):
+    cfg = replace(Config(), proxies=(ProxyServer("https://us1.example:89", "US"), ProxyServer("socks5h://h:1080")),
+                  proxy_username="u@x", proxy_password='p"w')
+    save_config(tmp_path, cfg)
+    assert load_config(tmp_path).proxies == cfg.proxies
+    assert load_config(tmp_path).proxy_username == "u@x"
+    assert load_config(tmp_path).proxy_password == 'p"w'
+
+
+def test_no_proxies_section_when_unused(tmp_path: Path):
+    save_config(tmp_path, Config())
+    assert "[proxies]" not in LibraryLayout(tmp_path).config_file.read_text(encoding="utf-8")

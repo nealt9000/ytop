@@ -26,7 +26,7 @@ from .formats import (
     select_format,
 )
 from .pot import apply_auth_options
-from .proxies import countries_of, is_region_blocked
+from .proxies import active_proxy, countries_of, is_region_blocked
 
 
 class ProbeError(RuntimeError):
@@ -190,6 +190,9 @@ def base_options(config: Config, cache_root: Path | None = None) -> dict:
         os.environ.setdefault("DENO_DIR", str(deno_dir(cache_root)))
         os.environ.setdefault("XDG_CACHE_HOME", str(deno_dir(cache_root).parent))
     apply_auth_options(opts, config)
+    proxy = active_proxy()
+    if proxy is not None:
+        opts["proxy"] = proxy
     return opts
 
 

@@ -23,6 +23,7 @@ __all__ = [
     "deno_install",
     "find_native",
     "prepare_server",
+    "prune_node_modules",
 ]
 
 # ``deno install`` fetches npm packages: never let it hang an update.
@@ -39,6 +40,13 @@ NATIVE_MAGIC = (
     b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",  # Mach-O
     b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
 )
+
+
+# Files ``deno run`` never loads: type declarations, source maps and docs.
+# They are ~43% of the server's files (2,576 of 6,010 for 2.0.2), and every
+# file costs a stick copy far more than its bytes do.  Matched by suffix
+# only: a module such as ``History.js`` must never be caught by a name.
+PRUNE_SUFFIXES = (".d.ts", ".d.mts", ".d.cts", ".map", ".md", ".markdown")
 
 
 class ServerError(RuntimeError):
@@ -68,6 +76,19 @@ def find_native(root: Path) -> list[str]:
         if native:
             found.append(path.relative_to(root).as_posix())
     return found
+
+
+def prune_node_modules(node_modules: Path) -> int:
+    """Delete the files under ``node_modules`` that are never loaded at run
+    time (see ``PRUNE_SUFFIXES``); licences stay.  Returns how many went."""
+    removed = 0
+    for path in sorted(node_modules.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.name.lower().endswith(PRUNE_SUFFIXES):
+            path.unlink()
+            removed += 1
+    return removed
 
 
 def deno_install(deno: Path, server: Path) -> None:
@@ -153,6 +174,8 @@ def prepare_server(
         )
         install(deno, server)
         shutil.rmtree(server / "node_modules" / ".bin", ignore_errors=True)
+        if (server / "node_modules").is_dir():
+            prune_node_modules(server / "node_modules")
         native = find_native(server)
         if native:
             raise ServerError(

@@ -94,6 +94,14 @@ the next restart). What we know, to be verified first in the plan:
   setup), not the account login. The owner enters them in Settings; they
   never pass through Claude.
 
+**Spike result (2026-11-20):** confirmed. yt-dlp extracted a test video
+through `https://<service-user>:<service-pass>@pr4.proxy.nordvpn.com:89`.
+Two gotchas: (1) use the `<server>.proxy.nordvpn.com` hostname — the
+proxy's TLS certificate is `*.proxy.nordvpn.com`, so `<server>.nordvpn.com`
+fails hostname verification; (2) the account login gets 407, only the
+service credentials work. Host lookup:
+`api.nordvpn.com/v1/servers/recommendations?filters[servers_technologies][identifier]=proxy_ssl&filters[country_id]=<id>&limit=1`.
+
 So `url` must accept `https://` proxy URLs as well as `socks5://` and
 `http://`; the plan's first task is a spike confirming yt-dlp can use a
 Nord HTTPS proxy. The design stays provider-neutral; Nord appears only in

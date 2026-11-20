@@ -38,6 +38,7 @@
       <a href="/downloads" class="topbar-link{% if request.url.path.startswith('/downloads') or request.url.path.startswith('/jobs') or request.url.path.startswith('/move') %} active{% endif %}"{% if request.url.path.startswith('/downloads') or request.url.path.startswith('/jobs') or request.url.path.startswith('/move') %} aria-current="page"{% endif %}>Downloads</a>
       <a href="/storage" class="topbar-link{% if request.url.path.startswith('/storage') %} active{% endif %}"{% if request.url.path.startswith('/storage') %} aria-current="page"{% endif %}>Storage</a>
       <a href="/make-stick" class="topbar-link{% if request.url.path.startswith('/make-stick') %} active{% endif %}"{% if request.url.path.startswith('/make-stick') %} aria-current="page"{% endif %}>Make a stick</a>
+      <a href="/settings" class="topbar-link{% if request.url.path.startswith('/settings') %} active{% endif %}"{% if request.url.path.startswith('/settings') %} aria-current="page"{% endif %}>Settings</a>
       <span class="topbar-count">{{ playlist_count }} playlist{% if playlist_count != 1 %}s{% endif %}</span>
       {% if portable %}
       <span class="topbar-running">
@@ -78,6 +79,7 @@
   <footer class="footer">
     <span>{{ library_name }}</span>
     <span>Local only · no network required to browse</span>
+    {% if version_label %}<span class="footer-version">{{ version_label }}</span>{% endif %}
   </footer>
 
   <dialog class="confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">

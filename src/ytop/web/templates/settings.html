@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ product_name }}{% endblock %}
+{% block head %}{% if adding.running %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="muted">This stick, updates, and how new downloads are made. Libraries and drives are on <a href="/storage">Storage</a>.</p>
+  </div>
+</section>
+{% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+
+<section class="storage-add" id="this-stick">
+  <h2>This stick</h2>
+  {% if stick %}
+  {% if stick_ref %}
+  <form action="/storage/{{ stick_ref.id }}/label" method="post" class="storage-add-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="/settings">
+    <label class="field compact"><span>Name</span>
+      <input type="text" name="label" maxlength="80" value="{{ stick_ref.label }}"></label>
+    <label class="field compact"><span>Description</span>
+      <input type="text" name="description" maxlength="500" value="{{ stick_ref.info.description if stick_ref.info else '' }}"></label>
+    <button type="submit" class="btn tiny">Save</button>
+  </form>
+  {% endif %}
+  <h3>Starts on</h3>
+  <ul class="platform-list">
+    {% for plat in platforms %}
+    <li>✓ {{ plat.label }}{% if plat.size %} <small class="muted">{{ plat.size|bytes }}</small>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% if adding.running %}
+  <p class="small" role="status">Adding {{ adding.platforms|map("platform")|join(", ") }}: {{ adding.label }}</p>
+  {% else %}
+  {% if adding.result %}
+  <p class="small {% if adding.result.status == 'failed' %}form-error{% endif %}" role="status">{{ adding.result.message }}</p>
+  {% endif %}
+  {% if missing_platforms %}
+  <form action="/settings/platforms" method="post" class="storage-add-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <fieldset class="policy-fieldset">
+      <legend>Add a platform</legend>
+      {% for plat in missing_platforms %}
+      <label class="check-row">
+        <input type="checkbox" name="platforms" value="{{ plat.key }}">
+        <span>{{ plat.label }}</span>
+      </label><br>
+      {% endfor %}
+    </fieldset>
+    <button type="submit" class="btn">Download and add</button>
+    <p class="muted tiny">Downloads just that platform's part of this version of {{ product_name }} (tens of MB each) and checks every file before adding it. Needs the internet; nothing else on the stick changes.</p>
+  </form>
+  {% endif %}
+  {% endif %}
+  {% else %}
+  <p class="muted small">This copy of {{ product_name }} is not running from a stick. <a href="/make-stick">Make a stick</a> to choose its platforms.</p>
+  {% endif %}
+</section>
+
+<section class="storage-add storage-components" id="youtube-parts">
+  <h2>YouTube parts</h2>
+  {% if components.available %}
+  <p class="muted small">
+    The parts {{ product_name }} uses to read and download from YouTube
+    (yt-dlp and its helpers) live on the stick and are updated when YouTube
+    changes. A new version is checked and tested before it is used.
+  </p>
+  <table class="storage-table components-table">
+    <thead><tr><th>Part</th><th>Version</th></tr></thead>
+    <tbody>
+      {% for name, version in components.versions.items() %}
+      <tr>
+        <td data-label="Part"><code>{{ name }}</code></td>
+        <td data-label="Version">{{ version }}
+          {% if components.pinned_bad.get(name) %}<br><span class="muted tiny">Won't use: {{ components.pinned_bad[name]|join(", ") }}</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% for name, pins in components.pinned_bad.items() if name not in components.versions %}
+  <p class="muted tiny">Won't use {{ name }} {{ pins|join(", ") }}</p>
+  {% endfor %}
+  <p class="muted small">
+    {% if components.last_check %}Last checked {{ components.last_check|finished }}{% if components.last_result %} — {{ components.last_result }}{% endif %}.
+    {% else %}Not checked yet.{% endif %}
+    {% if components.restart_needed %}<br>Restart {{ product_name }} to use the new versions everywhere; until then they are used only to retry a download that failed.{% endif %}
+  </p>
+  <div class="storage-add-form">
+    <form action="/storage/components/update" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn" {% if update_running %}disabled title="An update is running"{% endif %}>Update now</button>
+    </form>
+    <form action="/storage/components/settings" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field compact">
+        <input type="checkbox" name="check_components" value="1"
+               {% if components.check_components %}checked{% endif %}>
+        <span>Check for updates to YouTube parts</span>
+      </label>
+      <button type="submit" class="btn tiny ghost">Save</button>
+      <p class="muted tiny">
+        Covers both the daily check and the automatic update after a download
+        fails because YouTube changed. When off, nothing is downloaded until
+        you press Update now.
+      </p>
+    </form>
+  </div>
+  {% else %}
+  <p class="muted small">
+    This copy of {{ product_name }} has no component store (it is not running
+    from a stick), so its YouTube parts are not updated here.
+  </p>
+  {% endif %}
+</section>
+
+<section class="storage-add storage-app-updates" id="updates">
+  <h2>{{ product_name }} updates</h2>
+  {% if app_updates.available %}
+  <p class="muted small">
+    This stick runs {{ product_name }} {{ app_updates.version }}. A new version
+    is shown with what changed and installed only when you say so; only the
+    parts that changed are downloaded, and your library is never touched.
+  </p>
+  <div class="storage-add-form">
+    <form action="/app-update/check" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn">Check now</button>
+    </form>
+    <form action="/storage/app/settings" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field compact">
+        <input type="checkbox" name="check_app" value="1"
+               {% if app_updates.check_app %}checked{% endif %}>
+        <span>Check for {{ product_name }} updates when it starts</span>
+      </label>
+      <button type="submit" class="btn tiny ghost">Save</button>
+    </form>
+  </div>
+  {% if app_updates.offer %}
+  <p class="small">{{ product_name }} {{ app_updates.offer.version }} is available. <a href="/app-update">See what's new</a></p>
+  {% endif %}
+  {% if app_updates.previous %}
+  <form action="/app-update/revert" method="post" class="storage-add-form"
+        data-confirm="Go back to {{ product_name }} {{ app_updates.previous.version }} on this stick? {{ product_name }} quits when it is done; start it again afterwards. Your library and the updated parts for YouTube (yt-dlp and the rest) stay as they are."
+        data-confirm-action="Revert">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="build_id" value="{{ app_updates.previous.build_id }}">
+    <p class="muted small">
+      The version before this one, {{ product_name }} {{ app_updates.previous.version }},
+      is kept on this stick. Going back to it does not change your library or
+      the updated parts for YouTube.
+    </p>
+    <button type="submit" class="btn">Revert to previous version ({{ app_updates.previous.version }})</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <p class="muted small">
+    This copy of {{ product_name }} is not running from a stick, so it is not
+    updated here.
+  </p>
+  {% endif %}
+</section>
+
+
+<section class="storage-add" id="downloads">
+  <h2>Downloads</h2>
+  {% if download_config %}
+  {% set cfg = download_config %}
+  <form action="/settings/downloads" method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted small">How new downloads into {{ download_library.label if download_library else "this library" }} are made. A playlist keeps the quality you last chose for it.</p>
+    <label class="field compact"><span>Efficient budget (MB per hour of video)</span>
+      <input type="number" name="target_mb_per_hour" min="0" step="10" value="{{ cfg.target_mb_per_hour|round|int }}"></label>
+    <label class="field compact"><span>Never above</span>
+      <select name="max_height">
+        {% for h in height_choices %}<option value="{{ h }}"{% if h == cfg.max_height %} selected{% endif %}>{% if h %}{{ h }}p{% else %}no limit{% endif %}</option>{% endfor %}
+      </select></label>
+    <label class="field compact"><span>Never below (when the video has it)</span>
+      <select name="min_height">
+        {% for h in floor_choices %}<option value="{{ h }}"{% if h == cfg.min_height %} selected{% endif %}>{% if h %}{{ h }}p{% else %}no floor{% endif %}</option>{% endfor %}
+      </select></label>
+    <label class="field compact"><span>Audio language</span>
+      <input type="text" name="audio_language" maxlength="20" value="{{ cfg.audio_language }}" placeholder="en"></label>
+    <label class="field compact"><span>Videos downloaded at once</span>
+      <select name="jobs">
+        {% for n in [1, 2, 3, 4] %}<option value="{{ n }}"{% if n == cfg.jobs %} selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select></label>
+    <label class="check-row">
+      <input type="checkbox" name="quick_analysis" value="1"{% if cfg.quick_analysis %} checked{% endif %}>
+      <span>Quick playlist reading <small class="muted">(skips YouTube's player script while reviewing; about 40% faster)</small></span>
+    </label>
+    <button type="submit" class="btn">Save</button>
+  </form>
+  {% else %}
+  <p class="muted small">No library is connected.</p>
+  {% endif %}
+</section>
+{% endblock %}

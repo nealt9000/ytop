@@ -2636,3 +2636,22 @@ def test_parallel_copy_honours_cancel(tmp_path: Path):
         ms._copy_files(src, making, rels, progress, cancelled)
     copied = sum(1 for p in making.rglob("*") if p.is_file())
     assert copied < len(rels)
+
+
+def test_make_stick_page_ticks_this_computer_and_windows(
+    tmp_path: Path, image: Path, monkeypatch,
+):
+    import ytop.web.app as web_app
+
+    home, libs, library = home_library(tmp_path)
+    target = new_target(tmp_path)
+    monkeypatch.setenv("YTOP_IMAGE_ROOT", str(image))
+    monkeypatch.setattr(web_app, "current_platform", lambda: "macos-arm64")
+    client = TestClient(create_app(home.root, libraries=libs))
+    page = client.get("/make-stick", params={"target": str(target)}).text
+    assert 'value="macos-arm64" checked' in page
+    assert 'value="windows-x86_64" checked' in page
+    assert 'value="linux-x86_64">' in page  # offered, not ticked
+    assert "Mac (Apple silicon)" in page
+    assert "add more later from its Settings page" in page
+    client.app.state.jobs.close()

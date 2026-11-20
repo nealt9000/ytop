@@ -40,7 +40,7 @@ select = ["E9", "F63", "F7", "F82", "I"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/ytop/instance.py", "src/ytop/index.py", "src/ytop/tags.py", "src/ytop/web/fsops.py", "src/ytop/web/browse.py", "src/ytop/yt/metadata.py", "src/ytop/layout.py", "src/ytop/fsnames.py", "src/ytop/fsinfo.py", "src/ytop/publish.py", "src/ytop/libraries.py", "src/ytop/migrate.py", "src/ytop/runtime.py", "src/ytop/makestick.py", "src/ytop/manifest.py", "src/ytop/stick/boot.py", "src/ytop/startup.py", "src/ytop/product.py", "src/ytop/components.py", "src/ytop/updater.py", "src/ytop/bgserver.py", "src/ytop/autoupdate.py", "src/ytop/appupdate.py", "src/ytop/yt/runner.py", "tools/ffmpeg-minimal/verify.py", "tools/build_stick.py", "tools/smoke_stick.py", "tools/package_release.py", "tools/ci_fake_release.py", "tools/fake_release_server.py"]
+files = ["src/ytop/instance.py", "src/ytop/index.py", "src/ytop/tags.py", "src/ytop/web/fsops.py", "src/ytop/web/browse.py", "src/ytop/yt/metadata.py", "src/ytop/layout.py", "src/ytop/fsnames.py", "src/ytop/fsinfo.py", "src/ytop/publish.py", "src/ytop/libraries.py", "src/ytop/migrate.py", "src/ytop/runtime.py", "src/ytop/makestick.py", "src/ytop/manifest.py", "src/ytop/stick/boot.py", "src/ytop/startup.py", "src/ytop/product.py", "src/ytop/components.py", "src/ytop/updater.py", "src/ytop/bgserver.py", "src/ytop/autoupdate.py", "src/ytop/appupdate.py", "src/ytop/yt/runner.py", "src/ytop/timing.py", "src/ytop/parallel.py", "src/ytop/stickplatforms.py", "tools/ffmpeg-minimal/verify.py", "tools/build_stick.py", "tools/smoke_stick.py", "tools/package_release.py", "tools/ci_fake_release.py", "tools/fake_release_server.py"]
 check_untyped_defs = true
 ignore_missing_imports = true
 warn_unused_ignores = true

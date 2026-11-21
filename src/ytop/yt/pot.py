@@ -16,6 +16,7 @@ from ..components import server_home
 from ..config import SESSION_AUTH, Config
 from ..runtime import active_runtime
 from ..toolchain import deno_path
+from .signin import active_signin
 
 PLUGIN_DIST = "bgutil-ytdlp-pot-provider"
 
@@ -103,6 +104,7 @@ def apply_auth_options(opts: dict, config: Config) -> None:
             # with the Deno yt-dlp's js_runtimes names (the bundled one).
             args = opts.setdefault("extractor_args", {})
             args["youtubepot-bgutilscript"] = {"server_home": [str(server)]}
-    browser = SESSION_AUTH.apply(config).cookies_from_browser
+    # The age-gate retry's dedicated profile replaces the session browser.
+    browser = active_signin() or SESSION_AUTH.apply(config).cookies_from_browser
     if browser:
         opts["cookiesfrombrowser"] = cookies_from_browser(browser)

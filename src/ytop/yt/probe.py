@@ -27,6 +27,7 @@ from .formats import (
     select_format,
 )
 from .pot import apply_auth_options
+from .signin import is_age_gated
 from .proxies import (
     REGION_BLOCKED,
     active_proxy,
@@ -90,7 +91,7 @@ def is_bot_check(text: str | None) -> bool:
 
 def classify_failure(exc: BaseException | str | None) -> str:
     """``"region_blocked"`` for a video YouTube does not offer in this
-    country, ``"youtube_changed"`` when yt-dlp's error looks like YouTube
+    country, ``"age_restricted"`` for an age-gated one, ``"youtube_changed"`` when yt-dlp's error looks like YouTube
     changed under it (see ``YOUTUBE_CHANGED``), else ``"other"``."""
     texts: list[str] = []
     seen: set[int] = set()
@@ -102,6 +103,8 @@ def classify_failure(exc: BaseException | str | None) -> str:
     text = "\n".join(texts)
     if is_region_blocked(exc):
         return "region_blocked"
+    if is_age_gated(exc) or is_age_gated(text):
+        return "age_restricted"
     if any(pattern.search(text) for _what, pattern in YOUTUBE_CHANGED):
         return "youtube_changed"
     return "other"

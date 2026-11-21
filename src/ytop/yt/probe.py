@@ -27,7 +27,6 @@ from .formats import (
     select_format,
 )
 from .pot import apply_auth_options
-from .signin import is_age_gated
 from .proxies import (
     REGION_BLOCKED,
     active_proxy,
@@ -39,6 +38,7 @@ from .proxies import (
     region_blocked_message,
     using_proxy,
 )
+from .signin import is_age_gated
 
 log = logging.getLogger(__name__)
 

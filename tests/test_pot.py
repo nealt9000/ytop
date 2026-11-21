@@ -160,3 +160,9 @@ def test_linux_cache_layout_finds_the_server_on_the_stick(
     pot.apply_auth_options(opts, Config())
     assert opts["extractor_args"]["youtubepot-bgutilscript"]["server_home"] == [str(server)]
     assert not (cache_root / "components").exists()
+
+
+def test_check_browser_spec():
+    assert pot.check_browser_spec(" firefox:Q6uSzFvx.Profile 1 ") == "firefox:Q6uSzFvx.Profile 1"
+    with pytest.raises(ValueError, match="unknown browser 'netscape'"):
+        pot.check_browser_spec("netscape")

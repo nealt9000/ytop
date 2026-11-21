@@ -215,3 +215,22 @@ def test_proxies_round_trip(tmp_path: Path):
 def test_no_proxies_section_when_unused(tmp_path: Path):
     save_config(tmp_path, Config())
     assert "[proxies]" not in LibraryLayout(tmp_path).config_file.read_text(encoding="utf-8")
+
+
+def test_age_gate_browser_round_trips(tmp_path):
+    save_config(tmp_path, replace(Config(), age_gate_browser="firefox:Q6uSzFvx.Profile 1"))
+    assert load_config(tmp_path).age_gate_browser == "firefox:Q6uSzFvx.Profile 1"
+    assert "[signin]" in LibraryLayout(tmp_path).config_file.read_text()
+
+
+def test_age_gate_browser_absent_is_unset(tmp_path):
+    save_config(tmp_path, Config())
+    text = LibraryLayout(tmp_path).config_file.read_text()
+    assert "[signin]" not in text
+    assert load_config(tmp_path).age_gate_browser == ""
+
+
+def test_save_never_writes_session_cookies(tmp_path):
+    save_config(tmp_path, replace(Config(), cookies_from_browser="brave", age_gate_browser="firefox"))
+    text = LibraryLayout(tmp_path).config_file.read_text()
+    assert "brave" not in text and "cookies" not in text

@@ -148,6 +148,10 @@ class Config:
     proxy_username: str = ""
     proxy_password: str = ""
 
+    # Browser profile used to retry age-gated videos signed in (``[signin]``);
+    # empty = unset. Distinct from the runtime-only ``cookies_from_browser``.
+    age_gate_browser: str = ""
+
     def __post_init__(self) -> None:
         if self.jobs < 1:
             raise ValueError("download.jobs must be at least 1")
@@ -219,6 +223,7 @@ def load_config(library_root: Path | None = None) -> Config:
     web = _section(data, "web")
     updates = _section(data, "updates")
     proxies = _section(data, "proxies")
+    signin = _section(data, "signin")
     servers = proxies.get("servers", [])
     if not isinstance(servers, list) or not all(isinstance(v, dict) for v in servers):
         raise ValueError("config section [[proxies.servers]] must be an array of tables")
@@ -280,6 +285,7 @@ def load_config(library_root: Path | None = None) -> Config:
         ),
         proxy_username=str(proxies.get("username", "")),
         proxy_password=str(proxies.get("password", "")),
+        age_gate_browser=str(signin.get("age_gate_browser", "")).strip(),
     )
 
 
@@ -349,6 +355,8 @@ def save_config(library_root: Path, cfg: Config) -> None:
         for server in cfg.proxies:
             lines += ["", "[[proxies.servers]]", f"url = {_toml_value(server.url)}",
                       f"country = {_toml_value(server.country)}"]
+    if cfg.age_gate_browser:
+        lines += ["", "[signin]", f"age_gate_browser = {_toml_value(cfg.age_gate_browser)}"]
     from .layout import LibraryLayout  # lazy: layout -> yt -> config
 
     path = LibraryLayout(Path(library_root)).config_file

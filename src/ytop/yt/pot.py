@@ -26,6 +26,19 @@ def cookies_from_browser(value: str) -> tuple:
     return tuple((parts + [None, None, None, None])[:4])
 
 
+def check_browser_spec(value: str) -> str:
+    """Return the stripped ``browser[:profile]`` spec, or raise ValueError."""
+    from yt_dlp.cookies import SUPPORTED_BROWSERS
+
+    spec = value.strip()
+    name = spec.split(":", 1)[0].strip().lower()
+    if name not in SUPPORTED_BROWSERS:
+        raise ValueError(
+            f"unknown browser {name!r}; use one of: {', '.join(sorted(SUPPORTED_BROWSERS))}"
+        )
+    return spec
+
+
 def plugin_available() -> bool:
     try:
         importlib.metadata.distribution(PLUGIN_DIST)

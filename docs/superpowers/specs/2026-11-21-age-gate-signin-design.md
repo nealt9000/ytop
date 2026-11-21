@@ -58,6 +58,19 @@ with a **separate Google account made for YTOP**, never the owner's own.
   toggle) stays as it is and is never persisted; this is a separate,
   narrower setting.
 
+**Spike result (2026-11-21):** works. Signed in with the dedicated Firefox
+profile, yt-dlp read an age-gated video directly (1080p offered) and an
+age-gated US-only one through the US proxy (1080p). Three gotchas:
+(1) a bare `firefox` spec let yt-dlp pick a stale, unlisted profile folder
+(no YouTube login), so the setting must hold the **explicit profile**
+(`firefox:<profile folder or path>`), and Settings should offer the
+profiles from `profiles.ini`, default first; (2) signed in, YouTube's
+clients need the JS challenge solved, so a JS runtime (Deno) must be
+available; without one the read returns images only, and the `tv` client
+gives "The page needs to be reloaded" (likely the earlier "signed-in is
+broken" finding: the dev checkout had no Deno); (3) the bgutil script
+provider did not start from a dev checkout; the read worked without it.
+
 ## Approaches
 
 1. **Retry age-gated videos signed in with a named browser profile** —

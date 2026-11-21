@@ -162,7 +162,7 @@ def test_classify_failure_age_restricted():
 Behaviour to implement (`analyse_with_fallback`):
 1. Direct read. Age-gated failure → if `config.age_gate_browser`: retry once `with using_signin(config.age_gate_browser)` (config with `retries=1`); success → `(info, sel, None, True)`. Unset → `ProbeError(AGE_RESTRICTED_NEEDS_SIGNIN)`.
 2. Region-blocked → proxy loop as today; when a proxy's attempt fails age-gated: with a profile set, retry that same proxy signed in (success → `(info, sel, url, True)`); without one, stop the loop and raise `ProbeError(AGE_RESTRICTED_NEEDS_SIGNIN + " (also region-blocked; a proxy cleared that)", countries)`.
-3. Signed-in retry failure → `ProbeError("Age-restricted — signed-in retry failed: <reason>")`, where `<reason>` is: `"the YTOP sign-in (<browser name>) could not be read on this computer"` when the exception is a cookie-loading failure (yt-dlp raises before any request: match `could not find .* cookies database|failed to decrypt|keyring|secretstorage` case-insensitively), `"YouTube asked to confirm it is not a bot"` for `is_bot_check(text)`, else `redact(text)[:80]` with any "Sign in to confirm" phrase removed. Show only the browser name (part before `:`), never the profile path.
+3. Signed-in retry failure → `ProbeError("Age-restricted — signed-in retry failed: <reason>")`, where `<reason>` is: `"the YTOP sign-in (<browser name>) could not be read on this computer"` when the exception is a cookie-loading failure (yt-dlp raises before any request: match `could not find .* cookies database|failed to decrypt|keyring|secretstorage` case-insensitively), `"YouTube asked to confirm it is not a bot"` for `is_bot_check(text)`, `"signed-in reads need a JavaScript runtime (Deno), which is missing"` when the text matches `only images are available|n challenge solving failed|requested format is not available`, else `redact(text)[:80]` with any "Sign in to confirm" phrase removed. Show only the browser name (part before `:`), never the profile path.
 
 - [ ] **Step 1: Failing tests** (names and core assertions)
 
@@ -251,8 +251,8 @@ def test_signed_in_failure_is_not_youtube_changed():
 - Test: `tests/test_settings_web.py`, `tests/test_browsers.py` (new)
 
 **Interfaces:**
-- `firefox_profiles(home: Path | None = None) -> list[str]`: specs `firefox:<Path>` for each `[ProfileN]` in `profiles.ini` under `~/.config/mozilla/firefox/` then `~/.mozilla/firefox/` (Linux), `~/Library/Application Support/Firefox/` (macOS), `%APPDATA%/Mozilla/Firefox/` (Windows); `[]` when none. Reads only `profiles.ini`.
-- Form field `browser` (text, `list=` a datalist of `["firefox", *firefox_profiles(), "brave", "chrome"]`), `clear=1` button. Save: `check_browser_spec`, reject control chars (reuse `_CONTROL_CHARS`), `save_config`, redirect `/settings#age-gate`.
+- `firefox_profiles(home: Path | None = None) -> list[str]`: specs `firefox:<absolute profile dir>` for each `[ProfileN]` (relative `Path=` resolved against the ini's folder), the profile named by an `[Install…]` section's `Default=` first in `profiles.ini` under `~/.config/mozilla/firefox/` then `~/.mozilla/firefox/` (Linux), `~/Library/Application Support/Firefox/` (macOS), `%APPDATA%/Mozilla/Firefox/` (Windows); `[]` when none. Reads only `profiles.ini`.
+- Form field `browser` (text, `list=` a datalist of `[*firefox_profiles(), "brave", "chrome"]` (no bare `firefox`: the spike showed yt-dlp may then pick a stale profile)), `clear=1` button. Save: `check_browser_spec`, reject control chars (reuse `_CONTROL_CHARS`), `save_config`, redirect `/settings#age-gate`.
 - Section copy (heading "Age-restricted videos"): "When YouTube asks to confirm a viewer's age, {{ product_name }} tries the video once more signed in with this browser profile. Use a profile signed in only to an account made for {{ product_name }}, not your own." Current value shown as browser name + profile.
 - Reporting: where the templates handle `region_blocked`, add `age_restricted`: show `item.error` / `entry.error`, and when `not age_gate_set` a link "Set up the age sign-in" to `/settings#age-gate`. Playlist page: errors starting with `"Age-restricted"` get the same treatment as `"Region-blocked"`.
 
@@ -261,8 +261,9 @@ def test_signed_in_failure_is_not_youtube_changed():
 ```python
 def test_firefox_profiles_reads_profiles_ini(tmp_path):
     ini = tmp_path / ".config/mozilla/firefox/profiles.ini"; ini.parent.mkdir(parents=True)
-    ini.write_text("[Profile0]\nName=default-release\nPath=Q6uSzFvx.Profile 1\n[General]\n")
-    assert firefox_profiles(tmp_path) == ["firefox:Q6uSzFvx.Profile 1"]
+    ini.write_text("[Profile1]\nName=default\nPath=2ba1l7ed.default\n[Profile0]\nName=default-release\nPath=Q6uSzFvx.Profile 1\n[Install11457493C5A56847]\nDefault=Q6uSzFvx.Profile 1\n")
+    base = tmp_path / ".config/mozilla/firefox"
+    assert firefox_profiles(tmp_path) == [f"firefox:{base / 'Q6uSzFvx.Profile 1'}", f"firefox:{base / '2ba1l7ed.default'}"]
 
 def test_settings_age_gate_saves_and_shows(client, library):
     r = client.post("/settings/age-gate", data={"browser": "firefox"}, headers=SAME_ORIGIN, follow_redirects=False)
@@ -290,6 +291,7 @@ Use the existing fixtures/helpers in `tests/test_settings_web.py` for the client
 
 Only after Tasks 2–6 are merged into the branch, the full suite is green, and ≥30 min since the last full-playlist run.
 
-- [ ] **Step 1:** Save `age_gate_browser = "firefox"` into the stick's config via `save_config(root, replace(load_config(root), age_gate_browser="firefox"))` (back up `config.toml` to the scratchpad first).
+- [ ] **Step 1:** Save `age_gate_browser = "firefox"` into the stick's config via `save_config(root, replace(load_config(root), age_gate_browser="firefox:/home/neal/.config/mozilla/firefox/Q6uSzFvx.Profile 1"))` (back up `config.toml` to the scratchpad first).
+- [ ] **Step 1b:** A dev checkout has no runtime dir, so `deno_path()` is None and yt-dlp falls back to a `deno` on `PATH`. Copy the stick's `.ytop/runtime/linux-x86_64/bin/deno` to `<scratchpad>/deno/deno` (the stick is mounted noexec), `chmod +x`, and run Step 2 with `PATH=<scratchpad>/deno:$PATH`. Signed-in reads need it.
 - [ ] **Step 2:** `uv run ytop fetch PL30RAv-0lkxG17cdEX9qM5Nnl9eSvfjgR --library /run/media/neal/USB321FD > <scratchpad>/run5.log 2>&1` (signed out session; only age-gated videos sign in).
 - [ ] **Step 3: Success:** the 8 age-gated videos (6 direct + `jLBFp2UCACk`, `uxggN_9EPqc` via the US proxy) download; no item fails as age-restricted; already-present videos are kept; proxy password count in the log is 0; no bot-check stop. Report counts to the owner.

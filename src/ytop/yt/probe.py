@@ -38,7 +38,12 @@ from .proxies import (
     region_blocked_message,
     using_proxy,
 )
-from .signin import is_age_gated
+from .signin import (
+    AGE_GATED,
+    AGE_RESTRICTED_NEEDS_SIGNIN,
+    is_age_gated,
+    using_signin,
+)
 
 log = logging.getLogger(__name__)
 
@@ -130,8 +135,12 @@ class ProbedItem:
     proxy: str | None = None
     # Where YouTube offers a region-blocked video, when it said.
     countries: list[str] | None = None
-    # ``"region_blocked"`` when ``error`` is that; else None.
+    # ``"region_blocked"`` or ``"age_restricted"`` when ``error`` is that;
+    # else None.
     error_kind: str | None = None
+    # An age-gated video read signed in with ``Config.age_gate_browser``:
+    # the download must sign in the same way.
+    signed_in: bool = False
 
 
 @dataclass
@@ -338,6 +347,69 @@ def _proxy_failure_reason(redacted: str) -> str:
     return redacted[:80]
 
 
+# yt-dlp could not load the age-gate profile's cookies (it fails before any
+# request is made).
+_COOKIES_UNREADABLE = re.compile(
+    r"could not find .* cookies database|failed to decrypt|keyring|secretstorage",
+    re.IGNORECASE,
+)
+# A signed-in read gets only images or no usable format without a JS runtime.
+_NEEDS_DENO = re.compile(
+    r"only images are available|n challenge solving failed|requested format is not available",
+    re.IGNORECASE,
+)
+_SIGN_IN_TO_CONFIRM = re.compile(r"sign in to confirm", re.IGNORECASE)
+AGE_RESTRICTED_ALSO_REGION = (
+    AGE_RESTRICTED_NEEDS_SIGNIN + " (also region-blocked; a proxy cleared that)"
+)
+
+
+def _signin_failure_reason(text: str, browser: str) -> str:
+    """A short reason the signed-in retry failed.  Names only the browser,
+    never the profile, and never reads as a bot check."""
+    name, _, profile = browser.partition(":")
+    if _COOKIES_UNREADABLE.search(text):
+        return f"the YTOP sign-in ({name}) could not be read on this computer"
+    if is_bot_check(text):
+        return "YouTube asked to confirm it is not a bot"
+    if _NEEDS_DENO.search(text):
+        return "signed-in reads need a JavaScript runtime (Deno), which is missing"
+    text = redact(text)
+    if profile:
+        text = text.replace(profile, "***")
+    return " ".join(_SIGN_IN_TO_CONFIRM.sub("", text).split())[:80]
+
+
+def _analyse_signed_in(
+    video_id: str,
+    config: Config,
+    cache_root: Path | None,
+    *,
+    max_height: int | None,
+    preserve_audio: bool,
+    countries: list[str] | None,
+    cause: BaseException,
+) -> tuple[dict, Selection]:
+    """One read signed in with ``config.age_gate_browser`` (through the
+    context's proxy, if any).  A failure raises an ``"Age-restricted"``
+    ``ProbeError`` chained to ``cause``, not to the failure itself, whose
+    text may carry the profile path."""
+    browser = config.age_gate_browser
+    try:
+        with using_signin(browser):
+            return analyse_video(
+                video_id, replace(config, retries=1), cache_root,
+                max_height=max_height, preserve_audio=preserve_audio,
+            )
+    except JobCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported as the item's reason
+        reason = _signin_failure_reason(str(exc), browser)
+        log.warning("signed-in retry failed for %s: %s", video_id, reason)
+        failure = ProbeError(f"Age-restricted — signed-in retry failed: {reason}", countries)
+    raise failure from cause
+
+
 def analyse_with_fallback(
     video_id: str,
     config: Config,
@@ -345,21 +417,34 @@ def analyse_with_fallback(
     *,
     max_height: int | None = None,
     preserve_audio: bool = False,
-) -> tuple[dict, Selection, str | None]:
+) -> tuple[dict, Selection, str | None, bool]:
     """``analyse_video`` direct; when YouTube says the video is region-blocked,
-    again through each configured proxy that fits, in order.  Returns the
-    proxy URL that worked (None: direct).  Any other direct failure is
-    raised unchanged; a video no proxy opens raises a region-blocked
-    ``ProbeError`` carrying the allowed countries."""
+    again through each configured proxy that fits, in order; when it is
+    age-gated (directly or through the proxy that cleared its region block),
+    once more signed in with ``config.age_gate_browser``.  Returns the proxy
+    URL that worked (None: direct) and whether the read was signed in.  Any
+    other direct failure is raised unchanged; a video no proxy opens raises
+    a region-blocked ``ProbeError`` carrying the allowed countries; an
+    age-gated one that could not be read raises a ``ProbeError`` starting
+    ``"Age-restricted"``."""
     try:
         info, selection = analyse_video(
             video_id, config, cache_root,
             max_height=max_height, preserve_audio=preserve_audio,
         )
-        return info, selection, None
+        return info, selection, None, False
     except (ProbeError, FormatError) as direct:
         if not is_region_blocked(direct):
-            raise
+            if not is_age_gated(direct):
+                raise
+            if not config.age_gate_browser:
+                raise ProbeError(AGE_RESTRICTED_NEEDS_SIGNIN) from direct
+            info, selection = _analyse_signed_in(
+                video_id, config, cache_root,
+                max_height=max_height, preserve_audio=preserve_audio,
+                countries=None, cause=direct,
+            )
+            return info, selection, None, True
         countries = countries_of(direct)
         servers = order_proxies(config.proxies, countries)
         tried = len(servers) if config.proxies else -1
@@ -368,26 +453,43 @@ def analyse_with_fallback(
         last: str | None = None
         for server in servers:
             url = proxy_url(server, config)
-            try:
-                with using_proxy(url):
+            with using_proxy(url):
+                try:
                     info, selection = analyse_video(
                         video_id, proxied, cache_root,
                         max_height=max_height, preserve_audio=preserve_audio,
                     )
-                return info, selection, url
-            except JobCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 - this proxy failed; try the next
-                text = redact(str(exc))
-                log.warning("proxy failed for %s: %s", video_id, text)
-                # not is_region_blocked(): its cause chain reaches the direct failure
-                last = None if REGION_BLOCKED.search(text) else _proxy_failure_reason(text)
+                    return info, selection, url, False
+                except JobCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - this proxy failed; try the next
+                    text = redact(str(exc))
+                    # Its own text only: the cause chain reaches the direct failure.
+                    age_gated = bool(AGE_GATED.search(text)) and not REGION_BLOCKED.search(text)
+                    if not age_gated:
+                        log.warning("proxy failed for %s: %s", video_id, text)
+                        last = None if REGION_BLOCKED.search(text) else _proxy_failure_reason(text)
+                        continue
+                if not config.age_gate_browser:
+                    raise ProbeError(AGE_RESTRICTED_ALSO_REGION, countries) from direct
+                # This proxy cleared the region block: sign in through it.
+                info, selection = _analyse_signed_in(
+                    video_id, config, cache_root,
+                    max_height=max_height, preserve_audio=preserve_audio,
+                    countries=countries, cause=direct,
+                )
+                return info, selection, url, True
         raise ProbeError(region_blocked_message(countries, tried, last), countries) from direct
 
 
 def _record_failure(item: ProbedItem, exc: BaseException) -> None:
     item.error = redact(str(exc))
-    if is_region_blocked(exc):
+    # Before the region check: an age-gated video read through a proxy
+    # carries the region-blocked direct failure as its cause.
+    if item.error.startswith("Age-restricted"):
+        item.error_kind = "age_restricted"
+        item.countries = countries_of(exc)
+    elif is_region_blocked(exc):
         item.error_kind = "region_blocked"
         item.countries = countries_of(exc)
 
@@ -431,7 +533,7 @@ def probe_video(
     try:
         if cancel is not None and cancel():
             raise JobCancelled("cancelled by the user")
-        info, item.selection, item.proxy = analyse_with_fallback(
+        info, item.selection, item.proxy, item.signed_in = analyse_with_fallback(
             video_id, config, cache_root,
             max_height=max_height, preserve_audio=preserve_audio,
         )
@@ -518,7 +620,7 @@ def probe_playlist(
         try:
             # Provisional selection; the playlist-wide budget is allocated
             # after every item has been probed.
-            info, item.selection, item.proxy = analyse_with_fallback(
+            info, item.selection, item.proxy, item.signed_in = analyse_with_fallback(
                 item.id, config, cache_root,
                 max_height=max_height, preserve_audio=preserve_audio,
             )

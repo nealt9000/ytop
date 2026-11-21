@@ -1588,6 +1588,7 @@ class JobManager:
                 return False
             item.info, item.selection, item.error = fresh.info, fresh.selection, None
             item.proxy = fresh.proxy
+            item.signed_in = fresh.signed_in
             item.title = fresh.title or item.title
             item.duration = fresh.duration or item.duration
             return True

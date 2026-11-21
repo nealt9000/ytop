@@ -259,7 +259,9 @@ ytop --library <path> <command>        # pick the launch library
 nothing is deleted. Videos already downloaded are not read from YouTube again
 (only a changed title is taken from the playlist listing), so a sync costs only
 the new videos; `--refresh` re-reads their descriptions, thumbnails, audio
-tracks and missing transcripts too. Playlist order, descriptions,
+tracks and missing transcripts too. After raising the quality setting,
+`--upgrade` re-downloads only the videos saved below it (those at or above it
+are not read again) and keeps any video YouTube offers no taller. Playlist order, descriptions,
 thumbnails and chapters are stored beside each video. A metadata sync preserves
 the transcript blocks written by `ytop transcripts`.
 

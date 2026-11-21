@@ -1214,3 +1214,107 @@ def test_direct_download_failure_can_be_youtube_changed(tmp_path, fake_network):
     _failing_download(state, "Unable to extract player; Signature extraction failed")
     result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
     assert result.items[0].error_kind == "youtube_changed"
+
+
+def _with_heights(entry: ProbedItem, *heights: int) -> ProbedItem:
+    """``entry`` offering extra AV1 renditions at ``heights``."""
+    for h in heights:
+        entry.info["formats"].append(
+            {"format_id": f"av{h}", "vcodec": "av01.0.05M.08", "acodec": "none",
+             "height": h, "width": h * 16 // 9, "fps": 24, "ext": "webm"},
+        )
+    return entry
+
+
+def _stored_height(result, video_id: str) -> int:
+    meta = json.loads((result.playlist_dir / f"videos/{video_id}/meta.json").read_text())
+    return meta["format"]["height"]
+
+
+def test_upgrade_redownloads_videos_below_the_cap(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    first = download_mod.fetch_playlist("PL1", cfg, library_root=root)
+    assert _stored_height(first, "vid1") == 240
+
+    _with_heights(state["items"][0], 720, 1080)
+    extracted.clear()
+    calls.clear()
+    result = download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, upgrade=True,
+        max_height=720, target_mb_per_hour=0,
+    )
+    assert extracted == ["vid1"]
+    assert calls == ["vid1"]
+    assert [i.status for i in result.items] == ["downloaded"]
+    assert _stored_height(result, "vid1") == 720
+    folder = LibraryLayoutFor(root).media_root / "Test List"
+    assert sorted(p.name for p in folder.glob("*.webm")) == ["01 - Video vid1.webm"]
+
+
+def test_upgrade_leaves_videos_at_or_above_the_cap_unread(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    state["items"] = [_with_heights(item(1, "vid1"), 1080), item(2, "vid2")]
+    root = make_library(tmp_path).root
+    cfg = Config()
+    first = download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, max_height=0, target_mb_per_hour=0,
+    )
+    assert _stored_height(first, "vid1") == 1080
+    assert _stored_height(first, "vid2") == 240
+
+    _with_heights(state["items"][1], 720)
+    extracted.clear()
+    calls.clear()
+    result = download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, upgrade=True,
+        max_height=720, target_mb_per_hour=0,
+    )
+    assert extracted == ["vid2"]  # the 1080p video is not read again
+    assert calls == ["vid2"]
+    assert _stored_height(result, "vid1") == 1080
+    assert _stored_height(result, "vid2") == 720
+
+
+def test_upgrade_keeps_media_when_nothing_better_is_offered(tmp_path: Path, real_probe):
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist("PL1", cfg, library_root=root)
+
+    extracted.clear()
+    calls.clear()
+    result = download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, upgrade=True,
+        max_height=720, target_mb_per_hour=0,
+    )
+    assert extracted == ["vid1"]
+    assert calls == []
+    assert [i.status for i in result.items] == ["skipped"]
+    assert _stored_height(result, "vid1") == 240
+
+
+def test_upgrade_without_a_cap_rereads_every_downloaded_video(
+    tmp_path: Path, real_probe,
+):
+    calls, state, extracted = real_probe
+    state["items"] = [_with_heights(item(1, "vid1"), 1080)]
+    root = make_library(tmp_path).root
+    cfg = Config()
+    download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, max_height=0, target_mb_per_hour=0,
+    )
+    extracted.clear()
+    calls.clear()
+    download_mod.fetch_playlist(
+        "PL1", cfg, library_root=root, upgrade=True,
+        max_height=0, target_mb_per_hour=0,
+    )
+    assert extracted == ["vid1"]
+    assert calls == []
+
+
+def LibraryLayoutFor(root: Path):
+    from ytop.layout import LibraryLayout
+    return LibraryLayout(root)

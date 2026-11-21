@@ -350,8 +350,16 @@ def _proxy_failure_reason(redacted: str) -> str:
 # yt-dlp could not load the age-gate profile's cookies (it fails before any
 # request is made).
 _COOKIES_UNREADABLE = re.compile(
-    r"could not find .* cookies database|failed to decrypt|keyring|secretstorage",
+    r"could not find .* cookies database|failed to decrypt|keyring|secretstorage"
+    r"|permission denied.*cookie|cookies\.sqlite|cookies database",
     re.IGNORECASE,
+)
+# File paths in an error (a browser profile directory, say): quoted (may
+# hold spaces), Windows ``X:\...``, or POSIX absolute (not a URL's path).
+_PATHS = re.compile(
+    r"""(['"])(?:[A-Za-z]:[\\/]|[/\\~])[^'"]*\1"""
+    r"""|\b[A-Za-z]:\\[^\s'"]*"""
+    r"""|(?<![\w:/.~-])~?/[^\s'"]+"""
 )
 # A signed-in read gets only images or no usable format without a JS runtime.
 _NEEDS_DENO = re.compile(
@@ -374,8 +382,9 @@ def _signin_failure_reason(text: str, browser: str) -> str:
         return "YouTube asked to confirm it is not a bot"
     if _NEEDS_DENO.search(text):
         return "signed-in reads need a JavaScript runtime (Deno), which is missing"
-    text = redact(text)
-    if profile:
+    text = _PATHS.sub("<path>", redact(text))
+    # A bare profile name; a short one ("1") would mask unrelated text.
+    if len(profile) >= 4:
         text = text.replace(profile, "***")
     return " ".join(_SIGN_IN_TO_CONFIRM.sub("", text).split())[:80]
 

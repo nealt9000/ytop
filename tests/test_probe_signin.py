@@ -216,3 +216,43 @@ def test_playlist_age_gated_item_fails_others_probe(fake_analyse, monkeypatch):
     assert plain.error is None and plain.info["id"] == "plain"
     assert plain.signed_in is False
     assert result.bot_blocked is False
+
+
+def test_permission_denied_cookie_db_with_bare_spec_hides_the_path(fake_analyse):
+    def script(vid, proxy, signin):
+        if signin:
+            return PermissionError(
+                "[Errno 13] Permission denied: "
+                "'/home/x/.mozilla/firefox/abcd.default-release/cookies.sqlite'"
+            )
+        return ProbeError(AGE)
+
+    fake_analyse.script = script
+    item = probe_video("vid", Config(age_gate_browser="firefox")).items[0]
+    assert item.error_kind == "age_restricted"
+    assert "could not be read on this computer" in item.error
+    assert "/home" not in item.error and ".mozilla" not in item.error
+
+
+@pytest.mark.parametrize("path", [
+    "/home/x/.mozilla/firefox/abcd.default-release/places.db",
+    "'/home/x/.mozilla/firefox/Secret Profile/x.db'",
+    r"C:\Users\Me\AppData\Roaming\Mozilla\Firefox\Profiles\abcd.default\x.db",
+    r"'C:\Users\Me\AppData\Roaming\Mozilla\Firefox\Profiles\ab cd\x.db'",
+])
+def test_fallback_reason_masks_paths(fake_analyse, path):
+    def script(vid, proxy, signin):
+        return OSError(f"unable to open {path} now") if signin else ProbeError(AGE)
+
+    fake_analyse.script = script
+    item = probe_video("vid", Config(age_gate_browser="firefox")).items[0]
+    assert item.error == "Age-restricted — signed-in retry failed: unable to open <path> now"
+
+
+def test_short_profile_does_not_mangle_unrelated_text(fake_analyse):
+    def script(vid, proxy, signin):
+        return ProbeError("HTTP Error 410: retry 1 of 10") if signin else ProbeError(AGE)
+
+    fake_analyse.script = script
+    item = probe_video("vid", Config(age_gate_browser="firefox:1")).items[0]
+    assert item.error == "Age-restricted — signed-in retry failed: HTTP Error 410: retry 1 of 10"

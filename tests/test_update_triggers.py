@@ -51,12 +51,17 @@ YOUTUBE_CHANGED_CASES = {
 OTHER_CASES = [
     "ERROR: [youtube] abc: Private video. Sign in if you've been granted access",
     "ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader",
-    "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate",
     "ERROR: Unable to download webpage: <urlopen error [Errno -3] "
     "Temporary failure in name resolution>",
     "[Errno 28] No space left on device",
     "the selected rendition is over FAT32's 4 GB file limit",
 ]
+
+
+def test_age_gate_is_age_restricted_not_other():
+    message = "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate"
+    assert classify_failure(message) == "age_restricted"
+    assert classify_failure(OSError(message)) == "age_restricted"
 
 
 def test_classify_failure_table():

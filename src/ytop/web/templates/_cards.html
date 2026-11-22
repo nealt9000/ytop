@@ -53,6 +53,13 @@
         {%- if card.kind == "local" %} · built from your library{% endif %}
         {%- if multi %} · {{ card.library_label }}{% endif %}
       </span>
+      {% if card.quality_summary or card.transcript_count %}
+      <span class="muted tiny playlist-card-quality">
+        {%- if card.quality_summary %}{{ card.quality_summary }}{% endif %}
+        {%- if card.quality_summary and card.transcript_count %} · {% endif %}
+        {%- if card.transcript_count %}{{ card.transcript_count }} transcript{% if card.transcript_count != 1 %}s{% endif %}{% endif %}
+      </span>
+      {% endif %}
     </div>
   </a>
   <div class="playlist-card-foot">

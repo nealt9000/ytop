@@ -45,3 +45,14 @@ def _isolated_deno_dir(monkeypatch):
     """base_options / portable serve set DENO_DIR process-wide: undo it."""
     monkeypatch.setenv("DENO_DIR", "unset-by-test")
     monkeypatch.delenv("DENO_DIR")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_analysis_cache():
+    """Tests script different answers for the same video ids: never reuse
+    another test's analysis (``ytop.yt.probe`` caches reads for hours)."""
+    from ytop.yt import probe
+
+    probe.clear_caches()
+    yield
+    probe.clear_caches()

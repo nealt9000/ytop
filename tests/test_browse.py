@@ -327,3 +327,33 @@ def test_search_hit_for_missing_video_has_no_watch_link(tmp_path: Path) -> None:
     assert missing["url"] is None and missing["available"] is False
     (present,) = groups["P2"].video_hits
     assert present["url"] == "/watch/P2/w1" and present["available"] is True
+
+
+def _set_rendition(layout, playlist_id: str, video_id: str, height: int, codec: str) -> None:
+    path = layout.video_meta_dir(playlist_id, video_id) / "meta.json"
+    meta = read_json(path)
+    meta["format"] = {"height": height, "video_codec": codec,
+                      "audio_codec": "opus", "audio_bitrate": 128}
+    write_json(path, meta)
+
+
+def test_home_cards_show_quality_and_transcripts(tmp_path: Path) -> None:
+    """#7: the cards carry the quality summary and transcript count again."""
+    lib, layout = _lib(tmp_path)
+    _set_rendition(layout, "P1", "v1", 720, "vp09")
+    _set_rendition(layout, "P1", "v2", 1080, "vp09")
+    _set_rendition(layout, "P1", "v3", 1080, "vp09")
+    (layout.video_meta_dir("P1", "v1") / "transcript.json").write_text("{}")
+    card = next(c for c in build_home(lib).all_playlists if c.playlist_id == "P1")
+    assert card.quality_summary == "720p/1080p VP9 · Opus audio"
+    assert card.transcript_count == 1
+
+
+def test_new_playlist_list_shows_each_videos_quality(tmp_path: Path) -> None:
+    from ytop.web.browse import library_videos
+
+    lib, layout = _lib(tmp_path)
+    _set_rendition(layout, "P1", "v1", 720, "avc1.4d401f")
+    row = next(r for r in library_videos(lib) if r["id"] == "v1")
+    assert row["quality_label"] == "720p H.264"
+    assert row["audio_detail"] == "Opus 128k"

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from .layout import LibraryLayout, safe_id
+from .quality import audio_quality, codec_label, number
 from .tags import Tag, TagInput, derive_tags, playlist_category
 from .yt.metadata import find_media, read_json
 
@@ -35,7 +36,7 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-INDEX_SCHEMA = 2
+INDEX_SCHEMA = 3  # 3: per-video rendition (height, codecs, audio detail)
 
 # FAT32 stores modification times to the nearest 2 seconds, so a playlist.json
 # rewritten within 2 s of being indexed can keep the same (mtime, size).  Such
@@ -96,6 +97,10 @@ CREATE TABLE IF NOT EXISTS idx_videos (
     has_transcript INTEGER,
     categories     TEXT,
     yt_tags        TEXT,
+    height         INTEGER,
+    video_codec    TEXT,
+    audio_codec    TEXT,
+    audio_detail   TEXT,
     PRIMARY KEY (playlist_id, video_id)
 );
 CREATE TABLE IF NOT EXISTS idx_tags (
@@ -155,6 +160,29 @@ class VideoRow:
     has_transcript: bool
     categories: tuple[str, ...]
     yt_tags: tuple[str, ...]
+    # The rendition on disk (``ytop.quality`` labels; empty when not downloaded).
+    height: int | None = None
+    video_codec: str = ""
+    audio_codec: str = ""
+    audio_detail: str = ""
+
+    @property
+    def quality_label(self) -> str:
+        return " ".join(p for p in (f"{self.height}p" if self.height else "", self.video_codec) if p)
+
+
+def _rendition(meta: dict) -> dict:
+    """The stored rendition's labels, as the playlist page shows them."""
+    raw = meta.get("format")
+    fmt: dict = raw if isinstance(raw, dict) else {}
+    height = number(fmt.get("height"))
+    audio = audio_quality(meta)
+    return {
+        "height": int(height) if height else None,
+        "video_codec": codec_label(fmt.get("video_codec")),
+        "audio_codec": audio["audio_codec"],
+        "audio_detail": audio["audio_detail"],
+    }
 
 
 @dataclass(frozen=True)
@@ -1032,6 +1060,7 @@ class LibraryIndex:
             _str_tuple(meta.get("categories")) if "categories" in meta else fallback[0]
         )
         yt_tags = _str_tuple(meta.get("tags")) if "tags" in meta else fallback[1]
+        rendition = _rendition(meta) if media is not None else {}
         return VideoRow(
             playlist_id=playlist_id,
             video_id=video_id,
@@ -1048,6 +1077,7 @@ class LibraryIndex:
             or (video_dir / TRANSCRIPT_FILE).is_file(),
             categories=categories,
             yt_tags=yt_tags,
+            **rendition,
         )
 
     @staticmethod
@@ -1072,8 +1102,9 @@ class LibraryIndex:
             INSERT OR REPLACE INTO idx_videos
                 (playlist_id, video_id, position, title, channel, description,
                  duration, upload_date, media_ref, media_bytes, available,
-                 has_transcript, categories, yt_tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 has_transcript, categories, yt_tags, height, video_codec,
+                 audio_codec, audio_detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -1081,6 +1112,7 @@ class LibraryIndex:
                     r.description, r.duration, r.upload_date, r.media_ref,
                     r.media_bytes, int(r.available), int(r.has_transcript),
                     json.dumps(list(r.categories)), json.dumps(list(r.yt_tags)),
+                    r.height, r.video_codec, r.audio_codec, r.audio_detail,
                 )
                 for r in rows
             ],
@@ -1349,6 +1381,10 @@ class LibraryIndex:
                     has_transcript=bool(row["has_transcript"]),
                     categories=_json_tuple(row["categories"]),
                     yt_tags=_json_tuple(row["yt_tags"]),
+                    height=int(row["height"]) if row["height"] else None,
+                    video_codec=row["video_codec"] or "",
+                    audio_codec=row["audio_codec"] or "",
+                    audio_detail=row["audio_detail"] or "",
                 )
             )
         return [

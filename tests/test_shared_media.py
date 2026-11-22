@@ -146,24 +146,25 @@ def test_remove_reference_keeps_owner(home: LibraryLayout):
     assert media_references(home, owner_ref) == [(SOURCE_ID, "vidb")]
 
 
-def test_remove_video_keeping_media_drops_the_reference(home: LibraryLayout):
+def test_removing_a_video_leaves_nothing_behind(home: LibraryLayout):
+    """Removing a video takes its media, subtitles, alternate audio and meta
+    with it, so adding and removing videos over time leaves no files."""
     library = Library(library_set(home))
-    mix = library.create_playlist("Mix", [(SOURCE_ID, "vidb")])
-    assert mix is not None
-    unshared = library.media_path(SOURCE_ID, "vida")
+    media = library.media_path(SOURCE_ID, "vida")
+    assert media is not None
+    srt = media.with_name(f"{media.stem}.en.srt")
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+    audio = home.video_meta_dir(SOURCE_ID, "vida") / "audio"
+    audio.mkdir(exist_ok=True)
+    (audio / "fr.m4a").write_bytes(b"french")
 
-    # Shared: the entry's meta goes and ownership moves to the reference.
-    assert library.remove_video(SOURCE_ID, "vidb", delete_media=False)
-    assert not home.video_meta_dir(SOURCE_ID, "vidb").exists()
-    ref = _media_ref(home, mix, "vidb")
-    assert media_references(home, ref) == [(mix, "vidb")]
-    assert library.media_path(mix, "vidb") is not None
+    assert library.remove_video(SOURCE_ID, "vida")
 
-    # Unshared: the file stays on disk, but no meta still counts as using it.
-    assert library.remove_video(SOURCE_ID, "vida", delete_media=False)
+    assert not media.exists() and not srt.exists()
     assert not home.video_meta_dir(SOURCE_ID, "vida").exists()
-    assert unshared.is_file()
-    assert media_references(home, home.relative_media(unshared)) == []
+    left = sorted(p.name for p in (home.media_root / "Source").iterdir())
+    assert left == ["01 - Video B.webm", "folder.jpg"]  # B only renumbered
+    assert media_references(home, home.relative_media(media)) == []
 
 
 def test_cross_library_selection_copies(home: LibraryLayout, tmp_path: Path):

@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from typing import Iterable
 from urllib.parse import urlsplit
 
-from ..yt.proxies import active_proxy
+from ..yt.proxies import active_proxy, redact
+from ..yt.signin import active_signin
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -154,6 +155,51 @@ def _retry_after(error: urllib.error.HTTPError) -> float | None:
         return None
 
 
+def _opener_params(timeout: float) -> dict | None:
+    """yt-dlp options carrying this context's proxy and age-gate sign-in (the
+    ones that read the video), or None when neither is active."""
+    proxy, signin = active_proxy(), active_signin()
+    if proxy is None and not signin:
+        return None
+    params: dict = {"quiet": True, "no_warnings": True, "socket_timeout": timeout}
+    if proxy is not None:
+        params["proxy"] = proxy
+    if signin:
+        from ..yt.pot import signin_cookies
+
+        params["cookiesfrombrowser"] = signin_cookies(signin)
+    return params
+
+
+def _read(request: urllib.request.Request, timeout: float, limit: int) -> bytes:
+    """Read ``request``'s body (at most ``limit`` bytes).  A video read through
+    a region proxy or the age-gate sign-in has its captions fetched through
+    them too, with yt-dlp's opener (which also speaks SOCKS).  Errors come out
+    as urllib's, with proxy credentials removed."""
+    params = _opener_params(timeout)
+    if params is None:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read(limit)
+    from yt_dlp import YoutubeDL
+    from yt_dlp.networking import Request
+    from yt_dlp.networking.exceptions import HTTPError as YtHTTPError
+
+    wrapped = Request(
+        request.full_url, data=request.data, headers=dict(request.header_items()),
+        method=request.get_method(),
+    )
+    try:
+        with YoutubeDL(params) as ydl, ydl.urlopen(wrapped) as response:
+            return response.read(limit)
+    except YtHTTPError as exc:
+        raise urllib.error.HTTPError(
+            request.full_url, exc.status, redact(str(exc.reason or "")),
+            exc.response.headers, None,
+        ) from None
+    except Exception as exc:  # noqa: BLE001 - cookie or proxy trouble: a failed request
+        raise urllib.error.URLError(redact(f"{type(exc).__name__}: {exc}")) from None
+
+
 def download_caption(
     caption: Caption,
     *,
@@ -172,8 +218,7 @@ def download_caption(
             headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                data = response.read(MAX_CAPTION_BYTES)
+            data = _read(request, timeout, MAX_CAPTION_BYTES)
             if not data:
                 raise CaptionError("caption endpoint returned an empty body")
             return data
@@ -540,8 +585,7 @@ def _panel_session(video_id: str, timeout: float) -> tuple[str, str] | None:
             WATCH_URL.format(video_id=video_id),
             headers={"User-Agent": USER_AGENT},
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            page = response.read(4 * 1024 * 1024).decode("utf-8", "replace")
+        page = _read(request, timeout, 4 * 1024 * 1024).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError):
         return None
     version = re.search(r'"INNERTUBE_CLIENT_VERSION":"([^"]+)"', page)
@@ -590,8 +634,7 @@ def _fetch_panel_once(
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read(64 * 1024 * 1024))
+        return json.loads(_read(request, timeout, 64 * 1024 * 1024))
     except (
         urllib.error.URLError, TimeoutError, OSError, ValueError,
     ):

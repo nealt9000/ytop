@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import contextvars
+import copy
+import json
 import logging
 import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections import OrderedDict
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -41,6 +46,7 @@ from .proxies import (
 from .signin import (
     AGE_GATED,
     AGE_RESTRICTED_NEEDS_SIGNIN,
+    active_signin,
     is_age_gated,
     using_signin,
 )
@@ -249,12 +255,59 @@ def normalize_playlist_url(value: str) -> str:
     return f"https://www.youtube.com/playlist?list={value}"
 
 
+# One YoutubeDL per worker thread and option set (#34): its HTTP connections,
+# cookies and caches stay warm across a playlist's videos.  Never shared
+# between threads; the oldest is closed past YDL_PER_THREAD.
+YDL_PER_THREAD = 4
+_ydl_local = threading.local()
+_ydl_all: list[YoutubeDL] = []  # every live instance, for clear_caches
+_ydl_all_lock = threading.Lock()
+
+
+def _thread_ydl(opts: dict) -> YoutubeDL:
+    key = json.dumps(opts, sort_keys=True, default=repr)
+    held: OrderedDict[str, YoutubeDL] = getattr(_ydl_local, "held", None) or OrderedDict()
+    _ydl_local.held = held
+    ydl = held.get(key)
+    if ydl is not None:
+        held.move_to_end(key)
+        return ydl
+    ydl = YoutubeDL(opts)
+    held[key] = ydl
+    with _ydl_all_lock:
+        _ydl_all.append(ydl)
+    while len(held) > YDL_PER_THREAD:
+        _key, old = held.popitem(last=False)
+        _close_ydl(old)
+    return ydl
+
+
+def _close_ydl(ydl: YoutubeDL) -> None:
+    with _ydl_all_lock:
+        if ydl in _ydl_all:
+            _ydl_all.remove(ydl)
+    try:
+        ydl.close()
+    except Exception:  # noqa: BLE001 - closing must never fail a read
+        log.debug("closing a YoutubeDL failed", exc_info=True)
+
+
+def clear_caches() -> None:
+    """Close every kept YoutubeDL and forget cached analyses."""
+    with _ydl_all_lock:
+        live = list(_ydl_all)
+    for ydl in live:
+        _close_ydl(ydl)
+    _ydl_local.__dict__.clear()
+    with _analysis_lock:
+        _analysis.clear()
+
+
 def _extract(url: str, opts: dict) -> dict:
     runner = ytdlp_runner.active()
     try:
         if runner is None:
-            with YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = _thread_ydl(opts).extract_info(url, download=False)
         else:  # a retry with other components, in a child Python
             info = runner.extract(url, opts)
     except (DownloadError, ExtractorError) as exc:
@@ -288,6 +341,58 @@ def extract_playlist_info(
 # Only the legacy muxed 360p mp4 (format 18) goes missing.  Downloads always
 # read the video fully again.
 QUICK_EXTRACTOR_ARGS = {"youtube": {"player_skip": ["js"]}}
+
+
+# Analysis reads kept for re-analysing a playlist (#35): trimmed like
+# raw.json, for less than YouTube's ~6 h stream-URL lifetime.
+ANALYSIS_TTL_S = 3 * 3600
+# Reads are always kept; only a context inside ``reusing_analyses`` (a new web
+# review) looks them up.  Refresh, upgrade, "Sync again" and the CLI read anew.
+_reuse: contextvars.ContextVar[bool] = contextvars.ContextVar("ytop_reuse_analyses", default=False)
+_ANALYSIS_MAX = 2000
+_analysis: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+_analysis_lock = threading.Lock()
+
+
+def _for_cache(info: dict) -> dict:
+    from .rawinfo import trim_raw_info  # rawinfo -> transcripts -> probe
+
+    kept = trim_raw_info(info)
+    if info.get("thumbnails"):
+        kept["thumbnails"] = info["thumbnails"]  # downloads pick the thumbnail from these
+    return kept
+
+
+@contextmanager
+def reusing_analyses() -> Iterator[None]:
+    """Let this context's analyses reuse a recent read of the same video."""
+    token = _reuse.set(True)
+    try:
+        yield
+    finally:
+        _reuse.reset(token)
+
+
+def _analysis_read(
+    video_id: str, config: Config, cache_root: Path | None, *, quick: bool,
+) -> dict:
+    """``extract_video_info`` for an analysis.  Inside ``reusing_analyses`` a
+    read of the same video (same mode, proxy and sign-in) from the last
+    ``ANALYSIS_TTL_S`` is reused.  Downloads always read anew."""
+    key = (video_id, quick, active_proxy(), active_signin())
+    now = time.monotonic()
+    with _analysis_lock:
+        hit = _analysis.get(key)
+        if hit is not None and now - hit[0] < ANALYSIS_TTL_S and _reuse.get():
+            _analysis.move_to_end(key)
+            return copy.deepcopy(hit[1])
+    info = extract_video_info(video_id, config, cache_root, quick=quick)
+    kept = _for_cache(info)
+    with _analysis_lock:
+        _analysis[key] = (time.monotonic(), kept)
+        while len(_analysis) > _ANALYSIS_MAX:
+            _analysis.popitem(last=False)
+    return info
 
 
 def extract_video_info(
@@ -325,13 +430,13 @@ def analyse_video(
     is read fully."""
     if config.quick_analysis:
         try:
-            info = extract_video_info(video_id, config, cache_root, quick=True)
+            info = _analysis_read(video_id, config, cache_root, quick=True)
             return info, select_format(
                 info, config.audio_language, max_height, preserve_audio
             )
         except FormatError:
             pass
-    info = extract_video_info(video_id, config, cache_root)
+    info = _analysis_read(video_id, config, cache_root, quick=False)
     return info, select_format(info, config.audio_language, max_height, preserve_audio)
 
 

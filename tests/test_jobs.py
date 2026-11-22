@@ -1157,3 +1157,22 @@ def test_an_upgrade_review_is_fixed_at_its_height(tmp_path: Path, monkeypatch):
     assert 'class="policy-fieldset"' not in page and 'name="refresh_existing"' not in page
     assert 'name="policy" value="1080p"' in page and "Upgrade to 1080p" in page
     client.app.state.jobs.close()
+
+
+@pytest.mark.parametrize("upgrade", [0, 1080])
+def test_a_new_review_reuses_recent_reads_but_an_upgrade_does_not(
+    tmp_path: Path, monkeypatch, upgrade: int,
+):
+    from ytop.yt import probe as probe_mod
+
+    reusing: list[bool] = []
+
+    def recording_probe(value, config, **kwargs):
+        reusing.append(probe_mod._reuse.get())
+        return fake_probe(value, config, **kwargs)
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", recording_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001", upgrade_height=upgrade)
+    wait_for(manager, job.id, {"ready"})
+    assert reusing == [not upgrade]

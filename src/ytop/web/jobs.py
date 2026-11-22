@@ -17,6 +17,7 @@ failed for that, and Resume restarts it once the library is back.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import re
@@ -62,6 +63,7 @@ from ..yt.probe import (
     normalize_playlist_url,
     probe_playlist,
     probe_video,
+    reusing_analyses,
 )
 from . import fsops
 
@@ -1474,6 +1476,13 @@ class JobManager:
             self._update(job_id, video_count=total)
 
         def run_probe() -> ProbeResult:
+            # A new review may reuse recent reads (re-adding a playlist); an
+            # upgrade asks YouTube what it offers now.
+            reuse = contextlib.nullcontext() if job.upgrade_height else reusing_analyses()
+            with reuse:
+                return _probe()
+
+        def _probe() -> ProbeResult:
             return probe_playlist(
                 url, config, limit=limit,
                 on_item=on_item, on_total=on_total,

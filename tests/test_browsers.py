@@ -52,3 +52,29 @@ def test_firefox_profiles_windows_appdata(tmp_path, monkeypatch):
         f"firefox:{base / 'Profiles/abcd.default-release'}",
         "firefox:C:\\Users\\me\\YTOP Profile",
     ]
+
+
+def test_firefox_profiles_macos(tmp_path):
+    base = _ini(tmp_path, "Library/Application Support/Firefox",
+                "[Profile0]\nName=default-release\nPath=Profiles/x1.default-release\n")
+    assert firefox_profiles(tmp_path) == [f"firefox:{base / 'Profiles/x1.default-release'}"]
+
+
+def test_firefox_profiles_puts_every_installs_default_first(tmp_path):
+    """Two Firefox installs (say release and ESR) each mark a Default."""
+    base = _ini(tmp_path, ".mozilla/firefox",
+                "[Profile0]\nPath=a.unused\n[Profile1]\nPath=b.release\n"
+                "[Profile2]\nPath=c.esr\n"
+                "[InstallAAAA]\nDefault=b.release\n[InstallBBBB]\nDefault=c.esr\n")
+    assert firefox_profiles(tmp_path) == [
+        f"firefox:{base / 'b.release'}", f"firefox:{base / 'c.esr'}",
+        f"firefox:{base / 'a.unused'}",
+    ]
+
+
+def test_firefox_profiles_install_default_may_be_absolute(tmp_path):
+    other = tmp_path / "elsewhere" / "ytop"
+    base = _ini(tmp_path, ".mozilla/firefox",
+                f"[Profile0]\nPath=a.default\n[Profile1]\nIsRelative=0\nPath={other}\n"
+                f"[InstallAAAA]\nDefault={other}\n")
+    assert firefox_profiles(tmp_path) == [f"firefox:{other}", f"firefox:{base / 'a.default'}"]

@@ -96,8 +96,9 @@ def is_bot_check(text: str | None) -> bool:
 
 def classify_failure(exc: BaseException | str | None) -> str:
     """``"region_blocked"`` for a video YouTube does not offer in this
-    country, ``"age_restricted"`` for an age-gated one, ``"youtube_changed"`` when yt-dlp's error looks like YouTube
-    changed under it (see ``YOUTUBE_CHANGED``), else ``"other"``."""
+    country, ``"age_restricted"`` for an age-gated one, ``"youtube_changed"``
+    when yt-dlp's error looks like YouTube changed under it (see
+    ``YOUTUBE_CHANGED``), else ``"other"``."""
     texts: list[str] = []
     seen: set[int] = set()
     current: object = exc
@@ -108,7 +109,7 @@ def classify_failure(exc: BaseException | str | None) -> str:
     text = "\n".join(texts)
     if is_region_blocked(exc):
         return "region_blocked"
-    if is_age_gated(exc) or is_age_gated(text):
+    if is_age_gated(exc):  # walks the same cause chain as ``text``
         return "age_restricted"
     if any(pattern.search(text) for _what, pattern in YOUTUBE_CHANGED):
         return "youtube_changed"
@@ -358,8 +359,10 @@ _COOKIES_UNREADABLE = re.compile(
 # hold spaces), Windows ``X:\...``, or POSIX absolute (not a URL's path).
 _PATHS = re.compile(
     r"""(['"])(?:[A-Za-z]:[\\/]|[/\\~])[^'"]*\1"""
-    r"""|\b[A-Za-z]:\\[^\s'"]*"""
-    r"""|(?<![\w:/.~-])~?/[^\s'"]+"""
+    # Unquoted: words after a space that carry on the path ("Secret Profile/x.db")
+    # are part of it.
+    r"""|\b[A-Za-z]:\\[^\s'"]*(?:(?: [^\s'"\\]+)+\\[^\s'"]*)*"""
+    r"""|(?<![\w:/.~-])~?/[^\s'"]+(?:(?: [^\s'"/]+)+/[^\s'"]*)*"""
 )
 # A signed-in read gets only images or no usable format without a JS runtime
 # (no usable format can have other causes too, hence "may need").

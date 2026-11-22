@@ -254,6 +254,9 @@ def test_permission_denied_cookie_db_with_bare_spec_hides_the_path(fake_analyse)
     "'/home/x/.mozilla/firefox/Secret Profile/x.db'",
     r"C:\Users\Me\AppData\Roaming\Mozilla\Firefox\Profiles\abcd.default\x.db",
     r"'C:\Users\Me\AppData\Roaming\Mozilla\Firefox\Profiles\ab cd\x.db'",
+    # Unquoted, with spaces: the words that carry on the path are masked too.
+    "/home/x/.mozilla/firefox/Secret Profile/x.db",
+    r"C:\Users\Me\Firefox\Profiles\My Secret Profile\x.db",
 ])
 def test_fallback_reason_masks_paths(fake_analyse, path):
     def script(vid, proxy, signin):

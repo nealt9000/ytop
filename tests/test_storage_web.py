@@ -1326,3 +1326,29 @@ def test_unparsable_move_journal_is_removed_with_its_staging(tmp_path: Path):
     assert result.phase == "staging"
     assert not staging.exists()
     assert not fsops.journal_path(staging).exists()
+
+
+@pytest.mark.parametrize("bad", [
+    {"dest_folder": "../outside"},
+    {"dest_folder": "/abs"},
+    {"dest_folder": "a/b"},
+    {"old_folder": ".."},
+    {"refs": ["not", "a", "dict"]},
+])
+def test_a_move_journal_with_a_path_outside_its_library_is_ignored(tmp_path, bad):
+    """A damaged or edited journal must never steer a rename outside media/."""
+    import json
+
+    from ytop.web import fsops
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    doc = {"mode": "rename", "playlist_id": "PL1", "old_folder": "Old",
+           "dest_folder": "New", "refs": {}}
+    doc.update(bad)
+    fsops.journal_path(staging).write_text(json.dumps(doc), encoding="utf-8")
+    meta = tmp_path / "root" / ".ytop" / "data" / "playlists" / "PL1"
+    assert fsops._read_journal(meta, meta, staging) is None
+    doc.update({"old_folder": "Old", "dest_folder": "New", "refs": {}})
+    fsops.journal_path(staging).write_text(json.dumps(doc), encoding="utf-8")
+    assert fsops._read_journal(meta, meta, staging) is not None

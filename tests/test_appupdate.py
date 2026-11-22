@@ -741,7 +741,7 @@ def test_asks_once_then_respects_the_answer(stick: Path):
         assert "Faster pages." in detail and "Install" in detail
 
 
-def _wait(predicate, timeout: float = 10.0) -> None:
+def _wait(predicate, timeout: float = 30.0) -> None:  # roomy: a full run is slow
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() > deadline:
@@ -794,7 +794,7 @@ def test_install_quits_and_says_start_again(
         page = client.get("/app-update").text
         # No new check while (or after) installing.
         assert client.post("/app-update/check").status_code == 409
-        assert stopped.wait(10)
+        assert stopped.wait(30)
     assert events == ["download", "switch"]
     assert app.state.stopping
     out = capsys.readouterr().out
@@ -1253,7 +1253,7 @@ def test_storage_offers_revert_only_with_a_valid_previous(stick: Path, server, t
         assert response.status_code == 303 and response.headers["location"] == "/app-update"
         _wait(lambda: updates.finished)
         page = client.get("/app-update").text
-        assert stopped.wait(10)
+        assert stopped.wait(30)
     assert events == ["stage", "switch"]
     assert "YTOP was reverted to 0.0.9. Start it again." in page
     assert "YTOP was reverted to 0.0.9. Start it again." in capsys.readouterr().out

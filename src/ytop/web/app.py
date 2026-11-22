@@ -1740,7 +1740,8 @@ def create_app(
                 status_code=400,
             )
         try:
-            spec = "" if form.get("clear") == "1" else check_browser_spec(raw)
+            # Saving an empty field clears the sign-in, as Clear does.
+            spec = "" if form.get("clear") == "1" or not raw.strip() else check_browser_spec(raw)
             save_config(update_root, replace(load_config(update_root), age_gate_browser=spec))
         except (OSError, ValueError) as exc:
             return _render_settings(request, f"Could not save the sign-in: {exc}",

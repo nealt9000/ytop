@@ -252,6 +252,14 @@ def _write_journal(spec: FinishSpec) -> None:
     })
 
 
+def _plain_folder(value: object) -> bool:
+    """One folder name under ``media/``: no separators, not ``.``/``..``."""
+    return (
+        isinstance(value, str) and value not in {"", ".", ".."}
+        and "/" not in value and "\\" not in value and ":" not in value
+    )
+
+
 def _read_journal(
     source_meta: Path, target_meta: Path, staging: Path
 ) -> FinishSpec | None:
@@ -260,6 +268,11 @@ def _read_journal(
     recovers."""
     doc = read_json(journal_path(staging))
     if not isinstance(doc, dict) or doc.get("mode") not in {"rename", "copy"}:
+        return None
+    # A damaged or edited journal must never steer a rename outside media/.
+    if not _plain_folder(doc.get("dest_folder")) or not isinstance(doc.get("refs") or {}, dict):
+        return None
+    if doc.get("old_folder") and not _plain_folder(doc.get("old_folder")):
         return None
     try:
         return FinishSpec(

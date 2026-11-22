@@ -45,6 +45,9 @@ included in the distribution's own licence files.
 | Jinja2 | BSD-3-Clause |
 | Pillow | MIT-CMU (HPND-style) |
 | python-multipart | Apache-2.0 |
+| SecretStorage (Linux only; reads Chromium-browser sign-in cookies) | BSD-3-Clause |
+| jeepney (Linux only) | MIT |
+| cryptography (Linux only) | Apache-2.0 OR BSD-3-Clause |
 
 **bgutil-ytdlp-pot-provider** is distributed under the GNU General Public
 License v3 (https://github.com/Brainicism/bgutil-ytdlp-pot-provider). YTOP

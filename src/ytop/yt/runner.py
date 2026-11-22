@@ -59,7 +59,11 @@ try:
             info = ydl.extract_info(args["url"], download=False)
             out({"result": ydl.sanitize_info(info)})
 except BaseException as exc:
-    out({"error": str(exc), "type": type(exc).__name__})
+    countries = getattr(exc, "countries", None)
+    if not countries:
+        countries = getattr(((getattr(exc, "exc_info", None) or (None, None))[1]), "countries", None)
+    out({"error": str(exc), "type": type(exc).__name__,
+         "countries": list(countries) if isinstance(countries, (list, tuple)) else None})
 """
 
 
@@ -199,11 +203,17 @@ class SubprocessRunner:
                 tail = errors.read().decode("utf-8", "replace").strip().splitlines()
                 raise RunnerError(tail[-1] if tail else f"yt-dlp exited with {proc.returncode}")
             if "error" in final:
-                raise _download_error(str(final.get("error") or final.get("type")))
+                raise _download_error(
+                    str(final.get("error") or final.get("type")), final.get("countries")
+                )
             return final.get("result")
 
 
-def _download_error(message: str) -> Exception:
+def _download_error(message: str, countries: list[str] | None = None) -> Exception:
     from yt_dlp.utils import DownloadError
 
+    from .proxies import RegionBlockedError, clean_countries, is_region_blocked
+
+    if clean_countries(countries) or is_region_blocked(message):
+        return RegionBlockedError(message, countries)
     return DownloadError(message)

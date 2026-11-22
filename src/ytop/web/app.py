@@ -58,6 +58,7 @@ from ..stickplatforms import PlatformAdds, platform_label
 from ..tags import TagStore, apply_edits, effective_category, normalize_tag
 from ..targets import TargetError, parse_target
 from ..toolchain import deno_path, ffmpeg_path, ffprobe_path, toolchain_source
+from ..yt.browsers import firefox_profiles
 from ..yt.metadata import (
     CorruptDocumentError,
     fsync_dir,
@@ -65,7 +66,9 @@ from ..yt.metadata import (
     prune_legacy_lock_dir,
     prune_lock_sidecars,
 )
+from ..yt.pot import check_browser_spec
 from ..yt.probe import use_library_deno_dir
+from ..yt.proxies import format_servers, parse_servers, redact
 from .browse import (
     build_home,
     build_videos,
@@ -91,6 +94,9 @@ TEMPLATE_DIR = WEB_ROOT / "templates"
 STATIC_DIR = WEB_ROOT / "static"
 
 log = logging.getLogger(__name__)
+# Control characters other than tab; the server list may also hold line breaks.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+_CONTROL_CHARS_MULTILINE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 TAGS_READ_ONLY_MESSAGE = "This library is read-only, so its tags can't be changed."
@@ -402,6 +408,10 @@ def create_app(
     # The component store belongs to the launch stick, so its settings are
     # the launch library's.
     update_root = home.root if home is not None else None
+
+    def _age_gate_set() -> bool:
+        return bool(update_root is not None and load_config(update_root).age_gate_browser)
+
     if autoupdate is None:
         autoupdate = AutoUpdate.for_runtime(lambda: app_config(update_root))
     auto = autoupdate
@@ -1024,6 +1034,8 @@ def create_app(
             tag_vocabulary=vocabulary,
             category_names=category_names,
             can_edit_tags=ref is not None and _tags_writable(ref),
+            proxies_set=bool(update_root is not None and load_config(update_root).proxies),
+            age_gate_set=_age_gate_set(),
         )
 
     @app.post("/playlist/{playlist_id}/title")
@@ -1547,6 +1559,11 @@ def create_app(
             ),
             download_config=load_config(update_root) if update_root is not None else None,
             download_library=home_ref,
+            # Explicit profiles only: a bare browser name means its Default
+            # profile, usually the owner's own account.
+            age_gate_choices=firefox_profiles(),
+            proxy_servers_text=(format_servers(load_config(update_root).proxies)
+                                if update_root is not None else ""),
             height_choices=[0, 480, 720, 1080, 1440, 2160],
             floor_choices=[0, 240, 360, 480],
         )
@@ -1599,6 +1616,60 @@ def create_app(
             return _render_settings(request, f"Could not save the settings: {exc}",
                                     status_code=400)
         return RedirectResponse("/settings#downloads", status_code=303)
+
+    @app.post("/settings/proxies")
+    async def settings_proxies(request: Request):
+        form = await request.form()
+        if update_root is None:
+            raise HTTPException(status_code=409, detail="No library is connected.")
+        for field_name in ("servers", "username", "password"):
+            # Never echo the value: it may be the password.
+            pattern = _CONTROL_CHARS_MULTILINE if field_name == "servers" else _CONTROL_CHARS
+            if pattern.search(str(form.get(field_name) or "")):
+                return _render_settings(
+                    request,
+                    f"Could not save the proxies: the {field_name} contains "
+                    "a control character.",
+                    status_code=400,
+                )
+        try:
+            current = load_config(update_root)
+            password = str(form.get("password") or "")
+            if form.get("clear_password") == "1":
+                password = ""
+            elif not password:
+                password = current.proxy_password
+            updated = replace(
+                current,
+                proxies=parse_servers(str(form.get("servers") or ""), current.proxies),
+                proxy_username=str(form.get("username") or "").strip(),
+                proxy_password=password,
+            )
+            save_config(update_root, updated)
+        except (OSError, ValueError) as exc:
+            return _render_settings(request, f"Could not save the proxies: {redact(str(exc))}",
+                                    status_code=400)
+        return RedirectResponse("/settings#proxies", status_code=303)
+
+    @app.post("/settings/age-gate")
+    async def settings_age_gate(request: Request):
+        form = await request.form()
+        if update_root is None:
+            raise HTTPException(status_code=409, detail="No library is connected.")
+        raw = str(form.get("browser") or "")
+        if _CONTROL_CHARS.search(raw):
+            return _render_settings(
+                request,
+                "Could not save the sign-in: the browser contains a control character.",
+                status_code=400,
+            )
+        try:
+            spec = "" if form.get("clear") == "1" else check_browser_spec(raw)
+            save_config(update_root, replace(load_config(update_root), age_gate_browser=spec))
+        except (OSError, ValueError) as exc:
+            return _render_settings(request, f"Could not save the sign-in: {exc}",
+                                    status_code=400)
+        return RedirectResponse("/settings#age-gate", status_code=303)
 
     @app.post("/storage/components/update")
     def components_update():
@@ -1938,7 +2009,9 @@ def create_app(
             return RedirectResponse(f"/move/{job_id}", status_code=303)
         if job.kind == "make_stick":
             return RedirectResponse(f"/make-stick/{job_id}", status_code=303)
-        return render(request, "add.html", job=job)
+        return render(request, "add.html", job=job, proxies_set=bool(
+            update_root is not None and load_config(update_root).proxies),
+            age_gate_set=_age_gate_set())
 
     @app.get("/move/{job_id}")
     def move_status(request: Request, job_id: str):

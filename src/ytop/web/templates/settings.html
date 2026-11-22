@@ -197,4 +197,54 @@
   <p class="muted small">No library is connected.</p>
   {% endif %}
 </section>
+
+<section class="storage-add" id="proxies">
+  <h2>Region-blocked videos</h2>
+  {% if download_config %}
+  <form action="/settings/proxies" method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted small">When YouTube says a video is not available in your country, {{ product_name }} retries it through these proxies. Everything else downloads directly.</p>
+    <label class="field compact"><span>Proxies (one per line, optionally starting with a two-letter country)</span>
+      <textarea name="servers" rows="4" spellcheck="false" autocomplete="off" placeholder="US https://proxy.example.com:8080">{{ proxy_servers_text }}</textarea></label>
+    <label class="field compact"><span>Proxy username</span>
+      <input type="text" name="username" maxlength="200" autocomplete="off" value="{{ download_config.proxy_username }}"></label>
+    <label class="field compact"><span>Proxy password</span>
+      <input type="password" name="password" maxlength="200" autocomplete="new-password" placeholder="{% if download_config.proxy_password %}Leave blank to keep it{% endif %}"></label>
+    {% if download_config.proxy_password %}
+    <p class="muted tiny">Login saved</p>
+    <label class="check-row">
+      <input type="checkbox" name="clear_password" value="1">
+      <span>Remove the saved password</span>
+    </label>
+    {% endif %}
+    <button type="submit" class="btn">Save</button>
+  </form>
+  {% else %}
+  <p class="muted small">No library is connected.</p>
+  {% endif %}
+</section>
+
+<section class="storage-add" id="age-gate">
+  <h2>Age-restricted videos</h2>
+  {% if download_config %}
+  <form action="/settings/age-gate" method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted small">When YouTube asks to confirm a viewer's age, {{ product_name }} tries the video once more signed in with this browser profile. Use a profile signed in only to an account made for {{ product_name }}, not your own.</p>
+    <label class="field compact"><span>Browser profile</span>
+      <input type="text" name="browser" list="age-gate-choices" maxlength="500" spellcheck="false" autocomplete="off" placeholder="browser:profile, e.g. firefox:…" value="{{ download_config.age_gate_browser }}"></label>
+    <datalist id="age-gate-choices">
+      {% for choice in age_gate_choices %}<option value="{{ choice }}">{% endfor %}
+    </datalist>
+    {% if download_config.age_gate_browser %}
+    <p class="muted tiny">Signed in with: {{ download_config.age_gate_browser.partition(":")[0] }}{% if ":" in download_config.age_gate_browser %}, profile {{ download_config.age_gate_browser.partition(":")[2] }}{% endif %}</p>
+    {% endif %}
+    <button type="submit" class="btn">Save</button>
+    {% if download_config.age_gate_browser %}
+    <button type="submit" name="clear" value="1" class="btn">Clear</button>
+    {% endif %}
+  </form>
+  {% else %}
+  <p class="muted small">No library is connected.</p>
+  {% endif %}
+</section>
 {% endblock %}

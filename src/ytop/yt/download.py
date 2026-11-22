@@ -58,13 +58,16 @@ from .probe import (
     JobCancelled,
     ProbedItem,
     ProbeResult,
-    analyse_video,
+    analyse_with_fallback,
     base_options,
     classify_failure,
     extract_video_info,
     probe_playlist,
+    record_failure,
 )
+from .proxies import covering_countries, redact, using_proxy
 from .rawinfo import trim_raw_info
+from .signin import using_signin
 
 
 @dataclass
@@ -77,7 +80,21 @@ class ItemResult:
     size: int = 0
     error: str | None = None
     transcript: TranscriptResult | None = None
-    error_kind: str | None = None  # e.g. "fat32_limit"
+    error_kind: str | None = None  # e.g. "fat32_limit", "region_blocked"
+    countries: list[str] | None = None  # where a region-blocked video is offered
+
+
+def _failure_kind(exc: BaseException, item: ProbedItem) -> str | None:
+    """``"region_blocked"``, ``"age_restricted"`` or ``"youtube_changed"`` for
+    a failed download.  A video read through a proxy or the age-gate sign-in is
+    never ``"youtube_changed"``: a flaky proxy or session must not trigger a
+    component update."""
+    kind = classify_failure(exc)
+    if kind in ("region_blocked", "age_restricted"):
+        return kind
+    if kind == "youtube_changed" and not item.proxy and not item.signed_in:
+        return kind
+    return None
 
 
 def _ytdlp_download(url: str, opts: dict) -> None:
@@ -484,6 +501,70 @@ def _process_item(
     config: Config,
     force: bool,
     lock: threading.Lock,
+    **kwargs,
+) -> tuple[ItemResult, dict]:
+    """Process one item; a video read through a proxy or the age-gate sign-in
+    is fetched through it too, because YouTube's stream URLs are bound to the
+    IP and session that read them.  Only ``config.age_gate_browser`` is ever
+    used for the sign-in, never the session browser."""
+    if item.existing:
+        kept = _keep_or_reread_existing(item, playlist, layout, config, force, lock, **kwargs)
+        if kept is not None:
+            return kept
+    browser = config.age_gate_browser if item.signed_in and config.age_gate_browser else None
+    with using_proxy(item.proxy), using_signin(browser):
+        return _process_item_body(item, playlist, layout, config, force, lock, **kwargs)
+
+
+def _keep_or_reread_existing(
+    item: ProbedItem,
+    playlist: dict,
+    layout: LibraryLayout,
+    config: Config,
+    force: bool,
+    lock: threading.Lock,
+    *,
+    quiet: bool = False,
+    cancel: Callable[[], bool] | None = None,
+    preserve_audio: bool = False,
+    refresh_existing: bool = False,
+    max_height: int | None = None,
+    **_ignored,
+) -> tuple[ItemResult, dict] | None:
+    """A video already downloaded: its kept result, or None after reading it
+    now (a refresh, a forced download, or media gone since the review), as a
+    full analysis would have: through the proxy or sign-in it needs, which
+    ``item`` then records for the download.  A failed read is recorded on
+    ``item`` the way the probe records one."""
+    playlist_id = str(playlist.get("id") or "")
+    vdir = video_directory(layout, playlist_id, item.id)
+    media = None if force else find_media(layout, vdir)
+    if media is not None and not refresh_existing:
+        return _keep_existing(item, layout, playlist_id, vdir, media, lock, quiet=quiet)
+    if cancel is not None and cancel():
+        raise JobCancelled("cancelled by the user")
+    try:
+        item.info, item.selection, item.proxy, item.signed_in = analyse_with_fallback(
+            item.id, config, layout.root,
+            max_height=max_height, preserve_audio=preserve_audio,
+        )
+        item.title = str(item.info.get("title") or item.title)
+        item.duration = item.info.get("duration") or item.duration
+    except JobCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported like a failed probe
+        record_failure(item, exc)
+    item.existing = False
+    return None
+
+
+def _process_item_body(
+    item: ProbedItem,
+    playlist: dict,
+    layout: LibraryLayout,
+    config: Config,
+    force: bool,
+    lock: threading.Lock,
     *,
     quiet: bool = False,
     progress: BytesCallback | None = None,
@@ -496,28 +577,6 @@ def _process_item(
     title = item.title or item.id
     playlist_id = str(playlist.get("id") or "")
     vdir = video_directory(layout, playlist_id, item.id)
-    if item.existing:
-        media = None if force else find_media(layout, vdir)
-        if media is not None and not refresh_existing:
-            return _keep_existing(item, layout, playlist_id, vdir, media, lock,
-                                  quiet=quiet)
-        # A refresh, a forced download, or media gone since the review:
-        # read the video now, as a full analysis would have.
-        if cancel is not None and cancel():
-            raise JobCancelled("cancelled by the user")
-        try:
-            item.info, item.selection = analyse_video(
-                item.id, config, layout.root,
-                max_height=max_height, preserve_audio=preserve_audio,
-            )
-            item.title = str(item.info.get("title") or item.title)
-            item.duration = item.info.get("duration") or item.duration
-        except JobCancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001 - reported like a failed probe
-            item.error = str(exc)
-        item.existing = False
-        title = item.title or item.id
     if item.error or item.info is None or item.selection is None:
         media = find_media(layout, vdir)
         if not quiet:
@@ -528,7 +587,8 @@ def _process_item(
             ItemResult(item.index, item.id, title, "failed",
                        path=str(vdir) if media else None,
                        size=media.stat().st_size if media else 0,
-                       error=item.error or "no usable format"),
+                       error=item.error or "no usable format",
+                       error_kind=item.error_kind, countries=item.countries),
             _entry(item, available=media is not None,
                    error=item.error or "no usable format"),
         )
@@ -561,6 +621,7 @@ def _process_item(
     media: Path | None = None
     status = "skipped"
     error: str | None = None
+    error_kind: str | None = None
     try:
         media, status = _download_media(
             item, layout, playlist_id, config, force, lock,
@@ -570,7 +631,8 @@ def _process_item(
     except JobCancelled:
         raise
     except Exception as exc:  # noqa: BLE001 - keep metadata and other items
-        error = str(exc)
+        error = redact(str(exc))
+        error_kind = _failure_kind(exc, item)
         media = find_media(layout, vdir)
 
     alternates: list[tuple[dict, Path]] = []
@@ -594,7 +656,8 @@ def _process_item(
         except Exception as exc:  # noqa: BLE001 - alternate audio is optional
             if not quiet:
                 with lock:
-                    print(f"    alternate audio failed: {exc}", flush=True)
+                    print(f"    alternate audio failed: {redact(str(exc))}",
+                          flush=True)
 
     tracks = _audio_track_rows(item, vdir, alternates)
     if audio_mismatch:
@@ -647,7 +710,7 @@ def _process_item(
         except Exception as exc:  # noqa: BLE001 - media stays usable
             transcript = TranscriptResult(
                 id=item.id, title=title, status="failed",
-                error=f"{type(exc).__name__}: {exc}",
+                error=redact(f"{type(exc).__name__}: {exc}"),
             )
 
     entry = _entry(item, available=media is not None, error=error)
@@ -658,7 +721,7 @@ def _process_item(
         return (
             ItemResult(item.index, item.id, title, "failed", path=str(vdir),
                        size=media.stat().st_size if media else 0, error=error,
-                       transcript=transcript),
+                       transcript=transcript, error_kind=error_kind),
             entry,
         )
 
@@ -886,7 +949,7 @@ def download_probe(
             raise
         except Exception as exc:  # noqa: BLE001 - one bad item must not stop the batch
             fat = isinstance(exc, FatLimitError)
-            error = str(exc) if fat else f"{type(exc).__name__}: {exc}"
+            error = redact(str(exc) if fat else f"{type(exc).__name__}: {exc}")
             if not quiet:
                 with lock:
                     print(f"  {item.index:02d} {item.title or item.id}: "
@@ -894,10 +957,7 @@ def download_probe(
             result = ItemResult(
                 item.index, item.id, item.title or item.id, "failed",
                 error=error,
-                error_kind="fat32_limit" if fat else (
-                    "youtube_changed" if classify_failure(exc) == "youtube_changed"
-                    else None
-                ),
+                error_kind="fat32_limit" if fat else _failure_kind(exc, item),
             )
             media = find_media(
                 layout, video_directory(layout, playlist_id, item.id)
@@ -992,6 +1052,11 @@ def download_probe(
         print()
         print(f"done: {downloaded} downloaded, {skipped} skipped, "
               f"{failed} failed; {human_bytes(total)} on disk")
+        blocked = [i for i in items if i.error_kind == "region_blocked"]
+        if blocked:
+            where = ", ".join(covering_countries([i.countries for i in blocked]))
+            print(f"{len(blocked)} region-blocked; countries that would cover "
+                  f"them: {where or 'unknown'}")
     return FetchResult(pdir, playlist_doc, items, total)
 
 

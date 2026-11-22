@@ -439,6 +439,7 @@ def _compact_probe(
             "duration": duration,
             "duration_label": _duration_label(duration),
             "error": item.error,
+            "error_kind": item.error_kind,
             "status": "failed" if item.error or selection is None else "pending",
             "size": efficient_size,
             "native_size": native_size,
@@ -1580,9 +1581,14 @@ class JobManager:
                 cache_root=self._job_cache_root(job),
             )
             fresh = again.items[0] if again.items else None
+            if fresh is not None and fresh.error:
+                item.error, item.error_kind = fresh.error, fresh.error_kind
+                item.countries = fresh.countries
             if fresh is None or fresh.error:
                 return False
             item.info, item.selection, item.error = fresh.info, fresh.selection, None
+            item.proxy = fresh.proxy
+            item.signed_in = fresh.signed_in
             item.title = fresh.title or item.title
             item.duration = fresh.duration or item.duration
             return True
@@ -2350,7 +2356,11 @@ class JobManager:
         broken: list[str] = []
 
         def on_done(result: ItemResult) -> None:
-            if result.status == "failed" and (
+            # A flaky proxy or sign-in never triggers a component update.
+            via_proxy = any(
+                i.proxy or i.signed_in for i in probe.items if i.id == result.id
+            )
+            if result.status == "failed" and not via_proxy and (
                 result.error_kind == "youtube_changed" or self._fixable(result.error)
             ):
                 broken.append(result.id)

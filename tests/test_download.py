@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from yt_dlp.utils import DownloadError
 
 from factories import make_library
 from ytop import fsinfo
@@ -788,6 +789,71 @@ def test_existing_video_whose_media_vanished_is_read_and_downloaded(
     assert [i.status for i in result.items] == ["downloaded"]
 
 
+def _existing_age_gated(tmp_path: Path, real_probe, monkeypatch):
+    """A video already on the stick, now age-gated unless read signed in;
+    returns its review probe, the library root and the (signin, proxy)
+    seen by each extraction and download."""
+    from ytop.layout import LibraryLayout
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.probe import ProbeError
+    from ytop.yt.proxies import active_proxy
+    from ytop.yt.signin import active_signin
+
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    download_mod.fetch_playlist("PL1", Config(), library_root=root)
+    probe = probe_mod.probe_playlist(
+        "PL1", Config(), have=download_mod.media_lookup(LibraryLayout(root)),
+    )
+    assert [i.existing for i in probe.items] == [True]
+
+    reads: list[tuple] = []
+    downloads: list[tuple] = []
+
+    def video(video_id, config, cache_root=None, **kwargs):
+        reads.append((active_signin(), active_proxy()))
+        if not active_signin():
+            raise ProbeError(
+                f"ERROR: [youtube] {video_id}: Sign in to confirm your age. "
+                "This video may be inappropriate for some users."
+            )
+        return dict(next(i.info for i in state["items"] if i.id == video_id))
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    monkeypatch.setattr(download_mod, "extract_video_info", video)
+    state["on_download"] = lambda vid, tmpl: downloads.append((active_signin(), active_proxy()))
+    return probe, root, reads, downloads
+
+
+def test_existing_age_gated_video_is_reread_and_downloaded_signed_in(
+    tmp_path: Path, real_probe, monkeypatch,
+):
+    probe, root, reads, downloads = _existing_age_gated(tmp_path, real_probe, monkeypatch)
+    cfg = Config(age_gate_browser="firefox:ytop", quick_analysis=False)
+    result = download_mod.download_probe(
+        probe, cfg, quiet=True, library_root=root, force=True, refresh_existing=True,
+    )
+    assert [i.status for i in result.items] == ["downloaded"], result.items
+    assert reads[0] == (None, None) and reads[-1] == ("firefox:ytop", None)
+    assert downloads and set(downloads) == {("firefox:ytop", None)}
+    assert probe.items[0].signed_in and probe.items[0].proxy is None
+
+
+def test_existing_age_gated_video_without_profile_is_age_restricted(
+    tmp_path: Path, real_probe, monkeypatch,
+):
+    probe, root, reads, downloads = _existing_age_gated(tmp_path, real_probe, monkeypatch)
+    result = download_mod.download_probe(
+        probe, Config(quick_analysis=False), quiet=True, library_root=root,
+        force=True, refresh_existing=True,
+    )
+    [res] = result.items
+    assert res.status == "failed"
+    assert res.error_kind == "age_restricted"
+    assert res.error == "Age-restricted — needs the YTOP sign-in"
+    assert reads == [(None, None)] and downloads == []
+
+
 def test_dry_run_counts_existing_as_skipped(tmp_path: Path, real_probe):
     root = make_library(tmp_path).root
     cfg = Config()
@@ -921,3 +987,346 @@ def test_bot_check_is_not_the_age_gate():
     assert is_bot_check("Sign in to confirm you're not a bot")
     assert not is_bot_check("Sign in to confirm your age")
     assert not is_bot_check(None)
+
+
+# --- region-blocked videos read through proxies ---------------------------
+
+def _proxy_cfg(*servers):
+    from dataclasses import replace
+
+    from ytop.config import ProxyServer
+    return replace(Config(), proxies=tuple(ProxyServer(*s) for s in servers))
+
+
+def _geo(countries=("US",)):
+    from ytop.yt.probe import ProbeError
+    return ProbeError(
+        "The uploader has not made this video available in your country",
+        list(countries),
+    )
+
+
+def test_region_blocked_video_is_read_through_a_matching_proxy(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append(active_proxy())
+        if active_proxy() is None:
+            raise _geo()
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://de:89", "DE"), ("https://us:89", "US"))
+    got = probe_mod.probe_video("abc", cfg).items[0]
+    assert got.error is None and got.proxy == "https://us:89"
+    assert "https://de:89" not in seen
+
+
+def test_bot_check_through_a_proxy_tries_the_next_and_does_not_stop_the_playlist(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    entries = [{"id": f"v{i}", "title": f"V{i}"} for i in range(3)]
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": entries}
+        ),
+    )
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        proxy = active_proxy()
+        if proxy is None:
+            raise _geo()
+        if proxy == "https://a:1":
+            raise probe_mod.ProbeError("Sign in to confirm you're not a bot")
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://a:1", "US"), ("https://b:1", "US"))
+    result = probe_mod.probe_playlist("PL1", cfg, probe_jobs=2)
+    assert not result.bot_blocked
+    assert [i.proxy for i in result.items] == ["https://b:1"] * 3
+    assert all(i.error is None for i in result.items)
+
+
+def test_all_proxies_fail(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        if active_proxy() is None:
+            raise _geo()
+        raise probe_mod.ProbeError(
+            "407 Proxy Authentication Required https://u:secret@us:89"
+        )
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", _proxy_cfg(("https://us:89", "US"))).items[0]
+    assert got.error == (
+        "Region-blocked: available in US (tried 1 proxy; last: proxy login refused)"
+    )
+    assert got.error_kind == "region_blocked"
+    assert "secret" not in got.error
+    assert got.countries == ["US"]
+    assert got.proxy is None
+
+
+def test_failed_proxy_is_logged_redacted(monkeypatch, caplog):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        if active_proxy() is None:
+            raise _geo()
+        raise probe_mod.ProbeError("tunnel failed via https://u:secret@us:89")
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    with caplog.at_level("WARNING", logger="ytop.yt.probe"):
+        got = probe_mod.probe_video("abc", _proxy_cfg(("https://us:89", "US"))).items[0]
+    assert "secret" not in caplog.text and "https://***@us:89" in caplog.text
+    assert got.error.endswith("(tried 1 proxy; last: tunnel failed via https://***@us:89)")
+
+
+def test_proxy_failure_reasons():
+    from ytop.yt.probe import _proxy_failure_reason as why
+
+    assert why("Connection refused") == "proxy unreachable"
+    assert why("read timed out") == "proxy unreachable"
+    assert why("Sign in to confirm you're not a bot") == (
+        "proxy was asked to confirm it is not a bot"
+    )
+    assert why("x" * 200) == "x" * 80
+
+
+def test_proxied_attempts_use_one_retry(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append((active_proxy(), config.retries))
+        if active_proxy() is None:
+            raise _geo()
+        return item(1, vid).info
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    cfg = _proxy_cfg(("https://us:89", "US"))
+    probe_mod.probe_video("abc", cfg)
+    assert (None, cfg.retries) in seen and cfg.retries != 1
+    assert ("https://us:89", 1) in seen
+
+
+def test_no_proxies_set_up(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        raise _geo()
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", Config()).items[0]
+    assert got.error == "Region-blocked: available in US (no proxies set up)"
+    assert got.error_kind == "region_blocked"
+
+
+def test_only_wrong_country_proxies(monkeypatch):
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.proxies import active_proxy
+
+    seen = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        seen.append(active_proxy())
+        raise _geo()
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video("abc", _proxy_cfg(("https://de:89", "DE"))).items[0]
+    assert got.error == "Region-blocked: available in US (no proxy set up for those countries)"
+    assert set(seen) == {None}
+
+
+def test_resync_does_not_reprobe_existing_region_blocked_videos(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    monkeypatch.setattr(
+        probe_mod, "extract_playlist_info",
+        lambda value, config, limit=None, cache_root=None: (
+            value, {"id": "PL1", "title": "List", "entries": [{"id": "old"}]}
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        probe_mod, "extract_video_info", lambda *a, **k: calls.append(a),
+    )
+    result = probe_mod.probe_playlist(
+        "PL1", _proxy_cfg(("https://us:89", "US")), probe_jobs=1,
+        have=lambda playlist_id, video_id: True,
+    )
+    assert calls == []
+    assert result.items[0].existing and result.items[0].proxy is None
+
+
+def test_non_region_errors_are_not_retried(monkeypatch):
+    from ytop.yt import probe as probe_mod
+
+    calls = []
+
+    def video(vid, config, cache_root=None, *, quick=False):
+        calls.append(quick)
+        raise probe_mod.ProbeError("Private video")
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    got = probe_mod.probe_video(
+        "abc", _proxy_cfg(("https://us:89", "US")),
+    ).items[0]
+    assert len(calls) == 1
+    assert got.error == "Private video" and got.error_kind is None
+
+
+# --- downloads through the proxy that read the video ----------------------
+
+def _record_proxies(monkeypatch):
+    from ytop.yt.proxies import active_proxy
+
+    recorded = []
+
+    def fake_download(url, opts):
+        recorded.append((opts.get("proxy"), active_proxy()))
+        template = opts["outtmpl"]
+        if isinstance(template, dict):
+            template = template["default"]
+        path = Path(template.replace("%(ext)s", "webm"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"media")
+
+    monkeypatch.setattr(download_mod, "_ytdlp_download", fake_download)
+    return recorded
+
+
+def _two_track_item(proxy):
+    entry = item(1, "vid1")
+    entry.proxy = proxy
+    entry.selection.alternates = [{
+        "format_id": "249-0", "vcodec": "none", "acodec": "opus",
+        "abr": 50, "language": "en-US", "ext": "webm", "filesize": 1000,
+    }]
+    return entry
+
+
+def test_proxied_item_downloads_through_its_proxy(tmp_path: Path, fake_network, monkeypatch):
+    _, state = fake_network
+    state["items"] = [_two_track_item("https://us:89")]
+    recorded = _record_proxies(monkeypatch)
+    download_mod.fetch_playlist("PL1", Config(), library_root=make_library(tmp_path).root,
+                                quiet=True)
+    assert recorded and {r[0] for r in recorded} == {"https://us:89"}
+    assert len(recorded) >= 2  # media and the alternate audio
+
+
+def test_direct_item_downloads_direct(tmp_path: Path, fake_network, monkeypatch):
+    _, state = fake_network
+    state["items"] = [item(1, "vid1")]
+    recorded = _record_proxies(monkeypatch)
+    download_mod.fetch_playlist("PL1", Config(), library_root=make_library(tmp_path).root,
+                                quiet=True)
+    assert recorded == [(None, None)]
+
+
+def test_region_blocked_result_kind_and_cli_summary(tmp_path: Path, fake_network, capsys):
+    _, state = fake_network
+    blocked = ProbedItem(index=1, id="vid1", url="u", title="T",
+                         error="Region-blocked: available in US (no proxies set up)",
+                         error_kind="region_blocked", countries=["US"])
+    state["items"] = [blocked]
+    result = download_mod.fetch_playlist("PL1", Config(),
+                                         library_root=make_library(tmp_path).root)
+    assert result.items[0].error_kind == "region_blocked"
+    assert result.items[0].countries == ["US"]
+    assert "1 region-blocked; countries that would cover them: US" in capsys.readouterr().out
+
+
+def _failing_download(state, message):
+    def hook(video_id, template):
+        raise RuntimeError(message)
+    state["on_download"] = hook
+
+
+def test_direct_region_blocked_download_failure_is_classified(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    _failing_download(
+        state, "The uploader has not made this video available in your country"
+    )
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].error_kind == "region_blocked"
+
+
+def test_proxied_download_failure_is_never_youtube_changed(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    state["items"][0].proxy = "https://us:89"
+    _failing_download(state, "Unable to extract player; Signature extraction failed")
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].status == "failed" and result.items[0].error_kind is None
+
+
+def test_direct_download_failure_can_be_youtube_changed(tmp_path, fake_network):
+    calls, state = fake_network
+    layout = make_library(tmp_path)
+    _failing_download(state, "Unable to extract player; Signature extraction failed")
+    result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
+    assert result.items[0].error_kind == "youtube_changed"
+
+
+def _run_process_item(monkeypatch, tmp_path, item, config):
+    import threading
+
+    from ytop.yt.proxies import active_proxy
+    from ytop.yt.signin import active_signin
+
+    seen = []
+    monkeypatch.setattr(
+        download_mod, "_process_item_body",
+        lambda it, *a, **k: seen.append((active_proxy(), active_signin())) or (None, {}),
+    )
+    download_mod._process_item(item, {}, make_library(tmp_path), config, False,
+                               threading.Lock())
+    return seen
+
+
+def test_signed_in_item_downloads_inside_signin_and_proxy(monkeypatch, tmp_path: Path):
+    from dataclasses import replace
+
+    it = ProbedItem(1, "vid", "u", proxy="https://us1.example:89", signed_in=True)
+    seen = _run_process_item(monkeypatch, tmp_path, it,
+                             replace(Config(), age_gate_browser="firefox"))
+    assert seen == [("https://us1.example:89", "firefox")]
+
+
+def test_unsigned_item_downloads_without_signin(monkeypatch, tmp_path: Path):
+    from dataclasses import replace
+
+    it = ProbedItem(1, "vid", "u", signed_in=False)
+    seen = _run_process_item(monkeypatch, tmp_path, it,
+                             replace(Config(), age_gate_browser="firefox"))
+    assert seen == [(None, None)]
+
+
+def test_signed_in_item_without_setting_downloads_without_signin(monkeypatch, tmp_path: Path):
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    assert _run_process_item(monkeypatch, tmp_path, it, Config()) == [(None, None)]
+
+
+def test_signed_in_failure_is_not_youtube_changed():
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    assert download_mod._failure_kind(DownloadError("nsig extraction failed"), it) is None
+
+
+def test_age_restricted_failure_kind_passes_through():
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    exc = DownloadError("Sign in to confirm your age")
+    assert download_mod._failure_kind(exc, it) == "age_restricted"

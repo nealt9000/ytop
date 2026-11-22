@@ -16,6 +16,7 @@ from ..components import server_home
 from ..config import SESSION_AUTH, Config
 from ..runtime import active_runtime
 from ..toolchain import deno_path
+from .signin import active_signin
 
 PLUGIN_DIST = "bgutil-ytdlp-pot-provider"
 
@@ -24,6 +25,29 @@ def cookies_from_browser(value: str) -> tuple:
     """Convert ``chrome`` or ``chrome:profile`` into yt-dlp's tuple form."""
     parts = [p or None for p in value.split(":", 3)]
     return tuple((parts + [None, None, None, None])[:4])
+
+
+def signin_cookies(spec: str) -> tuple:
+    """yt-dlp's tuple for an age-gate ``browser[:profile]`` spec.  Everything
+    after the first ``:`` is the profile: Settings offers absolute profile
+    paths, which on Windows hold a drive letter's colon."""
+    name, _, profile = spec.partition(":")
+    return (name, profile or None, None, None)
+
+
+def check_browser_spec(value: str) -> str:
+    """Return the stripped ``browser[:profile]`` spec, or raise ValueError.
+    The browser is the text before the first ``:`` (see ``signin_cookies``)."""
+    from yt_dlp.cookies import SUPPORTED_BROWSERS
+
+    spec = value.strip()
+    head, sep, profile = spec.partition(":")
+    name = head.strip().lower()
+    if name not in SUPPORTED_BROWSERS:
+        raise ValueError(
+            f"unknown browser {name!r}; use one of: {', '.join(sorted(SUPPORTED_BROWSERS))}"
+        )
+    return name + sep + profile
 
 
 def plugin_available() -> bool:
@@ -90,6 +114,9 @@ def apply_auth_options(opts: dict, config: Config) -> None:
             # with the Deno yt-dlp's js_runtimes names (the bundled one).
             args = opts.setdefault("extractor_args", {})
             args["youtubepot-bgutilscript"] = {"server_home": [str(server)]}
-    browser = SESSION_AUTH.apply(config).cookies_from_browser
-    if browser:
+    # The age-gate retry's dedicated profile replaces the session browser.
+    signin = active_signin()
+    if signin:
+        opts["cookiesfrombrowser"] = signin_cookies(signin)
+    elif browser := SESSION_AUTH.apply(config).cookies_from_browser:
         opts["cookiesfrombrowser"] = cookies_from_browser(browser)

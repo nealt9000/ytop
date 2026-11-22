@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.30",
     "youtube-transcript-api>=1.0",
     "yt-dlp-ejs==0.8.0",
+    "secretstorage>=3.3 ; sys_platform == 'linux'",
 ]
 
 [dependency-groups]

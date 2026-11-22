@@ -51,12 +51,17 @@ YOUTUBE_CHANGED_CASES = {
 OTHER_CASES = [
     "ERROR: [youtube] abc: Private video. Sign in if you've been granted access",
     "ERROR: [youtube] abc: Video unavailable. This video has been removed by the uploader",
-    "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate",
     "ERROR: Unable to download webpage: <urlopen error [Errno -3] "
     "Temporary failure in name resolution>",
     "[Errno 28] No space left on device",
     "the selected rendition is over FAT32's 4 GB file limit",
 ]
+
+
+def test_age_gate_is_age_restricted_not_other():
+    message = "ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate"
+    assert classify_failure(message) == "age_restricted"
+    assert classify_failure(OSError(message)) == "age_restricted"
 
 
 def test_classify_failure_table():
@@ -356,6 +361,90 @@ def test_youtube_failure_during_download_retries_the_item(tmp_path: Path, monkey
         "max_height": job.max_height, "target_mb_per_hour": 100.0,
         "min_height": Config().min_height,
     }
+    manager.close()
+
+
+def test_component_retry_of_a_probe_keeps_the_proxy_that_read_it(tmp_path: Path, monkeypatch):
+    ytop = make_store(tmp_path)
+    fake = FakeUpdater()
+    broken = video_item("abc12345678")
+    broken.info = broken.selection = None
+    broken.error = SIGNATURE
+
+    def probe_playlist(url, config, **kwargs):
+        return ProbeResult(url=url, playlist={"id": "PL1", "title": "L"}, items=[broken])
+
+    def probe_video(video_id, config, *, playlist=None, index=1, **kwargs):
+        item = video_item(video_id, index)
+        item.proxy = "https://us:89"
+        return ProbeResult(url=item.url, playlist=playlist or {}, items=[item])
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", probe_playlist)
+    monkeypatch.setattr(jobs_module, "probe_video", probe_video)
+    manager = JobManager(lib_root(tmp_path), autoupdate=make_auto(ytop, fake))
+    job = wait_for(
+        manager,
+        manager.create_probe("https://www.youtube.com/playlist?list=PL1").id,
+        {"ready", "failed"},
+    )
+    assert job.status == "ready" and fake.calls == 1
+    assert broken.error is None and broken.proxy == "https://us:89"
+    manager.close()
+
+
+def test_proxied_download_failure_never_triggers_an_update(tmp_path: Path, monkeypatch):
+    ytop = make_store(tmp_path)
+    fake = FakeUpdater()
+    scripted_probe(monkeypatch, [True])
+
+    def download_probe(probe, config, *, on_item_done=None, **kwargs):
+        for item in probe.items:
+            item.proxy = "https://us:89"
+        results = [
+            ItemResult(item.index, item.id, item.title, "failed",
+                       error=f"DownloadError: {SIGNATURE}")
+            for item in probe.items
+        ]
+        for result in results:
+            if on_item_done:
+                on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results, total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "download_probe", download_probe)
+    manager = JobManager(lib_root(tmp_path), autoupdate=make_auto(ytop, fake))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert fake.calls == 0
+    assert job.failed == 1
+    manager.close()
+
+
+def test_signed_in_download_failure_never_triggers_an_update(tmp_path: Path, monkeypatch):
+    ytop = make_store(tmp_path)
+    fake = FakeUpdater()
+    scripted_probe(monkeypatch, [True])
+
+    def download_probe(probe, config, *, on_item_done=None, **kwargs):
+        for item in probe.items:
+            item.signed_in = True
+        results = [
+            ItemResult(item.index, item.id, item.title, "failed",
+                       error="DownloadError: nsig extraction failed")
+            for item in probe.items
+        ]
+        for result in results:
+            if on_item_done:
+                on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results, total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "download_probe", download_probe)
+    manager = JobManager(lib_root(tmp_path), autoupdate=make_auto(ytop, fake))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert fake.calls == 0
+    assert job.failed == 1
     manager.close()
 
 

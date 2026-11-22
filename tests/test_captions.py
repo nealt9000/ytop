@@ -252,3 +252,47 @@ def test_preferred_language_beats_a_manual_track_in_another_language():
     caption = choose_caption({"subtitles": info["subtitles"]}, ["en"])
     assert caption is not None
     assert (caption.language, caption.kind) == ("es", "manual")
+
+
+def _fake_transcript_api(monkeypatch):
+    import sys
+    import types
+
+    built = []
+
+    class FakeApi:
+        def __init__(self, proxy_config=None):
+            built.append(proxy_config)
+
+        def list(self, video_id):
+            return []
+
+    module = types.ModuleType("youtube_transcript_api")
+    module.YouTubeTranscriptApi = FakeApi
+    monkeypatch.setitem(sys.modules, "youtube_transcript_api", module)
+    return built
+
+
+def test_transcript_api_uses_active_http_proxy(monkeypatch):
+    from youtube_transcript_api.proxies import GenericProxyConfig
+
+    from ytop.yt.proxies import using_proxy
+
+    built = _fake_transcript_api(monkeypatch)
+    with using_proxy("https://us:89"):
+        assert fetch_transcript_api("vid", ["en"]) is None
+    assert len(built) == 1
+    assert built[0].http_url == built[0].https_url == "https://us:89"
+    assert isinstance(built[0], GenericProxyConfig)
+    built.clear()
+    fetch_transcript_api("vid", ["en"])
+    assert built == [None]
+
+
+def test_transcript_api_is_skipped_for_a_socks_proxy(monkeypatch):
+    from ytop.yt.proxies import using_proxy
+
+    built = _fake_transcript_api(monkeypatch)
+    with using_proxy("socks5h://us:1080"):
+        assert fetch_transcript_api("vid", ["en"]) is None
+    assert built == []

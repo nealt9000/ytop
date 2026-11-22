@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import ytop
 import ytop.makestick as ms
 from factories import library_set, make_library
 from fake_releases import FakeReleases
@@ -49,7 +50,7 @@ def _set_build(yt: Path, **fields) -> None:
 def built(tmp_path_factory):
     base = tmp_path_factory.mktemp("platforms")
     image = make_fake_image(base / "image", PLATS)
-    _set_build(image, version="0.1.0", build_id=BUILD_ID)
+    _set_build(image, version=ytop.__version__, build_id=BUILD_ID)
     # The manifest hash in build.json must stay right after the edit above.
     build = json.loads((image / "build.json").read_text())
     build["manifest_sha256"] = hashlib.sha256((image / MANIFEST_NAME).read_bytes()).hexdigest()
@@ -75,7 +76,7 @@ def stick(built, tmp_path) -> Path:
 def server(built):
     fake = FakeReleases()
     assets = {p.name: p.read_bytes() for p in sorted(built.release.iterdir())}
-    fake.app_release(GH_REPO, "v0.1.0", assets)
+    fake.app_release(GH_REPO, f"v{ytop.__version__}", assets)
     yield fake
     fake.close()
 
@@ -161,7 +162,7 @@ def test_a_bad_piece_changes_nothing(stick: Path, built):
         for name in assets:
             if name.endswith(".tar.gz") and "windows-x86_64" in name:
                 assets[name] = assets[name] + b"tampered"
-        fake.app_release(GH_REPO, "v0.1.0", assets)
+        fake.app_release(GH_REPO, f"v{ytop.__version__}", assets)
         result = sp.add_platforms(yt, _config(fake), ["windows-x86_64"], http=updater.Http())
     finally:
         fake.close()

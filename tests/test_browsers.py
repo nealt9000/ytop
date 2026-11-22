@@ -34,3 +34,21 @@ def test_firefox_profiles_none(tmp_path):
 def test_firefox_profiles_ignores_garbage(tmp_path):
     _ini(tmp_path, ".config/mozilla/firefox", "not an ini [[[")
     assert firefox_profiles(tmp_path) == []
+
+
+def test_firefox_profiles_windows_appdata(tmp_path, monkeypatch):
+    """On Windows the profiles live under %APPDATA%; specs carry absolute
+    (drive-letter) paths."""
+    home = tmp_path / "home"
+    home.mkdir()
+    appdata = tmp_path / "AppData" / "Roaming"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("APPDATA", str(appdata))
+    base = _ini(appdata, "Mozilla/Firefox",
+                "[Profile0]\nName=default-release\nPath=Profiles/abcd.default-release\n"
+                "[Profile1]\nName=ytop\nIsRelative=0\n"
+                "Path=C:\\Users\\me\\YTOP Profile\n")
+    assert firefox_profiles() == [
+        f"firefox:{base / 'Profiles/abcd.default-release'}",
+        "firefox:C:\\Users\\me\\YTOP Profile",
+    ]

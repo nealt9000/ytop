@@ -28,6 +28,27 @@ def test_signin_context_adds_cookies_only_inside():
     assert opts["cookiesfrombrowser"] == ("firefox", "Q6uSzFvx.Profile 1", None, None)
 
 
+def test_signin_spec_with_a_windows_profile_path():
+    """Settings offers absolute Firefox profile paths; on Windows they hold
+    a drive letter's colon, which must stay part of the profile."""
+    spec = "firefox:C:\\Users\\me\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\abcd.default-release"
+    with using_signin(spec):
+        opts = {}
+        apply_auth_options(opts, Config(pot_provider="off"))
+    assert opts["cookiesfrombrowser"] == (
+        "firefox",
+        "C:\\Users\\me\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\abcd.default-release",
+        None, None,
+    )
+
+
+def test_signin_spec_without_a_profile():
+    with using_signin("firefox"):
+        opts = {}
+        apply_auth_options(opts, Config(pot_provider="off"))
+    assert opts["cookiesfrombrowser"] == ("firefox", None, None, None)
+
+
 def test_signin_context_overrides_session_browser(monkeypatch):
     monkeypatch.setattr(SESSION_AUTH, "browser", "brave")
     with using_signin("firefox"):

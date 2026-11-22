@@ -168,6 +168,11 @@ def test_check_browser_spec():
         pot.check_browser_spec("netscape")
 
 
+def test_check_browser_spec_keeps_a_windows_profile_path():
+    spec = "firefox:C:\\Users\\me\\Profiles\\abcd.default-release"
+    assert pot.check_browser_spec(spec) == spec
+
+
 def test_check_browser_spec_lowercases_only_the_browser():
     assert pot.check_browser_spec("Firefox:My Profile") == "firefox:My Profile"
     assert pot.check_browser_spec("BRAVE") == "brave"

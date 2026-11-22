@@ -27,8 +27,17 @@ def cookies_from_browser(value: str) -> tuple:
     return tuple((parts + [None, None, None, None])[:4])
 
 
+def signin_cookies(spec: str) -> tuple:
+    """yt-dlp's tuple for an age-gate ``browser[:profile]`` spec.  Everything
+    after the first ``:`` is the profile: Settings offers absolute profile
+    paths, which on Windows hold a drive letter's colon."""
+    name, _, profile = spec.partition(":")
+    return (name, profile or None, None, None)
+
+
 def check_browser_spec(value: str) -> str:
-    """Return the stripped ``browser[:profile]`` spec, or raise ValueError."""
+    """Return the stripped ``browser[:profile]`` spec, or raise ValueError.
+    The browser is the text before the first ``:`` (see ``signin_cookies``)."""
     from yt_dlp.cookies import SUPPORTED_BROWSERS
 
     spec = value.strip()
@@ -106,6 +115,8 @@ def apply_auth_options(opts: dict, config: Config) -> None:
             args = opts.setdefault("extractor_args", {})
             args["youtubepot-bgutilscript"] = {"server_home": [str(server)]}
     # The age-gate retry's dedicated profile replaces the session browser.
-    browser = active_signin() or SESSION_AUTH.apply(config).cookies_from_browser
-    if browser:
+    signin = active_signin()
+    if signin:
+        opts["cookiesfrombrowser"] = signin_cookies(signin)
+    elif browser := SESSION_AUTH.apply(config).cookies_from_browser:
         opts["cookiesfrombrowser"] = cookies_from_browser(browser)

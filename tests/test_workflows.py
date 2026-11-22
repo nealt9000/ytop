@@ -103,7 +103,9 @@ def test_publish_refuses_a_dirty_or_mismatched_build_id():
     guard = publish.find("dist/stick/.ytop/build.json")
     assert guard >= 0, "publish does not check the build id"
     assert "jq -r .build_id" in publish
-    assert "git rev-parse --short bump/release" in publish
+    # Prefix of the full SHA: short SHAs from a shallow and a full clone differ in length.
+    assert "git rev-parse --short" not in publish
+    assert '"$(git rev-parse bump/release)" in "$rev"*' in publish
     assert "dirty" in publish
     assert guard < publish.index('git tag -a "$TAG"')
 
@@ -115,3 +117,12 @@ def test_dry_runs_do_not_share_the_real_release_concurrency_group():
     group = m.group(1)
     assert "inputs.dry_run" in group and "'dry'" in group and "'real'" in group
     assert "cancel-in-progress: false" in text
+
+
+def test_dry_runs_do_not_share_the_real_stick_build_concurrency_group():
+    stick_yml = (REPO / ".github" / "workflows" / "stick.yml").read_text()
+    m = re.search(r"^concurrency:\s*\n\s+group: (.+)$", stick_yml, re.MULTILINE)
+    assert m and "inputs.dry_run" in m.group(1)
+    assert re.search(r"^      dry_run:\s*$", stick_yml, re.MULTILINE)
+    call = _jobs(AUTO)["stick"]
+    assert re.search(r"^      dry_run: \$\{\{.*inputs\.dry_run.*\}\}$", call, re.MULTILINE)

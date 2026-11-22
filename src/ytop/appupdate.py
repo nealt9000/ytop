@@ -16,8 +16,9 @@ is kept in the library's cache (:func:`save_offer`) and shown again at the
 next start (for up to :data:`CHECK_EVERY`) even when GitHub cannot be
 reached.  Sticks that said yes check at every start and, while the app
 stays open, again every :data:`CHECK_EVERY` (6 h; :meth:`AppUpdates.recheck_if_due`).
-Every answer but offline and rate-limited restarts that clock, a broken
-release included, so it is not re-fetched at every poll.
+Every answer but offline restarts that clock, a broken release and a rate
+limit included, so GitHub is not asked again at every poll.  A check that
+gets no answer (offline, error, rate-limited) leaves a shown offer up.
 
 **Installing** (:func:`install_app`, after the user confirmed):
 
@@ -996,10 +997,7 @@ class AppUpdates:
             return
         self._restore_offer()  # a kept offer shows at once, even offline
         if self.online or outcome == "off":
-            result = self.check()
-            self._record_check(result)
-            if result.status in NO_ANSWER:  # check() cleared the offer; put it back
-                self._restore_offer()
+            self._record_check(self.check())
 
     def recheck_if_due(self) -> None:
         """Look again while the app stays open, once ``CHECK_EVERY`` has
@@ -1013,9 +1011,9 @@ class AppUpdates:
             log.warning("the app update re-check failed", exc_info=True)
 
     def _record_check(self, result: AppCheck) -> None:
-        """GitHub answered (a broken release is an answer too): the next
-        check is due ``CHECK_EVERY`` from now."""
-        if result.status in ("offline", "rate_limited"):
+        """GitHub answered (a broken release or a rate limit is an answer
+        too): the next check is due ``CHECK_EVERY`` from now."""
+        if result.status == "offline":
             return
         self.online = True
         if self.library_root is None:
@@ -1048,8 +1046,8 @@ class AppUpdates:
             result = self._check(self.ytop, self.config(), self._http())
         with self._lock:
             self.last = result
-            if not self.busy:
-                self.offer = result.release
+            if not self.busy and result.status not in NO_ANSWER:
+                self.offer = result.release  # no answer leaves a shown offer up
         self._keep(result)
         return result
 

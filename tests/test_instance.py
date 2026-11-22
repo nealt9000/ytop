@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+import ytop
 from factories import lib_root, library_set
 from ytop import instance
 from ytop.cli import main
@@ -36,7 +37,7 @@ def _dead_pid() -> int:
     return proc.pid
 
 
-def _info(port: int = 0, version: str = "0.1.0", build_id: str = "", **kw) -> InstanceInfo:
+def _info(port: int = 0, version: str = ytop.__version__, build_id: str = "", **kw) -> InstanceInfo:
     base = dict(
         pid=os.getpid(), port=port, token=secrets.token_urlsafe(16),
         version=version, build_id=build_id, launch_root="/x", started_at=time.time(),
@@ -141,7 +142,7 @@ def _stop(live: InstanceInfo, thread: threading.Thread, result: dict) -> None:
 
 
 def test_second_launch_opens_existing(portable_root, opened):
-    running = RunningInstance(portable_root, version="0.1.0")
+    running = RunningInstance(portable_root, version=ytop.__version__)
     try:
         assert main(["serve", "--portable", "--open"]) == 0
         assert opened == [running.info.url]
@@ -159,7 +160,7 @@ def test_takeover_when_newer_and_idle(portable_root, opened):
     running.thread.join(15)
     assert not running.thread.is_alive(), "old instance did not stop"
     live = _wait_for_new_instance(running.info.token)
-    assert live.version == "0.1.0"
+    assert live.version == ytop.__version__
     assert opened == []
     _stop(live, thread, result)
 
@@ -521,7 +522,7 @@ def test_takeover_waits_out_a_slow_final_sync(portable_root, opened, monkeypatch
     running.thread.join(15)
     assert not running.thread.is_alive(), "old instance did not stop"
     live = _wait_for_new_instance(running.info.token)
-    assert live.version == "0.1.0"
+    assert live.version == ytop.__version__
     assert waits == [cli.TAKEOVER_WAIT_S] and cli.TAKEOVER_WAIT_S >= 60
     monkeypatch.setattr(app_module, "_sync_filesystems", lambda: None)
     _stop(live, thread, result)

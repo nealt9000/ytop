@@ -8,12 +8,16 @@ on:
         description: Artifact holding bump.bundle (one release commit); build from it
         type: string
         default: ''
+      dry_run:
+        description: Called by a dry run of the release (kept out of a real release's group)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: stick-${{ github.ref }}-${{ inputs.bump_artifact || 'plain' }}
+  group: stick-${{ github.ref }}-${{ inputs.bump_artifact || 'plain' }}${{ inputs.dry_run && '-dry' || '' }}
   cancel-in-progress: true
 
 jobs:

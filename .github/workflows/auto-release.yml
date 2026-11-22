@@ -122,6 +122,8 @@ jobs:
     uses: ./.github/workflows/stick.yml
     with:
       bump_artifact: bump
+      # Its own concurrency group, so a dry run never cancels a real release's build.
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     secrets: inherit
     permissions:
       contents: read
@@ -164,14 +166,14 @@ jobs:
       - name: Check the build id is the bump commit's and clean
         run: |
           id=$(jq -r .build_id dist/stick/.ytop/build.json)
-          short=$(git rev-parse --short bump/release)
           case "$id" in
             *-dirty) echo "::error::build id $id is dirty; not releasing"; exit 1 ;;
           esac
-          case "$id" in
-            *-"$short") ;;
-            *) echo "::error::build id $id does not end in -$short; not releasing"; exit 1 ;;
-          esac
+          # Its last part must be a prefix of the bump commit's full SHA (the
+          # stick job abbreviates in a shallow clone, so lengths can differ).
+          rev=${id##*-}
+          if [ "${#rev}" -lt 7 ]; then echo "::error::build id $id has no revision; not releasing"; exit 1; fi
+          case "$(git rev-parse bump/release)" in "$rev"*) ;; *) echo "::error::build id $id is not the bump commit's; not releasing"; exit 1 ;; esac
       - name: Tag the bump commit (locally)
         run: |
           git config user.name 'github-actions[bot]'

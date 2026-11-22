@@ -79,3 +79,39 @@ def test_publish_rerun_reuses_a_tag_that_already_landed():
     guard = publish.find('git rev-parse -q --verify "refs/tags/$TAG"')
     assert 0 <= guard < tag_step
     assert 'git ls-remote origin "refs/tags/$TAG^{}"' in publish
+
+
+STICK = REPO / ".github" / "workflows" / "stick.yml"
+
+
+def test_bump_artifact_is_downloaded_outside_the_checkout():
+    # An untracked bump.bundle in the workspace makes git_revision() "-dirty".
+    text = STICK.read_text()
+    m = re.search(
+        r"uses: actions/download-artifact@v4\s*\n\s+with:\s*\n"
+        r"\s+name: \$\{\{ inputs\.bump_artifact \}\}\s*\n\s+path: (.+)",
+        text,
+    )
+    assert m, "the bump artifact download has no path:"
+    assert m.group(1).strip().startswith("${{ runner.temp }}/"), m.group(1)
+    assert "git fetch ./bump.bundle" not in text
+    assert '"$RUNNER_TEMP/bump/bump.bundle"' in text
+
+
+def test_publish_refuses_a_dirty_or_mismatched_build_id():
+    publish = _jobs(AUTO)["publish"]
+    guard = publish.find("dist/stick/.ytop/build.json")
+    assert guard >= 0, "publish does not check the build id"
+    assert "jq -r .build_id" in publish
+    assert "git rev-parse --short bump/release" in publish
+    assert "dirty" in publish
+    assert guard < publish.index('git tag -a "$TAG"')
+
+
+def test_dry_runs_do_not_share_the_real_release_concurrency_group():
+    text = AUTO.read_text()
+    m = re.search(r"^concurrency:\s*\n\s+group: (.+)$", text, re.MULTILINE)
+    assert m
+    group = m.group(1)
+    assert "inputs.dry_run" in group and "'dry'" in group and "'real'" in group
+    assert "cancel-in-progress: false" in text

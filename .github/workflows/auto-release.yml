@@ -22,8 +22,9 @@ on:
         type: boolean
         default: true
 
+# A dry run must not replace a real run waiting in the same group.
 concurrency:
-  group: auto-release
+  group: auto-release-${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'dry' || 'real' }}
   cancel-in-progress: false
 
 permissions:
@@ -143,21 +144,34 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+      # Outside the checkout, so git status stays clean.
       - uses: actions/download-artifact@v4
         with:
           name: bump
+          path: ${{ runner.temp }}/bump
       - uses: actions/download-artifact@v4
         with:
           name: stick
       - name: Check out the bump commit
         run: |
-          git fetch ./bump.bundle 'refs/heads/*:refs/remotes/bump/*'
+          git fetch "$RUNNER_TEMP/bump/bump.bundle" 'refs/heads/*:refs/remotes/bump/*'
           git checkout --detach bump/release
           test "$(git rev-parse HEAD^)" = "$SHA"
       - name: Unpack the image
         run: mkdir -p dist && tar -C dist -xf stick.tar && rm stick.tar
       - name: Package the release files
         run: uv run python tools/package_release.py dist/stick/.ytop release
+      - name: Check the build id is the bump commit's and clean
+        run: |
+          id=$(jq -r .build_id dist/stick/.ytop/build.json)
+          short=$(git rev-parse --short bump/release)
+          case "$id" in
+            *-dirty) echo "::error::build id $id is dirty; not releasing"; exit 1 ;;
+          esac
+          case "$id" in
+            *-"$short") ;;
+            *) echo "::error::build id $id does not end in -$short; not releasing"; exit 1 ;;
+          esac
       - name: Tag the bump commit (locally)
         run: |
           git config user.name 'github-actions[bot]'
@@ -172,7 +186,7 @@ jobs:
             exit 0
           fi
           # verbatim: the notes' "## Features" lines are not comments.
-          git tag -a "$TAG" --cleanup=verbatim -F notes.md bump/release
+          git tag -a "$TAG" --cleanup=verbatim -F "$RUNNER_TEMP/bump/notes.md" bump/release
       - name: Show what would be released (dry run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         run: |
@@ -198,4 +212,4 @@ jobs:
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$TAG" release/* --title "YTOP $TAG" --notes-file notes.md --verify-tag
+        run: gh release create "$TAG" release/* --title "YTOP $TAG" --notes-file "$RUNNER_TEMP/bump/notes.md" --verify-tag

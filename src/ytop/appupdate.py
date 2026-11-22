@@ -16,6 +16,8 @@ is kept in the library's cache (:func:`save_offer`) and shown again at the
 next start (for up to :data:`CHECK_EVERY`) even when GitHub cannot be
 reached.  Sticks that said yes check at every start and, while the app
 stays open, again every :data:`CHECK_EVERY` (6 h; :meth:`AppUpdates.recheck_if_due`).
+Every answer but offline and rate-limited restarts that clock, a broken
+release included, so it is not re-fetched at every poll.
 
 **Installing** (:func:`install_app`, after the user confirmed):
 
@@ -89,6 +91,9 @@ NOTES_LIMIT = 20_000
 CHECK_EVERY = timedelta(hours=6)
 # What the start-up component check returns when the network answered
 # (``recent``: it answered within the last day, see autoupdate.check_due).
+# AppCheck statuses that say nothing about the release: a kept offer stays.
+NO_ANSWER = frozenset({"offline", "error", "rate_limited"})
+
 ONLINE_OUTCOMES = frozenset({
     "up to date", "up_to_date", "updated", "failed", "rate_limited", "recent",
 })
@@ -991,7 +996,10 @@ class AppUpdates:
             return
         self._restore_offer()  # a kept offer shows at once, even offline
         if self.online or outcome == "off":
-            self._record_check(self.check())
+            result = self.check()
+            self._record_check(result)
+            if result.status in NO_ANSWER:  # check() cleared the offer; put it back
+                self._restore_offer()
 
     def recheck_if_due(self) -> None:
         """Look again while the app stays open, once ``CHECK_EVERY`` has
@@ -1005,8 +1013,9 @@ class AppUpdates:
             log.warning("the app update re-check failed", exc_info=True)
 
     def _record_check(self, result: AppCheck) -> None:
-        """GitHub answered: the next check is due ``CHECK_EVERY`` from now."""
-        if result.status in ("offline", "error"):
+        """GitHub answered (a broken release is an answer too): the next
+        check is due ``CHECK_EVERY`` from now."""
+        if result.status in ("offline", "rate_limited"):
             return
         self.online = True
         if self.library_root is None:

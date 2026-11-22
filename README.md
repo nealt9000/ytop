@@ -210,6 +210,12 @@ GitHub release, packaged with `tools/package_release.py`. A failure before that
 leaves no commit, tag or release. If `main` moved meanwhile, nothing is pushed
 and the next push's run releases everything since the last tag.
 
+If a release run fails after its push landed (the tag exists but there is no
+release), use **Re-run failed jobs**, not **Re-run all jobs**: re-running
+everything re-plans, finds itself superseded and leaves the tag without a
+release. The last resort is `gh release create vX.Y.Z` by hand from the run's
+packaged files.
+
 The bot commits `chore(release): vX.Y.Z` to `main` (as `github-actions[bot]`),
 so pull before your next push.
 

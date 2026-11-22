@@ -22,15 +22,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Downloaded outside the checkout: untracked files there make the build id "-dirty".
       - name: Fetch the release bump commit
         if: inputs.bump_artifact != ''
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.bump_artifact }}
+          path: ${{ runner.temp }}/bump
       - name: Build from the bump commit
         if: inputs.bump_artifact != ''
         run: |
-          git fetch ./bump.bundle 'refs/heads/*:refs/remotes/bump/*'
+          git fetch "$RUNNER_TEMP/bump/bump.bundle" 'refs/heads/*:refs/remotes/bump/*'
           git checkout --detach bump/release
       - uses: astral-sh/setup-uv@v5
         with:

@@ -657,6 +657,18 @@ class FakeUpdater:
         return appupdate.AppCheck("available", self.release)
 
 
+class SilentUpdater:
+    """A check that gets no usable answer: ``status`` is what it reports."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        self.checks = 0
+
+    def check(self, ytop, config, http=None) -> appupdate.AppCheck:
+        self.checks += 1
+        return appupdate.AppCheck(self.status, message="no answer")
+
+
 def _release() -> appupdate.AppRelease:
     return appupdate.AppRelease(
         version="0.1.0", build_id=NEW_ID, tag="v0.1.0", notes="Faster pages.",
@@ -835,6 +847,56 @@ def test_start_up_app_check_runs_at_every_start(stick: Path):
     assert fake.checks == 2
     updates.on_start_outcome("off")  # component checks off: still looks
     assert fake.checks == 3
+
+
+@pytest.mark.parametrize("status", ["offline", "error", "rate_limited"])
+def test_a_kept_offer_survives_a_start_check_without_an_answer(
+    stick: Path, server, status: str,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from ytop.config import set_updates_option
+
+    set_updates_option(stick, "check_app", True)
+    set_updates_option(stick, "repo", GH_REPO)
+    set_updates_option(stick, "api_base", server.base + "/api")
+    now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
+    first = appupdate.AppUpdates(stick / ".ytop", lambda: load_config(stick), stick,
+                                 clock=lambda: now[0])
+    first.on_start_outcome("up to date")
+    assert first.offer is not None
+    now[0] += timedelta(hours=1)
+    silent = SilentUpdater(status)
+    again = appupdate.AppUpdates(
+        stick / ".ytop", lambda: load_config(stick), stick, check=silent.check,
+        clock=lambda: now[0],
+    )
+    again.on_start_outcome("recent")  # counts as online: GitHub is asked
+    assert silent.checks == 1
+    assert again.offer is not None and again.offer.build_id == first.offer.build_id
+
+
+def test_a_broken_release_is_not_rechecked_every_poll(stick: Path):
+    from datetime import UTC, datetime, timedelta
+
+    start = datetime(2026, 11, 14, 9, 0, tzinfo=UTC)
+    now = [start]
+    broken = SilentUpdater("error")
+    updates = appupdate.AppUpdates(
+        stick / ".ytop", lambda: load_config(stick), stick, check=broken.check,
+        clock=lambda: now[0],
+    )
+    from ytop.config import set_updates_option
+
+    set_updates_option(stick, "check_app", True)
+    updates.on_start_outcome("up to date")
+    assert broken.checks == 1
+    now[0] = start + timedelta(minutes=10)
+    updates.recheck_if_due()
+    assert broken.checks == 1
+    now[0] = start + timedelta(hours=6, minutes=1)
+    updates.recheck_if_due()
+    assert broken.checks == 2
 
 
 def test_answering_yes_records_the_check(stick: Path):

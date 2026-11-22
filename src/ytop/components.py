@@ -5,10 +5,12 @@ never touched by an upgrade's switch)::
 
     .ytop/components/
       current.json                         # which version of each is current
-      <name>/<version>/                    # pure Python: packages + dist-info,
-                                           #   bytecode, and .complete (last)
+      <name>/<version>/                    # pure Python: lib.zip (packages,
+                                           #   dist-info, bytecode; see
+                                           #   ytop.codezip) and .complete
+                                           #   (last); older sticks: loose
       deno/<version>/<plat>/deno[.exe]     # one binary per platform
-      bgutil-server/<version>/server/
+      bgutil-server/<version>/server/      # bundled: ytop.bgserver
 
 ``current.json`` is ``{"schema": 1, "current": {name: version}, "previous":
 {name: version}, "pinned_bad": {name: [versions]}, "last_check": iso,

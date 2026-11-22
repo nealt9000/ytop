@@ -20,7 +20,7 @@ import pytest
 import ytop
 import ytop.makestick as ms
 from factories import library_set, make_library
-from stick_fakes import REPO, make_fake_image
+from stick_fakes import REPO, code_bytes, make_fake_image
 from ytop import cli
 from ytop.components import read_current
 from ytop.config import set_updates_option
@@ -189,14 +189,21 @@ def test_app_update_check_then_install_fetches_only_the_app_piece(served, stick,
 def test_components_update_installs_the_newer_ytdlp(tools, image, stick, tmp_path, capsys):
     ci, srv = tools
     root = tmp_path / "gh"
-    # Real yt-dlp's version.py has __version__; the fake one lacks it.
-    fake = image / "components/yt-dlp/2026.10.26/yt_dlp/version.py"
-    original = fake.read_text()
-    fake.write_text(original + "__version__ = '2026.10.26'\n")
+    # Real yt-dlp's version.py has __version__; the fake one lacks it.  The
+    # seeded component is packed (#37): patch its lib.zip, then put it back.
+    packed = image / "components/yt-dlp/2026.10.26/lib.zip"
+    original = packed.read_bytes()
+    with zipfile.ZipFile(packed) as zf:
+        members = {n: zf.read(n) for n in zf.namelist()}
+    members["yt_dlp/version.py"] += b"__version__ = '2026.10.26'\n"
+    members.pop("yt_dlp/version.pyc", None)  # zipimport would prefer it
+    with zipfile.ZipFile(packed, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
     try:
         ci.ytdlp_release(image, root, "2099.1.1")
     finally:
-        fake.write_text(original)
+        packed.write_bytes(original)
     server = srv.make_server(root, tmp_path / "gh.log")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -207,7 +214,7 @@ def test_components_update_installs_the_newer_ytdlp(tools, image, stick, tmp_pat
         server.server_close()
     assert "updated yt-dlp: 2026.10.26 -> 2099.1.1" in capsys.readouterr().out
     assert read_current(stick / ".ytop").current["yt-dlp"] == "2099.1.1"
-    assert (stick / ".ytop/components/yt-dlp/2099.1.1/yt_dlp/version.py").is_file()
+    assert code_bytes(stick / ".ytop/components/yt-dlp/2099.1.1", "yt_dlp/version.py")
     shutil.rmtree(root)
 
 

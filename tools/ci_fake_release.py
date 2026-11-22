@@ -155,16 +155,22 @@ def ytdlp_release(image: Path, serve_root: Path, version: str = "2099.1.1") -> P
     folder = image / "components/yt-dlp" / old
     old_info = f"yt_dlp-{old}.dist-info"
     new_info = f"yt_dlp-{version}.dist-info"
-    if not (folder / old_info).is_dir():
+    # The seeded folder's files: loose, or packed in its lib.zip (#37).
+    files: dict[str, bytes] = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file() and path.name not in (".complete", "lib.zip"):
+            files[path.relative_to(folder).as_posix()] = path.read_bytes()
+    if (folder / "lib.zip").is_file():
+        with zipfile.ZipFile(folder / "lib.zip") as zf:
+            files.update({n: zf.read(n) for n in zf.namelist() if not n.endswith("/")})
+    if not any(rel.startswith(f"{old_info}/") for rel in files):
         raise SystemExit(f"ci_fake_release: {folder} has no {old_info}")
     entries: dict[str, bytes] = {}
-    for path in sorted(folder.rglob("*")):
-        rel = path.relative_to(folder).as_posix()
-        if (not path.is_file() or path.name == ".complete" or path.suffix == ".pyc"
-                or "__pycache__" in rel or rel == f"{old_info}/RECORD"):
+    for rel, data in sorted(files.items()):
+        if (rel.endswith(".pyc") or "__pycache__" in rel
+                or rel == f"{old_info}/RECORD"):
             continue
-        data = path.read_bytes()
-        if path.suffix == ".py" or rel.startswith(f"{old_info}/"):
+        if rel.endswith(".py") or rel.startswith(f"{old_info}/"):
             data = data.replace(old.encode(), version.encode())
         entries[new_info + rel[len(old_info):] if rel.startswith(old_info) else rel] = data
     out = serve_root / YTDLP_REPO / version

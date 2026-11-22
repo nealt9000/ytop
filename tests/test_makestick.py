@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import ytop.makestick as ms
 from factories import add_playlist, library_set, make_library
-from stick_fakes import make_fake_image
+from stick_fakes import code_bytes, make_fake_image
 from ytop.cli import main as cli_main
 from ytop.fsinfo import FsInfo
 from ytop.layout import LibraryLayout, read_library
@@ -132,7 +132,7 @@ def test_make_new_stick_layout(tmp_path: Path, image: Path):
     ]
     assert (yt / "boot.py").read_bytes() == (image / "boot.py").read_bytes()
     assert (yt / "app/ytop/cli.py").is_file()
-    assert (yt / "lib/common/sharedpkg/data/x.txt").is_file()
+    assert code_bytes(yt / "lib/common", "sharedpkg/data/x.txt") is not None
     for rel in (
         "runtime/linux-x86_64/python/bin/python3",
         "runtime/windows-x86_64/python/python.exe",

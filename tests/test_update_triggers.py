@@ -153,6 +153,30 @@ def make_auto(ytop: Path, fake: FakeUpdater, config: Config | None = None) -> Au
     )
 
 
+def test_a_packed_store_is_recognised_as_what_runs(tmp_path, monkeypatch):
+    """Packed component folders (#37) are on sys.path as their lib.zip and
+    themselves: the app still knows which version folders it imported, and
+    a child for another version gets that version's zip first."""
+    ytop = make_store(tmp_path)
+    for version in ("1.0", "2.0"):
+        (ytop / "components/yt-dlp" / version / "lib.zip").write_bytes(b"PK\x05\x06" + b"\0" * 18)
+    one = ytop / "components/yt-dlp/1.0"
+    monkeypatch.setattr(sys, "path", [str(one / "lib.zip"), str(one), "/base"])
+    seen: list[list[Path]] = []
+
+    def runner(paths, **_kw):
+        seen.append(list(paths))
+        return FakeRunner(paths)
+
+    auto = AutoUpdate(ytop, Config, make_runner=runner)
+    assert auto.loaded == [one] and auto.base_path == [Path("/base")]
+    assert auto.runs_here(read_current(ytop))
+    assert auto.runner(read_current(ytop)) is None
+    two = ytop / "components/yt-dlp/2.0"
+    auto.runner(Current(current={"yt-dlp": "2.0"}))
+    assert seen == [[two / "lib.zip", two, Path("/base")]]
+
+
 def running_version() -> str:
     """Which yt-dlp the fake probe/download "runs": in-process is 1.0."""
     runner = ytdlp_runner.active()

@@ -49,6 +49,7 @@ from .components import (
 )
 from .config import Config
 from .runtime import active_runtime
+from .stick.boot import CODE_ZIP, code_paths
 from .yt import runner as ytdlp_runner
 
 T = TypeVar("T")
@@ -127,7 +128,14 @@ class AutoUpdate:
         self._lock = threading.Lock()
         store = store_dir(ytop) if ytop is not None else None
         if loaded is None:
-            loaded = [Path(p) for p in sys.path if p and store is not None and _under(p, store)]
+            # Version folders: a packed one is on sys.path as its zip and
+            # itself (ytop.stick.boot.code_paths).
+            loaded = []
+            for p in sys.path:
+                if p and store is not None and _under(p, store):
+                    folder = Path(p).parent if Path(p).name == CODE_ZIP else Path(p)
+                    if folder not in loaded:
+                        loaded.append(folder)
         if base_path is None:
             base_path = [Path(p) for p in sys.path
                          if p and not (store is not None and _under(p, store))]
@@ -182,7 +190,8 @@ class AutoUpdate:
         already runs them)."""
         if self.runs_here(current):
             return None
-        return self._make_runner([*self.folders(current), *self.base_path],
+        paths = [p for folder in self.folders(current) for p in code_paths(folder)]
+        return self._make_runner([*paths, *self.base_path],
                                  python=self._python, cancel=cancel)
 
     def status(self) -> dict[str, Any]:

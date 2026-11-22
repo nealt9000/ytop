@@ -54,10 +54,11 @@ EXECUTABLE_LAUNCHERS = ("Start YTOP (Mac).command", "start-ytop-linux.sh")
 from ytop.bgserver import (  # noqa: E402
     ServerError,
     ServerInstall,
-    deno_install,
     find_native,
+    install_and_bundle,
     prepare_server,
 )
+from ytop.codezip import ZIP_EPOCH, pack_folder, write_code_zip, zip_entries  # noqa: E402
 from ytop.components import (  # noqa: E402
     BGUTIL_SERVER,
     COMPONENT_DISTS,
@@ -632,9 +633,6 @@ def precompile(yt: Path, platforms: list[str]) -> None:
 
 # Stdlib folders that stay loose: extension modules and the (empty) site dir.
 STDLIB_LOOSE = ("lib-dynload", "site-packages")
-# Zip entries get one fixed time so an unchanged stdlib zips to the same bytes
-# and an upgrade skips it.
-ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
 def stdlib_zip(python_dir: Path, plat: str) -> Path:
@@ -663,30 +661,26 @@ def zip_stdlib(yt: Path, platforms: list[str]) -> None:
             path for path in sorted(std.rglob("*"))
             if path.is_file() and path.relative_to(std).parts[0] not in STDLIB_LOOSE
         ]
-        target = stdlib_zip(python_dir, plat)
-        entries: dict[str, Path] = {}
-        for path in files:
-            rel = path.relative_to(std)
-            if rel.parent.name == "__pycache__":
-                name, _tag, ext = rel.name.partition(".cpython-312")
-                if ext != ".pyc":
-                    continue  # an optimised or foreign pyc: never imported
-                arc = (rel.parent.parent / f"{name}.pyc").as_posix()
-            elif rel.suffix == ".pyc":
-                continue
-            else:
-                arc = rel.as_posix()
-            entries[arc] = path
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as zf:
-            for arc in sorted(entries):
-                info = zipfile.ZipInfo(arc, date_time=ZIP_EPOCH)
-                info.external_attr = 0o644 << 16
-                zf.writestr(info, entries[arc].read_bytes())
+        write_code_zip(stdlib_zip(python_dir, plat), zip_entries(std, files))
         for path in files:
             path.unlink()
         for folder in sorted((p for p in std.rglob("*") if p.is_dir()), reverse=True):
             if not any(folder.iterdir()):
                 folder.rmdir()
+
+
+def pack_code(yt: Path, platforms: list[str]) -> None:
+    """Pack ``lib/common``, each ``lib/<platform>`` and each seeded Python
+    component into its folder's ``lib.zip`` (#37; see :mod:`ytop.codezip`).
+    Run after :func:`precompile`: the pycs go into the zips."""
+    folders = [yt / "lib" / "common", *(yt / "lib" / plat for plat in platforms)]
+    store = yt / COMPONENTS_PART
+    for name in PYTHON_COMPONENTS:
+        if (store / name).is_dir():
+            folders += sorted(p for p in (store / name).iterdir() if p.is_dir())
+    for folder in folders:
+        if folder.is_dir():
+            pack_folder(folder)
 
 
 def dir_size(path: Path) -> int:
@@ -820,7 +814,7 @@ def build(
     with tempfile.TemporaryDirectory() as tools:
         if server_install is None:
             deno = host_deno(by_key, files, cache, offline, Path(tools))
-            server_install = deno_install
+            server_install = install_and_bundle
         else:
             deno = Path(tools) / "deno"  # the injected install does not run it
         seeded[BGUTIL_SERVER] = seed_server(
@@ -829,6 +823,7 @@ def build(
     copy_app(yt)
     precompile(yt, platforms)
     zip_stdlib(yt, list(platforms))
+    pack_code(yt, list(platforms))
     copy_launchers(out)
     check_case_collisions(yt)
 

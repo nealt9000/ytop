@@ -162,6 +162,15 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # A re-run after the push landed: checkout already fetched the tag.
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse bump/release)" ]; then
+              echo "::error::$TAG already exists at another commit; not releasing"
+              exit 1
+            fi
+            echo "$TAG already exists at the bump commit (a re-run); keeping it"
+            exit 0
+          fi
           # verbatim: the notes' "## Features" lines are not comments.
           git tag -a "$TAG" --cleanup=verbatim -F notes.md bump/release
       - name: Show what would be released (dry run)

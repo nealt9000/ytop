@@ -69,3 +69,13 @@ def test_bot_identity_is_noreply():
     assert emails, "auto-release.yml sets no user.email"
     for email in emails:
         assert email.endswith("@users.noreply.github.com"), email
+
+
+def test_publish_rerun_reuses_a_tag_that_already_landed():
+    # checkout (fetch-depth 0) brings the pushed tag back on a re-run; the tag
+    # step must accept it at the bump commit instead of failing on `git tag`.
+    publish = _jobs(AUTO)["publish"]
+    tag_step = publish.index('git tag -a "$TAG"')
+    guard = publish.find('git rev-parse -q --verify "refs/tags/$TAG"')
+    assert 0 <= guard < tag_step
+    assert 'git ls-remote origin "refs/tags/$TAG^{}"' in publish

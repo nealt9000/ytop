@@ -237,6 +237,9 @@
     </datalist>
     {% if download_config.age_gate_browser %}
     <p class="muted tiny">Signed in with: {{ download_config.age_gate_browser.partition(":")[0] }}{% if ":" in download_config.age_gate_browser %}, profile {{ download_config.age_gate_browser.partition(":")[2] }}{% endif %}</p>
+    {% if js_runtime_missing %}
+    <p class="small form-error">The sign-in needs Deno, and none was found on this computer. Install <code>deno</code> (or put it on your PATH), then try again.</p>
+    {% endif %}
     {% endif %}
     <button type="submit" class="btn">Save</button>
     {% if download_config.age_gate_browser %}

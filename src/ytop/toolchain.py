@@ -84,6 +84,17 @@ def deno_path() -> Path | None:
     return bundled_tool("deno")
 
 
+def js_runtime() -> Path | None:
+    """The Deno yt-dlp will use: the stick's or bundled one, else one on
+    ``PATH`` (yt-dlp looks there itself); None when there is none.
+    Signed-in reads cannot work without it."""
+    found = deno_path()
+    if found is not None:
+        return found
+    on_path = shutil.which("deno")
+    return Path(on_path) if on_path else None
+
+
 def toolchain_source() -> str:
     """Return ``bundled``, ``project`` or ``system`` for the ffmpeg in use."""
     if not os.environ.get("YTOP_FFMPEG") and bundled_tool("ffmpeg") is not None:

@@ -18,7 +18,7 @@ from yt_dlp.utils import DownloadError, ExtractorError
 
 from ..config import Config
 from ..timing import Phase, PhaseClock, human_seconds, percentile
-from ..toolchain import deno_path
+from ..toolchain import deno_path, js_runtime
 from . import runner as ytdlp_runner
 from .formats import (
     FormatError,
@@ -382,6 +382,8 @@ def _signin_failure_reason(text: str, browser: str) -> str:
     if is_bot_check(text):
         return "YouTube asked to confirm it is not a bot"
     if _NEEDS_DENO.search(text):
+        if js_runtime() is None:
+            return "signed-in reads need Deno, which this computer doesn't have"
         return "signed-in reads may need a JavaScript runtime (Deno)"
     text = _PATHS.sub("<path>", redact(text))
     # A bare profile name; a short one ("1") would mask unrelated text.

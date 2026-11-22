@@ -136,13 +136,28 @@ def test_signed_in_bot_check_does_not_stop_the_run(fake_analyse):
     "n challenge solving failed: Some formats may be missing",
     "Requested format is not available",
 ])
-def test_signed_in_without_deno_says_so(fake_analyse, text):
+def test_signed_in_without_deno_says_so(fake_analyse, monkeypatch, text):
+    import ytop.yt.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "js_runtime", lambda: None)
     fake_analyse.script = lambda vid, proxy, signin: ProbeError(text) if signin else ProbeError(AGE)
     item = probe_video("vid", Config(age_gate_browser="firefox")).items[0]
     assert item.error == (
-        "Age-restricted — signed-in retry failed: signed-in reads may need a "
-        "JavaScript runtime (Deno)"
+        "Age-restricted — signed-in retry failed: signed-in reads need Deno, "
+        "which this computer doesn't have"
     )
+
+
+def test_signed_in_failure_with_deno_present_stays_hedged(fake_analyse, monkeypatch):
+    from pathlib import Path
+
+    import ytop.yt.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "js_runtime", lambda: Path("/usr/bin/deno"))
+    text = "Only images are available for download"
+    fake_analyse.script = lambda vid, proxy, signin: ProbeError(text) if signin else ProbeError(AGE)
+    item = probe_video("vid", Config(age_gate_browser="firefox")).items[0]
+    assert item.error.endswith("signed-in reads may need a JavaScript runtime (Deno)")
 
 
 def test_other_signed_in_failure_is_short_and_redacted(fake_analyse):

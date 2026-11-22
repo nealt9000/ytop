@@ -231,7 +231,7 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <p class="muted small">When YouTube asks to confirm a viewer's age, {{ product_name }} tries the video once more signed in with this browser profile. Use a profile signed in only to an account made for {{ product_name }}, not your own.</p>
     <label class="field compact"><span>Browser profile</span>
-      <input type="text" name="browser" list="age-gate-choices" maxlength="500" spellcheck="false" autocomplete="off" placeholder="firefox:…, brave or chrome" value="{{ download_config.age_gate_browser }}"></label>
+      <input type="text" name="browser" list="age-gate-choices" maxlength="500" spellcheck="false" autocomplete="off" placeholder="browser:profile, e.g. firefox:…" value="{{ download_config.age_gate_browser }}"></label>
     <datalist id="age-gate-choices">
       {% for choice in age_gate_choices %}<option value="{{ choice }}">{% endfor %}
     </datalist>

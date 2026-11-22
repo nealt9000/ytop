@@ -294,7 +294,10 @@ def test_settings_age_gate_offers_firefox_profiles(home, monkeypatch):
     client = _client(home, FakeAdds(None))
     page = client.get("/settings").text
     assert '<option value="firefox:/p/Q6uSzFvx.Profile 1">' in page
-    assert '<option value="brave">' in page and '<option value="firefox">' not in page
+    # A bare browser name means its Default profile, often the owner's own
+    # account: never suggested.
+    for bare in ("brave", "chrome", "firefox"):
+        assert f'<option value="{bare}">' not in page
     client.app.state.jobs.close()
 
 

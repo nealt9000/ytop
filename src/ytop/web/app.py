@@ -1559,7 +1559,9 @@ def create_app(
             ),
             download_config=load_config(update_root) if update_root is not None else None,
             download_library=home_ref,
-            age_gate_choices=[*firefox_profiles(), "brave", "chrome"],
+            # Explicit profiles only: a bare browser name means its Default
+            # profile, usually the owner's own account.
+            age_gate_choices=firefox_profiles(),
             proxy_servers_text=(format_servers(load_config(update_root).proxies)
                                 if update_root is not None else ""),
             height_choices=[0, 480, 720, 1080, 1440, 2160],

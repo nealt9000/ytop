@@ -176,6 +176,7 @@
       <td class="muted">{{ item.duration_label }}</td>
       <td class="muted small">
         {% if item.error_kind == "region_blocked" %}{{ item.error }}{% if not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}
+        {% elif item.error_kind == "age_restricted" %}{{ item.error }}{% if not age_gate_set %} <a href="/settings#age-gate">Set up the age sign-in</a>{% endif %}
         {% elif item.error %}unavailable
         {% elif item.existing %}already downloaded
         {% else %}{{ item.height }}p {{ item.video_codec }}{% if item.fps %} {{ item.fps|round|int }}fps{% endif %}{% if item.container %} · {{ item.container }}{% endif %}{% if item.audio_detail %} · {{ item.audio_detail }}{% endif %}{% if item.audio_alternates %} · +{{ item.audio_alternates }} alt audio{% endif %}
@@ -228,7 +229,7 @@
     <span class="download-status">
       {% if item.status == "downloaded" %}{{ item.size|bytes }}
       {% elif item.status == "skipped" %}{{ item.error or "already on disk" }}
-      {% elif item.status == "failed" %}failed{% if item.error %}: {{ item.error|truncate(80) }}{% endif %}{% if item.error_kind == "region_blocked" and not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}
+      {% elif item.status == "failed" %}failed{% if item.error %}: {{ item.error|truncate(80) }}{% endif %}{% if item.error_kind == "region_blocked" and not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}{% if item.error_kind == "age_restricted" and not age_gate_set %} <a href="/settings#age-gate">Set up the age sign-in</a>{% endif %}
       {% elif item.status == "downloading" %}downloading…
       {% elif item.status == "cancelled" %}cancelled
       {% else %}pending{% endif %}
@@ -319,7 +320,7 @@
 {% else %}
 <section class="empty-state">
   <h1>{% if job.kind == "video" %}Could not add this video{% else %}Could not add this playlist{% endif %}</h1>
-  <p>{{ job.error or "Unknown error" }}{% if (job.error or "").startswith("Region-blocked") and not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}</p>
+  <p>{{ job.error or "Unknown error" }}{% if (job.error or "").startswith("Region-blocked") and not proxies_set %} <a href="/settings#proxies">Set up proxies</a>{% endif %}{% if (job.error or "").startswith("Age-restricted") and not age_gate_set %} <a href="/settings#age-gate">Set up the age sign-in</a>{% endif %}</p>
   <div class="hero-actions" style="justify-content: center">
     {% if job.items %}
     <form action="/jobs/{{ job.id }}/download" method="post">

@@ -166,3 +166,14 @@ def test_check_browser_spec():
     assert pot.check_browser_spec(" firefox:Q6uSzFvx.Profile 1 ") == "firefox:Q6uSzFvx.Profile 1"
     with pytest.raises(ValueError, match="unknown browser 'netscape'"):
         pot.check_browser_spec("netscape")
+
+
+def test_check_browser_spec_lowercases_only_the_browser():
+    assert pot.check_browser_spec("Firefox:My Profile") == "firefox:My Profile"
+    assert pot.check_browser_spec("BRAVE") == "brave"
+
+
+@pytest.mark.parametrize("value", ["", "   ", ":profile"])
+def test_check_browser_spec_rejects_empty_browser(value):
+    with pytest.raises(ValueError, match="unknown browser ''"):
+        pot.check_browser_spec(value)

@@ -252,3 +252,88 @@ def test_single_video_failure_links_to_proxy_setup(home):
     job.error = "Private video"
     assert "Set up proxies" not in client.get("/add/j2").text
     client.app.state.jobs.close()
+
+
+def test_settings_age_gate_saves_and_shows(home):
+    client = _client(home, FakeAdds(None))
+    r = client.post("/settings/age-gate", data={"browser": " Firefox:My Prof "},
+                    follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/settings#age-gate"
+    assert load_config(home.root).age_gate_browser == "firefox:My Prof"
+    page = client.get("/settings").text
+    assert 'id="age-gate"' in page and "Age-restricted videos" in page
+    assert 'value="firefox:My Prof"' in page
+    client.app.state.jobs.close()
+
+
+def test_settings_age_gate_rejects_bad_input(home):
+    client = _client(home, FakeAdds(None))
+    r = client.post("/settings/age-gate", data={"browser": "netscape"})
+    assert r.status_code == 400 and "unknown browser" in r.text
+    r = client.post("/settings/age-gate", data={"browser": "firefox:a\x00b"})
+    assert r.status_code == 400 and "control character" in r.text
+    assert load_config(home.root).age_gate_browser == ""
+    off = TestClient(create_app(None, libraries=library_set(None), platform_adds=FakeAdds(None)))
+    assert off.post("/settings/age-gate", data={"browser": "firefox"}).status_code == 409
+    off.app.state.jobs.close()
+    client.app.state.jobs.close()
+
+
+def test_settings_age_gate_clear(home):
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/age-gate", data={"browser": "firefox:p"})
+    r = client.post("/settings/age-gate", data={"browser": "firefox:p", "clear": "1"},
+                    follow_redirects=False)
+    assert r.status_code == 303 and load_config(home.root).age_gate_browser == ""
+    client.app.state.jobs.close()
+
+
+def test_settings_age_gate_offers_firefox_profiles(home, monkeypatch):
+    monkeypatch.setattr("ytop.web.app.firefox_profiles",
+                        lambda: ["firefox:/p/Q6uSzFvx.Profile 1"])
+    client = _client(home, FakeAdds(None))
+    page = client.get("/settings").text
+    assert '<option value="firefox:/p/Q6uSzFvx.Profile 1">' in page
+    assert '<option value="brave">' in page and '<option value="firefox">' not in page
+    client.app.state.jobs.close()
+
+
+def test_age_restricted_row_links_to_settings_until_set(home):
+    client = _client(home, FakeAdds(None))
+    from ytop.web.jobs import Job
+    job = Job(id="j3", status="ready", kind="video", video_count=1)
+    job.items = [{"index": 1, "id": "v", "title": "T", "duration": 1, "duration_label": "0:01",
+                  "error": "Age-restricted — needs the YTOP sign-in",
+                  "error_kind": "age_restricted", "status": "failed", "size": 0,
+                  "native_size": 0}]
+    with client.app.state.jobs._lock:
+        client.app.state.jobs._jobs[job.id] = job
+    page = client.get("/add/j3").text
+    assert "Age-restricted — needs the YTOP sign-in" in page
+    assert 'href="/settings#age-gate"' in page and "Set up the age sign-in" in page
+    client.post("/settings/age-gate", data={"browser": "brave"})
+    page = client.get("/add/j3").text
+    assert "Age-restricted — needs" in page and "Set up the age sign-in" not in page
+    client.app.state.jobs.close()
+
+
+def test_age_restricted_job_failure_and_playlist_link(home):
+    from ytop.web.jobs import Job
+    client = _client(home, FakeAdds(None))
+    job = Job(id="j4", status="failed", kind="video", video_count=1,
+              error="Age-restricted — needs the YTOP sign-in")
+    with client.app.state.jobs._lock:
+        client.app.state.jobs._jobs[job.id] = job
+    assert "Set up the age sign-in" in client.get("/add/j4").text
+    import json as _json
+    meta = add_playlist(home, "PLa", "Aged", [("v1", "One")], media=False)
+    doc_path = meta / "playlist.json"
+    doc = _json.loads(doc_path.read_text())
+    doc["entries"][0]["error"] = "Age-restricted — needs the YTOP sign-in"
+    doc["entries"][0]["available"] = False
+    doc_path.write_text(_json.dumps(doc))
+    page = client.get("/playlist/PLa").text
+    assert "Age-restricted — needs" in page and page.count("Set up the age sign-in") == 1
+    client.post("/settings/age-gate", data={"browser": "brave"})
+    assert "Set up the age sign-in" not in client.get("/playlist/PLa").text
+    client.app.state.jobs.close()

@@ -32,12 +32,13 @@ def check_browser_spec(value: str) -> str:
     from yt_dlp.cookies import SUPPORTED_BROWSERS
 
     spec = value.strip()
-    name = spec.split(":", 1)[0].strip().lower()
+    head, sep, profile = spec.partition(":")
+    name = head.strip().lower()
     if name not in SUPPORTED_BROWSERS:
         raise ValueError(
             f"unknown browser {name!r}; use one of: {', '.join(sorted(SUPPORTED_BROWSERS))}"
         )
-    return spec
+    return name + sep + profile
 
 
 def plugin_available() -> bool:

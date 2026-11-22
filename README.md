@@ -233,6 +233,9 @@ command. Playlists and locations that cannot be migrated are listed in
 - YTOP never stores cookies. `--cookies-from-browser <browser[:profile]>` (or
   the matching switch in the web UI) applies to the current process or session
   only; `cookies`/`cookies_from_browser` in a config file are ignored.
+- Settings > "Age-restricted videos" names a browser profile that YTOP uses to
+  retry age-gated videos signed in; make it a dedicated account, not your own.
+  Only the browser name is saved, never cookies.
 - Sticks formatted FAT32 cannot hold files of 4 GiB or more. A download whose
   size estimate exceeds ~3.8 GB is refused onto FAT32, and playlist moves refuse
   files over 4 GiB. Use exFAT for very long videos.

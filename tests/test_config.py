@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
-from dataclasses import replace
 
 from ytop.config import SESSION_AUTH, Config, ProxyServer, load_config, save_config
 from ytop.layout import LibraryLayout
@@ -234,3 +233,11 @@ def test_save_never_writes_session_cookies(tmp_path):
     save_config(tmp_path, replace(Config(), cookies_from_browser="brave", age_gate_browser="firefox"))
     text = LibraryLayout(tmp_path).config_file.read_text()
     assert "brave" not in text and "cookies" not in text
+
+
+def test_unknown_age_gate_browser_still_loads(tmp_path):
+    # A stick moved to a host without that browser must still open.
+    layout = LibraryLayout(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, exist_ok=True)
+    layout.config_file.write_text('[signin]\nage_gate_browser = "netscape:x"\n')
+    assert load_config(tmp_path).age_gate_browser == "netscape:x"

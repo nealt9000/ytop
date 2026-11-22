@@ -58,6 +58,7 @@ from ..stickplatforms import PlatformAdds, platform_label
 from ..tags import TagStore, apply_edits, effective_category, normalize_tag
 from ..targets import TargetError, parse_target
 from ..toolchain import deno_path, ffmpeg_path, ffprobe_path, toolchain_source
+from ..yt.browsers import firefox_profiles
 from ..yt.metadata import (
     CorruptDocumentError,
     fsync_dir,
@@ -65,6 +66,7 @@ from ..yt.metadata import (
     prune_legacy_lock_dir,
     prune_lock_sidecars,
 )
+from ..yt.pot import check_browser_spec
 from ..yt.probe import use_library_deno_dir
 from ..yt.proxies import format_servers, parse_servers, redact
 from .browse import (
@@ -406,6 +408,10 @@ def create_app(
     # The component store belongs to the launch stick, so its settings are
     # the launch library's.
     update_root = home.root if home is not None else None
+
+    def _age_gate_set() -> bool:
+        return bool(update_root is not None and load_config(update_root).age_gate_browser)
+
     if autoupdate is None:
         autoupdate = AutoUpdate.for_runtime(lambda: app_config(update_root))
     auto = autoupdate
@@ -1029,6 +1035,7 @@ def create_app(
             category_names=category_names,
             can_edit_tags=ref is not None and _tags_writable(ref),
             proxies_set=bool(update_root is not None and load_config(update_root).proxies),
+            age_gate_set=_age_gate_set(),
         )
 
     @app.post("/playlist/{playlist_id}/title")
@@ -1552,6 +1559,7 @@ def create_app(
             ),
             download_config=load_config(update_root) if update_root is not None else None,
             download_library=home_ref,
+            age_gate_choices=[*firefox_profiles(), "brave", "chrome"],
             proxy_servers_text=(format_servers(load_config(update_root).proxies)
                                 if update_root is not None else ""),
             height_choices=[0, 480, 720, 1080, 1440, 2160],
@@ -1640,6 +1648,26 @@ def create_app(
             return _render_settings(request, f"Could not save the proxies: {redact(str(exc))}",
                                     status_code=400)
         return RedirectResponse("/settings#proxies", status_code=303)
+
+    @app.post("/settings/age-gate")
+    async def settings_age_gate(request: Request):
+        form = await request.form()
+        if update_root is None:
+            raise HTTPException(status_code=409, detail="No library is connected.")
+        raw = str(form.get("browser") or "")
+        if _CONTROL_CHARS.search(raw):
+            return _render_settings(
+                request,
+                "Could not save the sign-in: the browser contains a control character.",
+                status_code=400,
+            )
+        try:
+            spec = "" if form.get("clear") == "1" else check_browser_spec(raw)
+            save_config(update_root, replace(load_config(update_root), age_gate_browser=spec))
+        except (OSError, ValueError) as exc:
+            return _render_settings(request, f"Could not save the sign-in: {exc}",
+                                    status_code=400)
+        return RedirectResponse("/settings#age-gate", status_code=303)
 
     @app.post("/storage/components/update")
     def components_update():
@@ -1980,7 +2008,8 @@ def create_app(
         if job.kind == "make_stick":
             return RedirectResponse(f"/make-stick/{job_id}", status_code=303)
         return render(request, "add.html", job=job, proxies_set=bool(
-            update_root is not None and load_config(update_root).proxies))
+            update_root is not None and load_config(update_root).proxies),
+            age_gate_set=_age_gate_set())
 
     @app.get("/move/{job_id}")
     def move_status(request: Request, job_id: str):

@@ -17,6 +17,7 @@ from types import ModuleType
 
 import pytest
 
+import ytop
 import ytop.makestick as ms
 from factories import library_set, make_library
 from stick_fakes import REPO, make_fake_image
@@ -84,12 +85,14 @@ def _get(url: str) -> bytes:
         return response.read()
 
 
-def test_second_build_differs_in_one_app_file(served, image):
+def test_second_build_differs_in_one_app_file(served, image, tools):
     root, a, b, _log, _base = served
     doc_a = json.loads((a / "ytop-release.json").read_text())
     doc_b = json.loads((b / "ytop-release.json").read_text())
     assert b == root / "test/ytop" / f"v{doc_b['version']}"
-    assert doc_b["version"] == "0.1.1" and doc_a["version"] == "0.1.0"
+    ci = tools[0]
+    assert doc_a["version"] == ytop.__version__
+    assert doc_b["version"] == ci.bump(ytop.__version__)
     assert doc_b["build_id"] == doc_a["build_id"] + "-b"
     changed = [rel for rel, h in doc_b["manifest"].items() if doc_a["manifest"][rel] != h]
     assert changed == ["app/ytop/__init__.py",
@@ -99,7 +102,7 @@ def test_second_build_differs_in_one_app_file(served, image):
         set(doc_a["pieces"]) - {"app"}
     )
     # The image itself is untouched (the copy was hard-linked).
-    assert "0.1.1" not in (image / "app/ytop/__init__.py").read_text()
+    assert ci.bump(ytop.__version__) not in (image / "app/ytop/__init__.py").read_text()
     assert read_trusted_manifest(image) is not None
 
 
@@ -160,11 +163,11 @@ def test_app_update_install_needs_consent(served, stick, capsys):
     assert (stick / ".ytop/build.json").read_bytes() == before
 
 
-def test_app_update_check_then_install_fetches_only_the_app_piece(served, stick, capsys):
+def test_app_update_check_then_install_fetches_only_the_app_piece(served, stick, tools, capsys):
     _root, _a, b, log, base = served
     _point(stick, base)
     assert cli.main(["app-update", "check"]) == 0
-    assert "available: 0.1.1" in capsys.readouterr().out
+    assert f"available: {tools[0].bump(ytop.__version__)}" in capsys.readouterr().out
     log.unlink()
     assert cli.main(["app-update", "install", "--yes"]) == 0
     out = capsys.readouterr().out
@@ -176,7 +179,7 @@ def test_app_update_check_then_install_fetches_only_the_app_piece(served, stick,
     assert fetched == ["SHA256SUMS", "app.tar.gz", "ytop-release.json"]
     doc = json.loads((b / "ytop-release.json").read_text())
     build = json.loads((stick / ".ytop/build.json").read_text())
-    assert build["build_id"] == doc["build_id"] and build["version"] == "0.1.1"
+    assert build["build_id"] == doc["build_id"] and build["version"] == tools[0].bump(ytop.__version__)
     assert read_trusted_manifest(stick / ".ytop") is not None
     # Nothing newer now.
     assert cli.main(["app-update", "install", "--yes"]) == 0

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import ytop
 from stick_fakes import (
     FAKE_SERVER_FILES,
     KEPT_PYTHON,
@@ -93,7 +94,7 @@ def test_build_layout(tmp_path):
     build_json = json.loads((yt / "build.json").read_text())
     assert re.fullmatch(r"\d{12}-\w+(-dirty)?", build_json["build_id"])
     assert build_json["platforms"] == PLATS
-    assert build_json["version"] == "0.1.0"
+    assert build_json["version"] == ytop.__version__
     assert set(build_json["sizes"]) == {*PLATS, "common", "app"}
     assert all(isinstance(v, int) and v > 0 for v in build_json["sizes"].values())
     assert build_json["sources"]["python"]["version"] == "3.12.15"

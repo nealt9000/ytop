@@ -1285,16 +1285,13 @@ def create_app(
         form: FormData = Depends(form_data),
     ):
         refuse_ambiguous(playlist_id)
-        keep_media = str(form.get("keep_media") or "") == "1"
         job = active_job_for(playlist_id)
         if job is not None:
             raise HTTPException(
                 status_code=409,
                 detail="Cancel the download before editing this playlist.",
             )
-        if not lib.remove_video(
-            playlist_id, video_id, delete_media=not keep_media
-        ):
+        if not lib.remove_video(playlist_id, video_id):
             raise HTTPException(status_code=404, detail="video not found")
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 

@@ -1404,13 +1404,12 @@ class Library:
                 with lock:
                     _merge_sections(dest_path, sections, picked)
 
-    def remove_video(
-        self, key: str, video_id: str, *, delete_media: bool = True
-    ) -> bool:
-        """Drop one entry from a playlist.
+    def remove_video(self, key: str, video_id: str) -> bool:
+        """Drop one entry from a playlist, with everything that belongs to it.
 
-        Its media follows the ownership rules of :meth:`remove_playlist`; with
-        ``delete_media=False`` media nothing else uses stays on disk.
+        Its media follows the ownership rules of :meth:`remove_playlist`:
+        media another playlist uses moves there, the rest is deleted with its
+        subtitles and alternate audio, so nothing is left behind.
         """
         resolved = self._writable(key)
         if resolved is None:
@@ -1435,9 +1434,7 @@ class Library:
 
             video_dir = self._video_dir(layout, playlist_id, video_id)
             if video_dir is not None and video_dir.is_dir():
-                self._release_media(layout, doc, [video_id], delete=delete_media)
-                # The entry is gone, so its meta must not count as a reference
-                # any more, even when its media file is kept.
+                self._release_media(layout, doc, [video_id], delete=True)
                 shutil.rmtree(video_dir)
             sync_playlist_files(layout, playlist_id)
         self._drop_previews(layout, playlist_id, video_id)

@@ -84,7 +84,7 @@ from .browse import (
     storage_usage,
 )
 from .fsops import STAGING_PREFIX
-from .jobs import JobManager
+from .jobs import UPGRADE_HEIGHTS, JobManager
 from .library import Library
 from .render import (
     format_date,
@@ -1062,7 +1062,31 @@ def create_app(
             can_edit_tags=ref is not None and _tags_writable(ref),
             proxies_set=bool(update_root is not None and load_config(update_root).proxies),
             age_gate_set=_age_gate_set(),
+            upgrade_reads=(
+                playlist.upgrade_reads(UPGRADE_HEIGHTS)
+                if playlist.kind == "youtube" and live_job is None else []
+            ),
         )
+
+    @app.post("/playlist/{playlist_id}/upgrade")
+    def playlist_upgrade(playlist_id: str, form: FormData = Depends(form_data)):
+        """Start an upgrade pass (#54): a review of only the videos stored
+        below the chosen height, then the same download as a sync."""
+        playlist = lib.playlist_view(playlist_id)
+        if playlist is None or playlist.kind != "youtube":
+            raise HTTPException(status_code=404, detail="playlist not found")
+        try:
+            height = int(str(form.get("height") or ""))
+            job = app.state.jobs.create_probe(
+                f"https://www.youtube.com/playlist?list={playlist.id}",
+                library_id=playlist.library_id,
+                upgrade_height=height,
+            )
+        except ReadOnlyLibraryError:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(f"/add/{job.id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/title")
     def playlist_title(

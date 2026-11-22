@@ -280,6 +280,15 @@ def test_settings_age_gate_warns_without_deno(home, monkeypatch, deno):
     client.app.state.jobs.close()
 
 
+def test_saving_a_blank_age_gate_profile_clears_it(home):
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/age-gate", data={"browser": "firefox:Prof"})
+    r = client.post("/settings/age-gate", data={"browser": "   "}, follow_redirects=False)
+    assert r.status_code == 303
+    assert load_config(home.root).age_gate_browser == ""
+    client.app.state.jobs.close()
+
+
 def test_settings_age_gate_rejects_bad_input(home):
     client = _client(home, FakeAdds(None))
     r = client.post("/settings/age-gate", data={"browser": "netscape"})

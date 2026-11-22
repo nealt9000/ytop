@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -645,6 +648,54 @@ def test_remove_video_deletes_its_media_but_keeps_watch_history(
     assert client.post(
         f"/playlist/{PLAYLIST_ID}/videos/missing/remove"
     ).status_code == 404
+
+
+def test_a_slow_video_remove_does_not_freeze_other_requests(
+    tmp_path: Path, monkeypatch,
+):
+    """Removing an early entry renames and rewrites a whole playlist, which
+    takes minutes on a slow stick; meanwhile the rest of the UI must answer."""
+    from ytop.web.library import Library
+
+    started, release = threading.Event(), threading.Event()
+    original = Library.remove_video
+
+    def slow_remove(self, *args, **kwargs):
+        started.set()
+        release.wait(10)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Library, "remove_video", slow_remove)
+    layout = make_library(tmp_path)
+    # One TestClient context: every request shares one event loop, as in the app.
+    with TestClient(create_app(layout.root, libraries=library_set(layout))) as client:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            removing = pool.submit(
+                client.post,
+                f"/playlist/{PLAYLIST_ID}/videos/vid1/remove",
+                follow_redirects=False,
+            )
+            assert started.wait(5)
+            health = pool.submit(client.get, "/healthz")
+            try:
+                assert health.result(timeout=3).status_code == 200
+            finally:
+                release.set()
+            assert removing.result(timeout=10).status_code == 303
+
+
+def test_form_routes_run_off_the_event_loop(tmp_path: Path):
+    """A route that is ``async def`` runs on the event loop, so any disk work
+    in it freezes every other request; form routes read the form through a
+    dependency and stay plain ``def`` so FastAPI runs them in a thread."""
+    app = create_app(make_library(tmp_path).root)
+    on_loop = sorted(
+        route.path
+        for route in app.routes
+        if inspect.iscoroutinefunction(getattr(route, "endpoint", None))
+        and "POST" in (getattr(route, "methods", None) or ())
+    )
+    assert on_loop == []
 
 
 def test_preserve_audio_option_round_trips(client: TestClient, tmp_path: Path):

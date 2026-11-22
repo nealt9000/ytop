@@ -66,6 +66,7 @@ from .probe import (
 )
 from .proxies import covering_countries, redact, using_proxy
 from .rawinfo import trim_raw_info
+from .signin import using_signin
 
 
 @dataclass
@@ -83,11 +84,14 @@ class ItemResult:
 
 
 def _failure_kind(exc: BaseException, item: ProbedItem) -> str | None:
-    """``"region_blocked"`` or ``"youtube_changed"`` for a failed download.  A
-    video read through a proxy is never ``"youtube_changed"``: a flaky proxy
-    must not trigger a component update."""
+    """``"region_blocked"``, ``"age_restricted"`` or ``"youtube_changed"`` for
+    a failed download.  A video read through a proxy or the age-gate sign-in is
+    never ``"youtube_changed"``: a flaky proxy or session must not trigger a
+    component update."""
     kind = classify_failure(exc)
-    if kind == "region_blocked" or (kind == "youtube_changed" and not item.proxy):
+    if kind in ("region_blocked", "age_restricted"):
+        return kind
+    if kind == "youtube_changed" and not item.proxy and not item.signed_in:
         return kind
     return None
 
@@ -489,11 +493,22 @@ def _keep_existing(
     )
 
 
-def _process_item(item: ProbedItem, *args, **kwargs) -> tuple[ItemResult, dict]:
-    """Process one item; a video read through a proxy is fetched through it
-    too, because YouTube's stream URLs are bound to the IP that read them."""
-    with using_proxy(item.proxy):
-        return _process_item_body(item, *args, **kwargs)
+def _process_item(
+    item: ProbedItem,
+    playlist: dict,
+    layout: LibraryLayout,
+    config: Config,
+    force: bool,
+    lock: threading.Lock,
+    **kwargs,
+) -> tuple[ItemResult, dict]:
+    """Process one item; a video read through a proxy or the age-gate sign-in
+    is fetched through it too, because YouTube's stream URLs are bound to the
+    IP and session that read them.  Only ``config.age_gate_browser`` is ever
+    used for the sign-in, never the session browser."""
+    browser = config.age_gate_browser if item.signed_in and config.age_gate_browser else None
+    with using_proxy(item.proxy), using_signin(browser):
+        return _process_item_body(item, playlist, layout, config, force, lock, **kwargs)
 
 
 def _process_item_body(

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from yt_dlp.utils import DownloadError
 
 from factories import make_library
 from ytop import fsinfo
@@ -1214,3 +1215,53 @@ def test_direct_download_failure_can_be_youtube_changed(tmp_path, fake_network):
     _failing_download(state, "Unable to extract player; Signature extraction failed")
     result = download_mod.fetch_playlist("PL1", Config(), library_root=layout.root)
     assert result.items[0].error_kind == "youtube_changed"
+
+
+def _run_process_item(monkeypatch, tmp_path, item, config):
+    import threading
+
+    from ytop.yt.proxies import active_proxy
+    from ytop.yt.signin import active_signin
+
+    seen = []
+    monkeypatch.setattr(
+        download_mod, "_process_item_body",
+        lambda it, *a, **k: seen.append((active_proxy(), active_signin())) or (None, {}),
+    )
+    download_mod._process_item(item, {}, make_library(tmp_path), config, False,
+                               threading.Lock())
+    return seen
+
+
+def test_signed_in_item_downloads_inside_signin_and_proxy(monkeypatch, tmp_path: Path):
+    from dataclasses import replace
+
+    it = ProbedItem(1, "vid", "u", proxy="https://us1.example:89", signed_in=True)
+    seen = _run_process_item(monkeypatch, tmp_path, it,
+                             replace(Config(), age_gate_browser="firefox"))
+    assert seen == [("https://us1.example:89", "firefox")]
+
+
+def test_unsigned_item_downloads_without_signin(monkeypatch, tmp_path: Path):
+    from dataclasses import replace
+
+    it = ProbedItem(1, "vid", "u", signed_in=False)
+    seen = _run_process_item(monkeypatch, tmp_path, it,
+                             replace(Config(), age_gate_browser="firefox"))
+    assert seen == [(None, None)]
+
+
+def test_signed_in_item_without_setting_downloads_without_signin(monkeypatch, tmp_path: Path):
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    assert _run_process_item(monkeypatch, tmp_path, it, Config()) == [(None, None)]
+
+
+def test_signed_in_failure_is_not_youtube_changed():
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    assert download_mod._failure_kind(DownloadError("nsig extraction failed"), it) is None
+
+
+def test_age_restricted_failure_kind_passes_through():
+    it = ProbedItem(1, "vid", "u", signed_in=True)
+    exc = DownloadError("Sign in to confirm your age")
+    assert download_mod._failure_kind(exc, it) == "age_restricted"

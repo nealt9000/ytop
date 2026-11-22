@@ -789,6 +789,71 @@ def test_existing_video_whose_media_vanished_is_read_and_downloaded(
     assert [i.status for i in result.items] == ["downloaded"]
 
 
+def _existing_age_gated(tmp_path: Path, real_probe, monkeypatch):
+    """A video already on the stick, now age-gated unless read signed in;
+    returns its review probe, the library root and the (signin, proxy)
+    seen by each extraction and download."""
+    from ytop.layout import LibraryLayout
+    from ytop.yt import probe as probe_mod
+    from ytop.yt.probe import ProbeError
+    from ytop.yt.proxies import active_proxy
+    from ytop.yt.signin import active_signin
+
+    calls, state, extracted = real_probe
+    root = make_library(tmp_path).root
+    download_mod.fetch_playlist("PL1", Config(), library_root=root)
+    probe = probe_mod.probe_playlist(
+        "PL1", Config(), have=download_mod.media_lookup(LibraryLayout(root)),
+    )
+    assert [i.existing for i in probe.items] == [True]
+
+    reads: list[tuple] = []
+    downloads: list[tuple] = []
+
+    def video(video_id, config, cache_root=None, **kwargs):
+        reads.append((active_signin(), active_proxy()))
+        if not active_signin():
+            raise ProbeError(
+                f"ERROR: [youtube] {video_id}: Sign in to confirm your age. "
+                "This video may be inappropriate for some users."
+            )
+        return dict(next(i.info for i in state["items"] if i.id == video_id))
+
+    monkeypatch.setattr(probe_mod, "extract_video_info", video)
+    monkeypatch.setattr(download_mod, "extract_video_info", video)
+    state["on_download"] = lambda vid, tmpl: downloads.append((active_signin(), active_proxy()))
+    return probe, root, reads, downloads
+
+
+def test_existing_age_gated_video_is_reread_and_downloaded_signed_in(
+    tmp_path: Path, real_probe, monkeypatch,
+):
+    probe, root, reads, downloads = _existing_age_gated(tmp_path, real_probe, monkeypatch)
+    cfg = Config(age_gate_browser="firefox:ytop", quick_analysis=False)
+    result = download_mod.download_probe(
+        probe, cfg, quiet=True, library_root=root, force=True, refresh_existing=True,
+    )
+    assert [i.status for i in result.items] == ["downloaded"], result.items
+    assert reads[0] == (None, None) and reads[-1] == ("firefox:ytop", None)
+    assert downloads and set(downloads) == {("firefox:ytop", None)}
+    assert probe.items[0].signed_in and probe.items[0].proxy is None
+
+
+def test_existing_age_gated_video_without_profile_is_age_restricted(
+    tmp_path: Path, real_probe, monkeypatch,
+):
+    probe, root, reads, downloads = _existing_age_gated(tmp_path, real_probe, monkeypatch)
+    result = download_mod.download_probe(
+        probe, Config(quick_analysis=False), quiet=True, library_root=root,
+        force=True, refresh_existing=True,
+    )
+    [res] = result.items
+    assert res.status == "failed"
+    assert res.error_kind == "age_restricted"
+    assert res.error == "Age-restricted — needs the YTOP sign-in"
+    assert reads == [(None, None)] and downloads == []
+
+
 def test_dry_run_counts_existing_as_skipped(tmp_path: Path, real_probe):
     root = make_library(tmp_path).root
     cfg = Config()

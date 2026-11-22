@@ -58,11 +58,12 @@ from .probe import (
     JobCancelled,
     ProbedItem,
     ProbeResult,
-    analyse_video,
+    analyse_with_fallback,
     base_options,
     classify_failure,
     extract_video_info,
     probe_playlist,
+    record_failure,
 )
 from .proxies import covering_countries, redact, using_proxy
 from .rawinfo import trim_raw_info
@@ -506,9 +507,55 @@ def _process_item(
     is fetched through it too, because YouTube's stream URLs are bound to the
     IP and session that read them.  Only ``config.age_gate_browser`` is ever
     used for the sign-in, never the session browser."""
+    if item.existing:
+        kept = _keep_or_reread_existing(item, playlist, layout, config, force, lock, **kwargs)
+        if kept is not None:
+            return kept
     browser = config.age_gate_browser if item.signed_in and config.age_gate_browser else None
     with using_proxy(item.proxy), using_signin(browser):
         return _process_item_body(item, playlist, layout, config, force, lock, **kwargs)
+
+
+def _keep_or_reread_existing(
+    item: ProbedItem,
+    playlist: dict,
+    layout: LibraryLayout,
+    config: Config,
+    force: bool,
+    lock: threading.Lock,
+    *,
+    quiet: bool = False,
+    cancel: Callable[[], bool] | None = None,
+    preserve_audio: bool = False,
+    refresh_existing: bool = False,
+    max_height: int | None = None,
+    **_ignored,
+) -> tuple[ItemResult, dict] | None:
+    """A video already downloaded: its kept result, or None after reading it
+    now (a refresh, a forced download, or media gone since the review), as a
+    full analysis would have: through the proxy or sign-in it needs, which
+    ``item`` then records for the download.  A failed read is recorded on
+    ``item`` the way the probe records one."""
+    playlist_id = str(playlist.get("id") or "")
+    vdir = video_directory(layout, playlist_id, item.id)
+    media = None if force else find_media(layout, vdir)
+    if media is not None and not refresh_existing:
+        return _keep_existing(item, layout, playlist_id, vdir, media, lock, quiet=quiet)
+    if cancel is not None and cancel():
+        raise JobCancelled("cancelled by the user")
+    try:
+        item.info, item.selection, item.proxy, item.signed_in = analyse_with_fallback(
+            item.id, config, layout.root,
+            max_height=max_height, preserve_audio=preserve_audio,
+        )
+        item.title = str(item.info.get("title") or item.title)
+        item.duration = item.info.get("duration") or item.duration
+    except JobCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 - reported like a failed probe
+        record_failure(item, exc)
+    item.existing = False
+    return None
 
 
 def _process_item_body(
@@ -530,28 +577,6 @@ def _process_item_body(
     title = item.title or item.id
     playlist_id = str(playlist.get("id") or "")
     vdir = video_directory(layout, playlist_id, item.id)
-    if item.existing:
-        media = None if force else find_media(layout, vdir)
-        if media is not None and not refresh_existing:
-            return _keep_existing(item, layout, playlist_id, vdir, media, lock,
-                                  quiet=quiet)
-        # A refresh, a forced download, or media gone since the review:
-        # read the video now, as a full analysis would have.
-        if cancel is not None and cancel():
-            raise JobCancelled("cancelled by the user")
-        try:
-            item.info, item.selection = analyse_video(
-                item.id, config, layout.root,
-                max_height=max_height, preserve_audio=preserve_audio,
-            )
-            item.title = str(item.info.get("title") or item.title)
-            item.duration = item.info.get("duration") or item.duration
-        except JobCancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001 - reported like a failed probe
-            item.error = str(exc)
-        item.existing = False
-        title = item.title or item.id
     if item.error or item.info is None or item.selection is None:
         media = find_media(layout, vdir)
         if not quiet:

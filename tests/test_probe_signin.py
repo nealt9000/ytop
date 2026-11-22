@@ -9,11 +9,11 @@ from ytop.yt import probe as probe_mod
 from ytop.yt.probe import (
     ProbedItem,
     ProbeError,
-    _record_failure,
     analyse_with_fallback,
     is_bot_check,
     probe_playlist,
     probe_video,
+    record_failure,
 )
 from ytop.yt.proxies import active_proxy
 from ytop.yt.signin import active_signin
@@ -182,7 +182,7 @@ def test_record_failure_prefers_age_restricted_over_its_region_cause():
             raise ProbeError("Age-restricted — needs the YTOP sign-in", ["US"]) from direct
     except ProbeError as exc:
         item = ProbedItem(index=1, id="vid", url="u")
-        _record_failure(item, exc)
+        record_failure(item, exc)
     assert item.error_kind == "age_restricted"
     assert item.countries == ["US"]
 

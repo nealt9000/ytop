@@ -494,7 +494,7 @@ def analyse_with_fallback(
         raise ProbeError(region_blocked_message(countries, tried, last), countries) from direct
 
 
-def _record_failure(item: ProbedItem, exc: BaseException) -> None:
+def record_failure(item: ProbedItem, exc: BaseException) -> None:
     item.error = redact(str(exc))
     # Before the region check: an age-gated video read through a proxy
     # carries the region-blocked direct failure as its cause.
@@ -555,7 +555,7 @@ def probe_video(
     except JobCancelled:
         raise
     except (ProbeError, FormatError) as exc:
-        _record_failure(item, exc)
+        record_failure(item, exc)
     except Exception as exc:  # noqa: BLE001 - the job page shows the reason
         item.error = f"{type(exc).__name__}: {exc}"
     if on_item is not None:
@@ -642,7 +642,7 @@ def probe_playlist(
         except JobCancelled:
             raise
         except (ProbeError, FormatError) as exc:
-            _record_failure(item, exc)
+            record_failure(item, exc)
         except Exception as exc:  # noqa: BLE001 - record and continue the playlist
             item.error = f"{type(exc).__name__}: {exc}"
         item.seconds = time.monotonic() - started

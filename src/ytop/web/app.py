@@ -153,6 +153,9 @@ QUIT_FLUSH_WAIT_S = 120.0
 # How long an installed app update waits for its page to show the result
 # before the process exits.
 APP_UPDATE_SHOW_S = 15.0
+# How often the open app asks whether an app re-check is due (the check
+# itself waits for ``appupdate.CHECK_EVERY``).
+RECHECK_POLL_S = 600
 
 
 def _host_name(header: str) -> str:
@@ -520,6 +523,14 @@ def create_app(
             poll_s=update_poll_s,
             done=start_checked,
         )
+        def recheck_loop() -> None:
+            while not idle_stop.wait(RECHECK_POLL_S):
+                try:
+                    releases.recheck_if_due()
+                except Exception:  # noqa: BLE001 - a check never breaks the app
+                    log.exception("app update re-check failed")
+
+        threading.Thread(target=recheck_loop, name="ytop-app-recheck", daemon=True).start()
         if portable:
             idle_thread = threading.Thread(
                 target=watch_idle, name="ytop-idle", daemon=True

@@ -716,6 +716,7 @@ def test_asks_once_then_respects_the_answer(stick: Path):
         assert fake.checks == 1
         page = client.get("/").text
         assert ASK not in page and "YTOP 0.1.0 is available" in page
+        assert 'href="/app-update"' in page and ">Update<" in page
         updates.on_start_outcome("up to date")
         assert fake.checks == 2
         updates.on_start_outcome("offline")
@@ -809,36 +810,58 @@ def test_self_update_never_rewrites_the_running_windows_launcher(
     assert (other / CMD).read_bytes().endswith(b"rem newer launcher\r\n")
 
 
-def test_start_up_app_check_runs_once_a_day(stick: Path):
-    """The start-up check waits a day once it found nothing ("Check now"
-    does not); an offer that cannot be kept (this fake's release has no
-    verified ytop-release.json) is looked for again at every start."""
+def _stick_updates(stick: Path, now: list, fake: "FakeUpdater") -> appupdate.AppUpdates:
+    from ytop.config import set_updates_option
+
+    set_updates_option(stick, "check_app", True)
+    return appupdate.AppUpdates(
+        stick / ".ytop", lambda: load_config(stick), stick, check=fake.check,
+        clock=lambda: now[0],
+    )
+
+
+def test_start_up_app_check_runs_at_every_start(stick: Path):
     from datetime import UTC, datetime, timedelta
 
     now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
     fake = FakeUpdater()
-    from ytop.config import set_updates_option
-
-    set_updates_option(stick, "check_app", True)
-    updates = appupdate.AppUpdates(
-        stick / ".ytop", lambda: load_config(stick), stick, check=fake.check,
-        clock=lambda: now[0],
-    )
+    updates = _stick_updates(stick, now, fake)
     updates.on_start_outcome("up to date")
     assert fake.checks == 1 and load_config(stick).updates.last_check
     now[0] += timedelta(hours=5)
     updates.on_start_outcome("up to date")
-    assert fake.checks == 1
-    updates.check()  # Check now
     assert fake.checks == 2
-    now[0] += timedelta(hours=20)
-    updates.on_start_outcome("up to date")
+    updates.on_start_outcome("offline")
+    assert fake.checks == 2
+    updates.on_start_outcome("off")  # component checks off: still looks
     assert fake.checks == 3
-    fake.release = _release()
-    now[0] += timedelta(days=1)
+
+
+def test_recheck_runs_every_six_hours(stick: Path):
+    from datetime import UTC, datetime, timedelta
+
+    from ytop.config import set_updates_option
+
+    start = datetime(2026, 11, 14, 9, 0, tzinfo=UTC)
+    now = [start]
+    fake = FakeUpdater()
+    updates = _stick_updates(stick, now, fake)
     updates.on_start_outcome("up to date")
-    updates.on_start_outcome("up to date")
-    assert fake.checks == 5  # an offer not kept: checked at every start
+    assert fake.checks == 1
+    now[0] = start + timedelta(hours=5)
+    updates.recheck_if_due()
+    assert fake.checks == 1
+    now[0] = start + timedelta(hours=6, minutes=1)
+    updates.recheck_if_due()
+    assert fake.checks == 2
+    now[0] += timedelta(hours=7)
+    set_updates_option(stick, "check_app", False)
+    updates.recheck_if_due()
+    assert fake.checks == 2
+    set_updates_option(stick, "check_app", True)
+    updates.phase = "installing"
+    updates.recheck_if_due()
+    assert fake.checks == 2
 
 
 def test_cleanup_ignores_an_unverifiable_lock_after_an_hour(stick: Path, monkeypatch):
@@ -1324,7 +1347,7 @@ def _latest_requests(fake: FakeReleases) -> int:
     return sum(1 for r in fake.requests if r.path.endswith("/releases/latest"))
 
 
-def test_an_offer_is_kept_between_starts_for_a_day(stick: Path, server):
+def test_a_kept_offer_shows_at_start_and_is_rechecked(stick: Path, server):
     from datetime import UTC, datetime, timedelta
 
     from ytop.config import set_updates_option
@@ -1334,30 +1357,36 @@ def test_an_offer_is_kept_between_starts_for_a_day(stick: Path, server):
     set_updates_option(stick, "api_base", server.base + "/api")
     now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
 
-    def start() -> appupdate.AppUpdates:
+    def start(outcome: str = "up to date") -> appupdate.AppUpdates:
         updates = appupdate.AppUpdates(stick / ".ytop", lambda: load_config(stick), stick,
                                        clock=lambda: now[0])
-        updates.on_start_outcome("up to date")
+        updates.on_start_outcome(outcome)
         return updates
 
     first = start()
     assert first.offer is not None and _latest_requests(server) == 1
-    # A start five hours later shows it again without asking GitHub.
+    # A start five hours later shows it and also asks GitHub.
     now[0] += timedelta(hours=5)
     again = start()
-    assert _latest_requests(server) == 1
+    assert _latest_requests(server) == 2
     assert again.offer is not None and again.offer.build_id == first.offer.build_id
     assert again.offer.doc == first.offer.doc and again.offer.notes == "Faster pages."
     assert again.status()["last_status"] == "available"
-    # After a day it is looked for again.
-    now[0] += timedelta(hours=20)
-    assert start().offer is not None and _latest_requests(server) == 2
+    # Offline an hour later: the kept offer still shows, GitHub is not asked.
+    now[0] += timedelta(hours=1)
+    offline = start("offline")
+    assert offline.offer is not None and _latest_requests(server) == 2
+    # Seven hours after the last answer the kept offer is too old.
+    now[0] += timedelta(hours=6)
+    assert start("offline").offer is None
+    now[0] += timedelta(hours=1)
+    assert start().offer is not None and _latest_requests(server) == 3
     # A kept offer for another build of the stick (it was updated or
     # reverted since) is not used.
     now[0] += timedelta(hours=1)
     _set_build(stick / ".ytop", build_id="202601010000-other00")
     start()
-    assert _latest_requests(server) == 3
+    assert _latest_requests(server) == 4
     # "Check now" finding nothing forgets it.
     path = appupdate._offer_path(stick)
     assert path.is_file()

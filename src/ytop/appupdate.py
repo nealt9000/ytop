@@ -12,9 +12,10 @@ releases API; its ``ytop-release.json`` (see ``tools/package_release.py``)
 is trusted only once it matches the release's ``SHA256SUMS``.  A release is
 offered when its ``build_id`` differs from the stick's, its version is newer
 (PEP 440 order) and it carries every platform the stick does.  An offer
-is kept in the library's cache (:func:`save_offer`), so the start-up check
-shows it again for a day without asking GitHub; once a check found nothing,
-the start-up check waits a day too.
+is kept in the library's cache (:func:`save_offer`) and shown again at the
+next start (for up to :data:`CHECK_EVERY`) even when GitHub cannot be
+reached.  Sticks that said yes check at every start and, while the app
+stays open, again every :data:`CHECK_EVERY` (6 h; :meth:`AppUpdates.recheck_if_due`).
 
 **Installing** (:func:`install_app`, after the user confirmed):
 
@@ -85,7 +86,7 @@ SUMS = "SHA256SUMS"
 DOWNLOADS = ".downloads"  # inside the staging folder, while fetching
 NOTES_LIMIT = 20_000
 # The start-up check, once it found nothing to offer, waits this long.
-CHECK_EVERY = timedelta(hours=24)
+CHECK_EVERY = timedelta(hours=6)
 # What the start-up component check returns when the network answered
 # (``recent``: it answered within the last day, see autoupdate.check_due).
 ONLINE_OUTCOMES = frozenset({
@@ -988,22 +989,32 @@ class AppUpdates:
         self.online = outcome in ONLINE_OUTCOMES
         if not self.available or self.config().updates.check_app is not True:
             return
-        if not (self.online or outcome == "off"):
+        self._restore_offer()  # a kept offer shows at once, even offline
+        if self.online or outcome == "off":
+            self._record_check(self.check())
+
+    def recheck_if_due(self) -> None:
+        """Look again while the app stays open, once ``CHECK_EVERY`` has
+        passed since the last answer.  Never raises."""
+        try:
+            if (not self.available or self.config().updates.check_app is not True
+                    or self.busy or not self._check_due()):
+                return
+            self._record_check(self.check())
+        except Exception:
+            log.warning("the app update re-check failed", exc_info=True)
+
+    def _record_check(self, result: AppCheck) -> None:
+        """GitHub answered: the next check is due ``CHECK_EVERY`` from now."""
+        if result.status in ("offline", "error"):
             return
-        if self._restore_offer():  # found less than a day ago: shown again
+        self.online = True
+        if self.library_root is None:
             return
-        if not self._check_due():
-            return
-        result = self.check()
-        if result.status not in ("offline", "error"):
-            self.online = True
-        if result.status in ("up_to_date", "unsupported") and self.library_root is not None:
-            # Nothing to offer: the next start-up check waits a day (an
-            # offer is kept, and shown again for a day, see _keep).
-            try:
-                set_updates_option(self.library_root, "last_check", self.clock().isoformat())
-            except (OSError, ValueError):
-                log.warning("could not record the app update check", exc_info=True)
+        try:
+            set_updates_option(self.library_root, "last_check", self.clock().isoformat())
+        except (OSError, ValueError):
+            log.warning("could not record the app update check", exc_info=True)
 
     def _check_due(self) -> bool:
         raw = self.config().updates.last_check

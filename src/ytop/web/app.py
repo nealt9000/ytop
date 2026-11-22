@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import __build__ as ytop_build
@@ -470,6 +470,16 @@ def create_app(
             raise HTTPException(
                 status_code=403, detail="missing or invalid CSRF token"
             )
+
+    async def form_data(request: Request) -> FormData:
+        """The posted form, read on the event loop.
+
+        Form routes take it as a dependency so they can stay plain ``def``:
+        FastAPI runs those in a worker thread, so their disk work (renaming a
+        playlist's files on a slow stick can take minutes) never stalls the
+        loop and every other request with it.
+        """
+        return await request.form()
 
     def require_token(request: Request) -> None:
         presented = request.headers.get("x-ytop-token") or ""
@@ -947,8 +957,7 @@ def create_app(
         )
 
     @app.post("/playlist/new")
-    async def new_playlist_submit(request: Request):
-        form = await request.form()
+    def new_playlist_submit(request: Request, form: FormData = Depends(form_data)):
         title = str(form.get("title") or "").strip()
         selections: list[tuple[str, str]] = []
         for raw in form.getlist("video"):
@@ -1039,12 +1048,15 @@ def create_app(
         )
 
     @app.post("/playlist/{playlist_id}/title")
-    async def playlist_title(request: Request, playlist_id: str):
+    def playlist_title(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         refuse_ambiguous(playlist_id)
         if lib.resolve_playlist(playlist_id) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
         require_idle(playlist_id, "renaming this playlist")
-        form = await request.form()
         lib.set_playlist_title(playlist_id, str(form.get("title") or ""))
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
@@ -1087,9 +1099,12 @@ def create_app(
         return ref, str(doc.get("id") or "")
 
     @app.post("/playlist/{playlist_id}/tags")
-    async def playlist_tags(request: Request, playlist_id: str):
+    def playlist_tags(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         ref, pid = tag_target(playlist_id)
-        form = await request.form()
         action = str(form.get("action") or "")
         tag = str(form.get("tag") or "")
         # A malformed request is refused as such, whatever the library.
@@ -1103,10 +1118,13 @@ def create_app(
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/category")
-    async def playlist_category(request: Request, playlist_id: str):
+    def playlist_category(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         ref, pid = tag_target(playlist_id)
         store = tag_store_for(ref)
-        form = await request.form()
         category = str(form.get("category") or "").strip()
         edit_tags(lambda: store.set_category(pid, category or None))
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
@@ -1159,14 +1177,18 @@ def create_app(
         )
 
     @app.post("/tags/{library_id}/{action}")
-    async def tags_edit(request: Request, library_id: str, action: str):
+    def tags_edit(
+        request: Request,
+        library_id: str,
+        action: str,
+        form: FormData = Depends(form_data),
+    ):
         if action not in ("rename", "hide", "unhide"):
             raise HTTPException(status_code=404)
         ref = libs.get(library_id)
         if ref is None:
             raise HTTPException(status_code=404, detail="library not found")
         store = tag_store_for(ref)
-        form = await request.form()
         key = str(form.get("key") or "")
         if action == "rename":
             label = str(form.get("label") or "")
@@ -1178,8 +1200,11 @@ def create_app(
         return RedirectResponse(f"/tags?library={library_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/videos/{video_id}/title")
-    async def video_title(
-        request: Request, playlist_id: str, video_id: str
+    def video_title(
+        request: Request,
+        playlist_id: str,
+        video_id: str,
+        form: FormData = Depends(form_data),
     ):
         refuse_ambiguous(playlist_id)
         video = lib.video_view(playlist_id, video_id)
@@ -1193,7 +1218,6 @@ def create_app(
                     detail="Cancel the download before renaming this video; "
                            "a playlist holding it is downloading.",
                 )
-        form = await request.form()
         lib.set_video_title(playlist_id, video_id, str(form.get("title") or ""))
         return RedirectResponse(
             f"/watch/{playlist_id}/{video_id}", status_code=303
@@ -1213,9 +1237,13 @@ def create_app(
         return RedirectResponse("/", status_code=303)
 
     @app.post("/playlist/{playlist_id}/videos/{video_id}/remove")
-    async def video_remove(request: Request, playlist_id: str, video_id: str):
+    def video_remove(
+        request: Request,
+        playlist_id: str,
+        video_id: str,
+        form: FormData = Depends(form_data),
+    ):
         refuse_ambiguous(playlist_id)
-        form = await request.form()
         keep_media = str(form.get("keep_media") or "") == "1"
         job = active_job_for(playlist_id)
         if job is not None:
@@ -1230,10 +1258,13 @@ def create_app(
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/reorder")
-    async def playlist_reorder(request: Request, playlist_id: str):
+    def playlist_reorder(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         refuse_ambiguous(playlist_id)
         require_idle(playlist_id, "reordering this playlist")
-        form = await request.form()
         video_id = str(form.get("video_id") or "")
         direction = str(form.get("direction") or "")
         order = str(form.get("order") or "")
@@ -1253,14 +1284,17 @@ def create_app(
         return RedirectResponse(f"/playlist/{playlist_id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/move")
-    async def playlist_move(request: Request, playlist_id: str):
+    def playlist_move(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         refuse_ambiguous(playlist_id)
         if active_job_for(playlist_id) is not None:
             raise HTTPException(
                 status_code=409,
                 detail="Finish or cancel the active job for this playlist first.",
             )
-        form = await request.form()
         location_id = str(form.get("location") or "").strip()
         if not location_id:
             raise HTTPException(
@@ -1275,7 +1309,11 @@ def create_app(
         return RedirectResponse(f"/move/{job.id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/options")
-    async def playlist_options(request: Request, playlist_id: str):
+    def playlist_options(
+        request: Request,
+        playlist_id: str,
+        form: FormData = Depends(form_data),
+    ):
         refuse_ambiguous(playlist_id)
         if lib.resolve_playlist(playlist_id) is None:
             raise HTTPException(status_code=404, detail="playlist not found")
@@ -1284,7 +1322,6 @@ def create_app(
                 status_code=409,
                 detail="Cancel the download before changing playlist options.",
             )
-        form = await request.form()
         lib.set_preserve_audio(
             playlist_id, str(form.get("preserve_audio") or "") == "1"
         )
@@ -1385,8 +1422,7 @@ def create_app(
         return render(request, "add.html", job=None, **storage_context())
 
     @app.post("/add")
-    async def add_submit(request: Request):
-        form = await request.form()
+    def add_submit(request: Request, form: FormData = Depends(form_data)):
         url = str(form.get("url") or "").strip()
         if not url:
             return not_found(request, "Paste a playlist or video URL.", status_code=400)
@@ -1478,8 +1514,7 @@ def create_app(
         return _render_storage(request, refresh=bool(refresh))
 
     @app.post("/storage/add")
-    async def storage_add(request: Request):
-        form = await request.form()
+    def storage_add(request: Request, form: FormData = Depends(form_data)):
         path = str(form.get("path") or "").strip()
         label = str(form.get("label") or "").strip()
         if not path:
@@ -1493,8 +1528,11 @@ def create_app(
         return RedirectResponse("/storage", status_code=303)
 
     @app.post("/storage/{library_id}/label")
-    async def storage_label(request: Request, library_id: str):
-        form = await request.form()
+    def storage_label(
+        request: Request,
+        library_id: str,
+        form: FormData = Depends(form_data),
+    ):
         try:
             libs.set_info(
                 library_id,
@@ -1575,8 +1613,7 @@ def create_app(
         return _render_settings(request)
 
     @app.post("/settings/platforms")
-    async def settings_add_platforms(request: Request):
-        form = await request.form()
+    def settings_add_platforms(request: Request, form: FormData = Depends(form_data)):
         wanted = [str(value) for value in form.getlist("platforms")]
         try:
             adds.start(wanted)
@@ -1585,8 +1622,7 @@ def create_app(
         return RedirectResponse("/settings#this-stick", status_code=303)
 
     @app.post("/settings/downloads")
-    async def settings_downloads(request: Request):
-        form = await request.form()
+    def settings_downloads(request: Request, form: FormData = Depends(form_data)):
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
 
@@ -1618,8 +1654,7 @@ def create_app(
         return RedirectResponse("/settings#downloads", status_code=303)
 
     @app.post("/settings/proxies")
-    async def settings_proxies(request: Request):
-        form = await request.form()
+    def settings_proxies(request: Request, form: FormData = Depends(form_data)):
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
         for field_name in ("servers", "username", "password"):
@@ -1652,8 +1687,7 @@ def create_app(
         return RedirectResponse("/settings#proxies", status_code=303)
 
     @app.post("/settings/age-gate")
-    async def settings_age_gate(request: Request):
-        form = await request.form()
+    def settings_age_gate(request: Request, form: FormData = Depends(form_data)):
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
         raw = str(form.get("browser") or "")
@@ -1680,8 +1714,7 @@ def create_app(
         return RedirectResponse("/downloads", status_code=303)
 
     @app.post("/storage/components/settings")
-    async def components_settings(request: Request):
-        form = await request.form()
+    def components_settings(request: Request, form: FormData = Depends(form_data)):
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
         try:
@@ -1694,11 +1727,10 @@ def create_app(
 
     # -- app updates -------------------------------------------------------
     @app.post("/app-update/answer")
-    async def app_update_answer(request: Request):
-        form = await request.form()
+    def app_update_answer(request: Request, form: FormData = Depends(form_data)):
         yes = str(form.get("answer") or "") == "yes"
         try:
-            await run_in_threadpool(releases.answer, yes)
+            releases.answer(yes)
         except (OSError, ValueError) as exc:
             raise HTTPException(
                 status_code=409, detail=f"Could not save the answer: {exc}"
@@ -1708,8 +1740,7 @@ def create_app(
         )
 
     @app.post("/storage/app/settings")
-    async def app_update_settings(request: Request):
-        form = await request.form()
+    def app_update_settings(request: Request, form: FormData = Depends(form_data)):
         if update_root is None:
             raise HTTPException(status_code=409, detail="No library is connected.")
         try:
@@ -1719,9 +1750,9 @@ def create_app(
         return RedirectResponse("/settings", status_code=303)
 
     @app.post("/app-update/check")
-    async def app_update_check():
+    def app_update_check():
         try:
-            await run_in_threadpool(releases.check)
+            releases.check()
         except ValueError as exc:  # installing
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse("/app-update", status_code=303)
@@ -1744,8 +1775,7 @@ def create_app(
         return response
 
     @app.post("/app-update/install")
-    async def app_update_install(request: Request):
-        form = await request.form()
+    def app_update_install(request: Request, form: FormData = Depends(form_data)):
         build_id = str(form.get("build_id") or "")
         if active_job_count() > 0:
             raise HTTPException(
@@ -1762,8 +1792,7 @@ def create_app(
         return RedirectResponse("/app-update", status_code=303)
 
     @app.post("/app-update/revert")
-    async def app_update_revert(request: Request):
-        form = await request.form()
+    def app_update_revert(request: Request, form: FormData = Depends(form_data)):
         build_id = str(form.get("build_id") or "")
         if active_job_count() > 0:
             raise HTTPException(
@@ -1772,8 +1801,7 @@ def create_app(
                        "then revert.",
             )
         try:
-            await run_in_threadpool(
-                releases.start_revert,
+            releases.start_revert(
                 build_id, before_switch=stop_for_install, finished=install_finished,
             )
         except ValueError as exc:
@@ -1876,8 +1904,7 @@ def create_app(
         return _render_make_stick(request, target, platforms=platforms)
 
     @app.post("/make-stick")
-    async def make_stick_submit(request: Request):
-        form = await request.form()
+    def make_stick_submit(request: Request, form: FormData = Depends(form_data)):
         raw_target = str(form.get("target") or "").strip()
         platforms = [str(value) for value in form.getlist("platforms")]
         playlists = [str(value) for value in form.getlist("playlists")]
@@ -1891,7 +1918,7 @@ def create_app(
             )
 
         try:
-            image, stick_plan = await run_in_threadpool(plan)
+            image, stick_plan = plan()
         except ValueError as exc:
             return _render_make_stick(
                 request, raw_target, str(exc), 400, platforms=platforms,
@@ -1929,8 +1956,7 @@ def create_app(
         )
 
     @app.post("/add/video")
-    async def add_video_submit(request: Request):
-        form = await request.form()
+    def add_video_submit(request: Request, form: FormData = Depends(form_data)):
         url = str(form.get("url") or "").strip()
         playlist_id = str(form.get("playlist") or "").strip()
         preserve = str(form.get("preserve_audio") or "") == "1"
@@ -2021,8 +2047,11 @@ def create_app(
         return render(request, "move.html", job=job)
 
     @app.post("/jobs/{job_id}/download")
-    async def job_download(request: Request, job_id: str):
-        form = await request.form()
+    def job_download(
+        request: Request,
+        job_id: str,
+        form: FormData = Depends(form_data),
+    ):
         policy = str(form.get("policy") or "efficient").strip()
         raw_preserve = form.get("preserve_audio")
         preserve = (
@@ -2041,8 +2070,7 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse(f"/add/{job_id}", status_code=303)
 
-    async def _job_action(request: Request, job_id: str, action: str):
-        form = await request.form()
+    def _job_action(form: FormData, job_id: str, action: str):
         next_url = _safe_next_url(str(form.get("next") or "/downloads"))
         try:
             if action == "cancel":
@@ -2056,12 +2084,12 @@ def create_app(
         return RedirectResponse(next_url, status_code=303)
 
     @app.post("/jobs/{job_id}/cancel")
-    async def job_cancel(request: Request, job_id: str):
-        return await _job_action(request, job_id, "cancel")
+    def job_cancel(job_id: str, form: FormData = Depends(form_data)):
+        return _job_action(form, job_id, "cancel")
 
     @app.post("/jobs/{job_id}/remove")
-    async def job_remove(request: Request, job_id: str):
-        return await _job_action(request, job_id, "remove")
+    def job_remove(job_id: str, form: FormData = Depends(form_data)):
+        return _job_action(form, job_id, "remove")
 
     @app.get("/downloads")
     def downloads_page(request: Request):
@@ -2143,8 +2171,7 @@ def create_app(
         return Response(status_code=204)
 
     @app.post("/api/quit")
-    async def quit_api(request: Request):
-        form = await request.form()
+    def quit_api(request: Request, form: FormData = Depends(form_data)):
         force = str(form.get("force") or "") == "1"
         # The Quit form posted without JavaScript carries its token as a
         # field; the script sends it as a header and wants JSON back.
@@ -2163,7 +2190,7 @@ def create_app(
         # Rendered before anything stops: the page needs nothing afterwards.
         stopped = templates.get_template("stopped.html")
         page, saving = stopped.render(), stopped.render(saving=True)
-        if not await run_in_threadpool(quit_now, force):
+        if not quit_now(force):
             return busy(max(active_job_count(), 1))
         # A flush already under way that outlasted the wait: not safe yet.
         done = quit_done.is_set()

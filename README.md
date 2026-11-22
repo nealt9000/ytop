@@ -213,8 +213,17 @@ and the next push's run releases everything since the last tag.
 If a release run fails after its push landed (the tag exists but there is no
 release), use **Re-run failed jobs**, not **Re-run all jobs**: re-running
 everything re-plans, finds itself superseded and leaves the tag without a
-release. The last resort is `gh release create vX.Y.Z` by hand from the run's
-packaged files.
+release. If re-running fails too, finish it by hand while the run's artifacts
+are still kept (7 days):
+
+```sh
+git pull --ff-only                  # the release commit: package_release checks the version
+gh run download <run-id> -n stick   # one artifact at a time lands in this folder
+gh run download <run-id> -n bump
+mkdir -p dist && tar -C dist -xf stick.tar
+uv run python tools/package_release.py dist/stick/.ytop release
+gh release create vX.Y.Z release/* --title "YTOP vX.Y.Z" --notes-file notes.md --verify-tag
+```
 
 The bot commits `chore(release): vX.Y.Z` to `main` (as `github-actions[bot]`),
 so pull before your next push.

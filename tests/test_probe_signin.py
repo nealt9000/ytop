@@ -140,8 +140,8 @@ def test_signed_in_without_deno_says_so(fake_analyse, text):
     fake_analyse.script = lambda vid, proxy, signin: ProbeError(text) if signin else ProbeError(AGE)
     item = probe_video("vid", Config(age_gate_browser="firefox")).items[0]
     assert item.error == (
-        "Age-restricted — signed-in retry failed: signed-in reads need a "
-        "JavaScript runtime (Deno), which is missing"
+        "Age-restricted — signed-in retry failed: signed-in reads may need a "
+        "JavaScript runtime (Deno)"
     )
 
 

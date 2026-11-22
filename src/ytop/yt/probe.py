@@ -361,7 +361,8 @@ _PATHS = re.compile(
     r"""|\b[A-Za-z]:\\[^\s'"]*"""
     r"""|(?<![\w:/.~-])~?/[^\s'"]+"""
 )
-# A signed-in read gets only images or no usable format without a JS runtime.
+# A signed-in read gets only images or no usable format without a JS runtime
+# (no usable format can have other causes too, hence "may need").
 _NEEDS_DENO = re.compile(
     r"only images are available|n challenge solving failed|requested format is not available",
     re.IGNORECASE,
@@ -381,7 +382,7 @@ def _signin_failure_reason(text: str, browser: str) -> str:
     if is_bot_check(text):
         return "YouTube asked to confirm it is not a bot"
     if _NEEDS_DENO.search(text):
-        return "signed-in reads need a JavaScript runtime (Deno), which is missing"
+        return "signed-in reads may need a JavaScript runtime (Deno)"
     text = _PATHS.sub("<path>", redact(text))
     # A bare profile name; a short one ("1") would mask unrelated text.
     if len(profile) >= 4:

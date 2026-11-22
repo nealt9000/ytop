@@ -35,7 +35,13 @@ from ..config import SESSION_AUTH, Config, load_config
 from ..fsinfo import fits_on, free_bytes
 from ..libraries import READ_ONLY_MESSAGE, LibraryRef, LibrarySet
 from ..timing import Phase, summary_lines
-from ..yt.download import ItemResult, download_probe, media_destination, media_lookup
+from ..yt.download import (
+    ItemResult,
+    download_probe,
+    media_destination,
+    media_lookup,
+    upgrade_lookup,
+)
 from ..yt.formats import allocate_efficient, audio_detail, select_format
 from ..yt.metadata import (
     CorruptDocumentError,
@@ -91,6 +97,10 @@ INTERRUPTED_MESSAGE = (
 )
 # Nonterminal progress is coalesced; a terminal transition always flushes.
 SAVE_INTERVAL_S = 0.75
+
+
+# Heights a web upgrade pass can raise a playlist to (#54).
+UPGRADE_HEIGHTS = (720, 1080, 1440, 2160)
 
 
 class JobDestinationError(RuntimeError):
@@ -213,6 +223,9 @@ class Job:
     # whether the download re-reads their details anyway.
     existing_count: int = 0
     refresh_existing: bool = False
+    # An upgrade pass (``ytop fetch --upgrade``): only videos stored below
+    # this height (or missing) are read again; 0 is an ordinary sync.
+    upgrade_height: int = 0
     # Videos whose selected rendition exceeds FAT32's 4 GB file limit on the
     # destination drive (the download refuses them).
     fat32_warning: bool = False
@@ -587,9 +600,14 @@ class JobManager:
 
     def _media_lookup(self, job: Job) -> Callable[[str, str], bool] | None:
         """Videos already downloaded into the job's library, which a probe
-        does not re-read (``None``: the library is not known or online)."""
+        does not re-read (``None``: the library is not known or online).  For
+        an upgrade, only those stored at or above its height."""
         ref = self._lib.libraries.get(job.library_id) if job.library_id else None
-        return media_lookup(ref.layout) if ref is not None else None
+        if ref is None:
+            return None
+        if job.upgrade_height:
+            return upgrade_lookup(ref.layout, job.upgrade_height)
+        return media_lookup(ref.layout)
 
     def _job_cache_root(self, job: Job) -> Path | None:
         """Where yt-dlp's cache lives: the job's destination library, else
@@ -1053,7 +1071,10 @@ class JobManager:
         limit: int | None = None,
         preserve_audio: bool | None = None,
         library_id: str | None = None,
+        upgrade_height: int = 0,
     ) -> Job:
+        if upgrade_height and upgrade_height not in UPGRADE_HEIGHTS:
+            raise ValueError(f"an upgrade goes to one of {UPGRADE_HEIGHTS}")
         cleaned = url.strip()
         playlist_id = ""
         try:
@@ -1099,7 +1120,8 @@ class JobManager:
             kind="playlist",
             playlist_id=playlist_id,
             target_mb_per_hour=config.target_mb_per_hour,
-            max_height=config.max_height,
+            max_height=upgrade_height or config.max_height,
+            upgrade_height=upgrade_height,
             preserve_audio=resolved_audio,
             audio_policy=audio_policy,
             library_id=location.id,
@@ -1456,7 +1478,7 @@ class JobManager:
                 url, config, limit=limit,
                 on_item=on_item, on_total=on_total,
                 on_item_start=on_start,
-                max_height=config.max_height,
+                max_height=job.upgrade_height or config.max_height,
                 target_mb_per_hour=config.target_mb_per_hour,
                 min_height=config.min_height,
                 probe_jobs=config.probe_jobs,
@@ -2024,6 +2046,8 @@ class JobManager:
                         (resolved[2].get("options") or {}).get("preserve_audio")
                     )
             config = self._job_config(job)
+            if job.upgrade_height:  # the height the upgrade was started for
+                policy, refresh_existing = f"{job.upgrade_height}p", False
             target_mb, max_height = policy_settings(policy, config)
             # "Sync again" and retries fetch fresh remote metadata; a review
             # just made ("ready") is used as it is, never read twice.
@@ -2404,6 +2428,7 @@ class JobManager:
                 fetch_transcripts=True,
                 preserve_audio=job.preserve_audio,
                 refresh_existing=job.refresh_existing,
+                upgrade=bool(job.upgrade_height),
                 # A single video added to a playlist leaves its quality alone.
                 quality=None if job.kind == "video" else job.policy,
                 library_root=location.root,

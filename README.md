@@ -430,6 +430,9 @@ uv run mypy                  # typed modules listed in pyproject.toml
 ```
 
 The test suite runs offline and isolates `HOME` and the library registry.
+Trying the age-gate sign-in from a checkout needs `deno` on your `PATH`
+(signed in, YouTube requires its JavaScript challenge solved; a stick carries
+its own Deno).
 `benchmarks/bench_library.py` is a synthetic, offline library read and index
 benchmark.
 

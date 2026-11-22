@@ -72,6 +72,19 @@
             <p class="muted tiny">Video stays efficient; the best available audio rendition is kept. Applies to new downloads and syncs; existing media keeps the track it was downloaded with.</p>
             <button type="submit" class="btn tiny">Save audio policy</button>
           </form>
+          {% if upgrade_reads %}
+          <form action="/playlist/{{ playlist.key }}/upgrade" method="post" class="stack-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label for="upgrade-height">Upgrade quality</label>
+            <select id="upgrade-height" name="height">
+              {% for height, reads in upgrade_reads %}
+              <option value="{{ height }}"{% if not reads %} disabled{% endif %}>{{ height }}p — {% if reads %}re-reads {{ reads }} video{% if reads != 1 %}s{% endif %}{% else %}all there already{% endif %}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn tiny">Review upgrade</button>
+            <p class="muted tiny">Reads each video stored below that height (and any missing) from YouTube, then replaces only those it now offers taller. Many reads in a row can make YouTube ask whether you're a bot.</p>
+          </form>
+          {% endif %}
           <form action="/playlist/{{ playlist.key }}/delete" method="post"
                 data-confirm="Remove “{{ playlist.title }}” and all of its downloaded media from disk? Watch history is kept."
                 data-confirm-action="Remove playlist">

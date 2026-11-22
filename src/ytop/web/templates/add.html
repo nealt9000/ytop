@@ -65,7 +65,7 @@
 {% elif job.status == "ready" %}
 <section class="playlist-hero add-hero">
   <div class="playlist-hero-info">
-    <p class="eyebrow">Ready to add</p>
+    <p class="eyebrow">{% if job.upgrade_height %}Ready to upgrade to {{ job.upgrade_height }}p{% else %}Ready to add{% endif %}</p>
     <h1>{{ job.title }}</h1>
     <p class="muted">
       {{ job.channel or "Unknown channel" }}
@@ -97,7 +97,13 @@
 {% if job.fat32_warning %}
 <p class="form-error">⚠ {{ job.fat32_count }} videos exceed FAT32's 4 GB limit on this drive</p>
 {% endif %}
-{% if job.kind == "video" %}
+{% if job.upgrade_height %}
+<p class="muted small">
+  Upgrade pass: {{ job.video_count - job.existing_count }} video{% if job.video_count - job.existing_count != 1 %}s{% endif %}
+  stored below {{ job.upgrade_height }}p (or missing) {% if job.video_count - job.existing_count != 1 %}were{% else %}was{% endif %} read from YouTube.
+  Each one is replaced only if YouTube now offers it taller; the rest of the playlist is left alone.
+</p>
+{% elif job.kind == "video" %}
 <p class="muted small">
   This video is added to
   <a href="/playlist/{{ playlist_key(job.library_id, job.target_playlist_id) }}">{{ job.target_playlist_title }}</a>.
@@ -126,6 +132,9 @@
 
 <form action="/jobs/{{ job.id }}/download" method="post" class="download-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% if job.upgrade_height %}
+  <input type="hidden" name="policy" value="{{ job.upgrade_height }}p">
+  {% else %}
   <fieldset class="policy-fieldset">
     <legend>Download quality</legend>
     {% for option in job.quality_options %}
@@ -135,11 +144,12 @@
     </label>
     {% endfor %}
   </fieldset>
+  {% endif %}
   <label class="check-row">
     <input type="checkbox" name="preserve_audio" value="1" {% if job.preserve_audio %}checked{% endif %}>
     <span>Keep high-quality audio <small class="muted">(music playlists)</small></span>
   </label>
-  {% if job.existing_count %}
+  {% if job.existing_count and not job.upgrade_height %}
   <label class="check-row">
     <input type="checkbox" name="refresh_existing" value="1" {% if job.refresh_existing %}checked{% endif %}>
     <span>Also refresh the {{ job.existing_count }} video{% if job.existing_count != 1 %}s{% endif %} already downloaded
@@ -147,7 +157,8 @@
   </label>
   {% endif %}
   <button type="submit" class="btn primary">
-    {% if job.kind == "video" %}Add to {{ job.target_playlist_title }}
+    {% if job.upgrade_height %}Upgrade to {{ job.upgrade_height }}p
+    {% elif job.kind == "video" %}Add to {{ job.target_playlist_title }}
     {% elif job.in_library %}Sync playlist{% else %}Download playlist{% endif %}
   </button>
   <a class="btn ghost" href="/downloads">All downloads</a>
@@ -254,7 +265,7 @@
   <form action="/jobs/{{ job.id }}/download" method="post" class="inline-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="policy" value="{{ job.policy }}">
-    <button type="submit" class="btn ghost">{% if job.kind == "video" %}Add again{% else %}Sync again{% endif %}</button>
+    <button type="submit" class="btn ghost">{% if job.kind == "video" %}Add again{% elif job.upgrade_height %}Upgrade again{% else %}Sync again{% endif %}</button>
   </form>
   <a class="btn ghost" href="/downloads">All downloads</a>
   <a class="btn ghost" href="/">Library</a>

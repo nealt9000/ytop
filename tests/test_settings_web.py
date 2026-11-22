@@ -266,6 +266,20 @@ def test_settings_age_gate_saves_and_shows(home):
     client.app.state.jobs.close()
 
 
+@pytest.mark.parametrize("deno", [None, "/usr/bin/deno"])
+def test_settings_age_gate_warns_without_deno(home, monkeypatch, deno):
+    from pathlib import Path
+
+    import ytop.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "js_runtime", lambda: Path(deno) if deno else None)
+    client = _client(home, FakeAdds(None))
+    client.post("/settings/age-gate", data={"browser": "firefox:Prof"})
+    page = client.get("/settings").text
+    assert ("needs Deno" in page) is (deno is None)
+    client.app.state.jobs.close()
+
+
 def test_settings_age_gate_rejects_bad_input(home):
     client = _client(home, FakeAdds(None))
     r = client.post("/settings/age-gate", data={"browser": "netscape"})

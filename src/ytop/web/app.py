@@ -57,7 +57,13 @@ from ..startup import StartupClock, from_environment
 from ..stickplatforms import PlatformAdds, platform_label
 from ..tags import TagStore, apply_edits, effective_category, normalize_tag
 from ..targets import TargetError, parse_target
-from ..toolchain import deno_path, ffmpeg_path, ffprobe_path, toolchain_source
+from ..toolchain import (
+    deno_path,
+    ffmpeg_path,
+    ffprobe_path,
+    js_runtime,
+    toolchain_source,
+)
 from ..yt.browsers import firefox_profiles
 from ..yt.metadata import (
     CorruptDocumentError,
@@ -78,7 +84,7 @@ from .browse import (
     storage_usage,
 )
 from .fsops import STAGING_PREFIX
-from .jobs import JobManager
+from .jobs import UPGRADE_HEIGHTS, JobManager
 from .library import Library
 from .render import (
     format_date,
@@ -1056,7 +1062,31 @@ def create_app(
             can_edit_tags=ref is not None and _tags_writable(ref),
             proxies_set=bool(update_root is not None and load_config(update_root).proxies),
             age_gate_set=_age_gate_set(),
+            upgrade_reads=(
+                playlist.upgrade_reads(UPGRADE_HEIGHTS)
+                if playlist.kind == "youtube" and live_job is None else []
+            ),
         )
+
+    @app.post("/playlist/{playlist_id}/upgrade")
+    def playlist_upgrade(playlist_id: str, form: FormData = Depends(form_data)):
+        """Start an upgrade pass (#54): a review of only the videos stored
+        below the chosen height, then the same download as a sync."""
+        playlist = lib.playlist_view(playlist_id)
+        if playlist is None or playlist.kind != "youtube":
+            raise HTTPException(status_code=404, detail="playlist not found")
+        try:
+            height = int(str(form.get("height") or ""))
+            job = app.state.jobs.create_probe(
+                f"https://www.youtube.com/playlist?list={playlist.id}",
+                library_id=playlist.library_id,
+                upgrade_height=height,
+            )
+        except ReadOnlyLibraryError:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(f"/add/{job.id}", status_code=303)
 
     @app.post("/playlist/{playlist_id}/title")
     def playlist_title(
@@ -1611,6 +1641,7 @@ def create_app(
             # Explicit profiles only: a bare browser name means its Default
             # profile, usually the owner's own account.
             age_gate_choices=firefox_profiles(),
+            js_runtime_missing=js_runtime() is None,
             proxy_servers_text=(format_servers(load_config(update_root).proxies)
                                 if update_root is not None else ""),
             height_choices=[0, 480, 720, 1080, 1440, 2160],

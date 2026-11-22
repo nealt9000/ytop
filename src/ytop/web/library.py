@@ -16,6 +16,7 @@ import shutil
 import threading
 import uuid
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -630,6 +631,18 @@ class PlaylistView:
     @property
     def is_local(self) -> bool:
         return self.kind == "local"
+
+    def upgrade_reads(self, heights: Iterable[int]) -> list[tuple[int, int]]:
+        """``(height, videos an upgrade to it reads from YouTube)``: those not
+        stored at or above it (missing ones included), as ``upgrade_lookup``
+        decides; read from ``meta.json``, no network."""
+        return [
+            (height, sum(
+                1 for entry in self.entries
+                if not (entry.available and entry.height and entry.height >= height)
+            ))
+            for height in heights
+        ]
 
 
 @dataclass

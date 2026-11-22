@@ -296,3 +296,72 @@ def test_transcript_api_is_skipped_for_a_socks_proxy(monkeypatch):
     with using_proxy("socks5h://us:1080"):
         assert fetch_transcript_api("vid", ["en"]) is None
     assert built == []
+
+
+def _recording_proxy(body: bytes):
+    """A plain HTTP proxy on localhost: records each request's target URL."""
+    import http.server
+    import threading
+
+    seen: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server naming
+            seen.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def test_a_caption_goes_through_the_proxy_that_read_the_video():
+    """#51: captions of a video read through a region proxy use that proxy."""
+    from ytop.yt.proxies import using_proxy
+
+    server, seen = _recording_proxy(b'{"events": []}')
+    try:
+        with using_proxy(f"http://127.0.0.1:{server.server_address[1]}"):
+            data = download_caption(
+                Caption("en", "auto", "json3", "http://captions.invalid/tt?v=x"),
+                retries=0,
+            )
+    finally:
+        server.shutdown()
+    assert data == b'{"events": []}'
+    assert seen == ["http://captions.invalid/tt?v=x"]
+
+
+def test_a_failing_caption_proxy_keeps_its_password_out_of_the_error():
+    import socket
+
+    from ytop.yt.proxies import using_proxy
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # closed once the block ends
+    with using_proxy(f"http://user:hunter2@127.0.0.1:{port}"), \
+            pytest.raises(CaptionError) as caught:
+        download_caption(
+            Caption("en", "auto", "json3", "http://captions.invalid/tt"),
+            retries=0,
+        )
+    assert "hunter2" not in str(caught.value)
+    assert "hunter2" not in repr(caught.value.__cause__)
+
+
+def test_a_caption_carries_the_age_gate_sign_in():
+    from ytop.yt.signin import using_signin
+
+    assert captions._opener_params(30.0) is None  # no proxy, no sign-in: plain urllib
+    with using_signin("firefox:/home/user/profile"):
+        params = captions._opener_params(30.0)
+    assert params is not None
+    assert params["cookiesfrombrowser"] == ("firefox", "/home/user/profile", None, None)
+    assert "proxy" not in params

@@ -1055,3 +1055,105 @@ def test_review_rows_keep_the_region_blocked_kind(tmp_path: Path):
     )
     review = jobs_module._compact_probe(probe, Config(), False, tmp_path)
     assert review["items"][0]["error_kind"] == "region_blocked"
+
+
+def test_an_upgrade_rereads_only_videos_below_its_height(tmp_path: Path, monkeypatch):
+    """#54: the web upgrade pass works like ``ytop fetch --upgrade``."""
+    probes: list[dict] = []
+    looked_up: list[int | None] = []
+    downloads: list[dict] = []
+
+    def recording_probe(value, config, **kwargs):
+        probes.append(kwargs)
+        return fake_probe(value, config, **kwargs)
+
+    def fake_upgrade_lookup(layout, max_height):
+        looked_up.append(max_height)
+        return lambda playlist_id, video_id: False
+
+    def fake_download(probe, config, **kwargs):
+        downloads.append(kwargs)
+        return FetchResult(tmp_path, probe.playlist, [], total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", recording_probe)
+    monkeypatch.setattr(jobs_module, "upgrade_lookup", fake_upgrade_lookup)
+    monkeypatch.setattr(jobs_module, "download_probe", fake_download)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001", upgrade_height=1080)
+    job = wait_for(manager, job.id, {"ready"})
+    assert job.upgrade_height == 1080
+    assert probes[0]["max_height"] == 1080 and looked_up == [1080]
+
+    manager.start_download(job.id, policy="efficient")  # an upgrade keeps its height
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert downloads[0]["upgrade"] is True
+    assert downloads[0]["max_height"] == 1080
+    assert job.policy == "1080p"
+
+
+def test_an_upgrade_height_must_be_offered(tmp_path: Path):
+    manager = JobManager(lib_root(tmp_path))
+    with pytest.raises(ValueError):
+        manager.create_probe("PLTESTJOBS00000000000000000001", upgrade_height=999)
+
+
+def _playlist_with_heights(root: Path) -> None:
+    from factories import add_playlist
+    from ytop.yt.metadata import read_json, write_json
+
+    layout = LibraryLayout(root)
+    pid = "PLTESTJOBS00000000000000000001"
+    add_playlist(layout, pid, "Upgradable", [("vid0000000a", "A"), ("vid0000000b", "B"),
+                                              ("vid0000000c", "C")])
+    for vid, height in (("vid0000000a", 360), ("vid0000000b", 1080), ("vid0000000c", 2160)):
+        path = layout.video_meta_dir(pid, vid) / "meta.json"
+        meta = read_json(path)
+        meta["format"] = {"height": height}
+        write_json(path, meta)
+
+
+def test_playlist_page_says_how_many_videos_an_upgrade_rereads(tmp_path: Path, monkeypatch):
+    root = lib_root(tmp_path)
+    _playlist_with_heights(root)
+    started: list[dict] = []
+
+    def fake_create(self, url, **kwargs):
+        started.append({"url": url, **kwargs})
+        return jobs_module.Job(id="upjob", status="probing")
+
+    monkeypatch.setattr(JobManager, "create_probe", fake_create)
+    client = TestClient(create_app(root, libraries=library_set(root)))
+    page = client.get("/playlist/PLTESTJOBS00000000000000000001").text
+    assert "Upgrade quality" in page
+    assert "1080p — re-reads 1 video" in page   # A (360p)
+    assert "1440p — re-reads 2 videos" in page  # A and B
+    response = client.post(
+        "/playlist/PLTESTJOBS00000000000000000001/upgrade", data={"height": "1440"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303 and response.headers["location"] == "/add/upjob"
+    assert started[0]["upgrade_height"] == 1440
+    assert started[0]["url"].endswith("list=PLTESTJOBS00000000000000000001")
+    client.app.state.jobs.close()
+
+
+def test_an_upgrade_review_is_fixed_at_its_height(tmp_path: Path, monkeypatch):
+    def probe_with_existing(value, config, **kwargs):
+        result = fake_probe(value, config, **kwargs)
+        first = result.items[0]
+        first.existing, first.info, first.selection = True, None, None
+        return result
+
+    monkeypatch.setattr(jobs_module, "probe_playlist", probe_with_existing)
+    root = lib_root(tmp_path)
+    client = TestClient(create_app(root, libraries=library_set(root)))
+    job = client.app.state.jobs.create_probe(
+        "PLTESTJOBS00000000000000000001", upgrade_height=1080,
+    )
+    wait_for(client.app.state.jobs, job.id, {"ready"})
+    page = client.get(f"/add/{job.id}").text
+    assert "Ready to upgrade to 1080p" in page
+    assert "1 video\n  stored below 1080p" in page
+    assert 'class="policy-fieldset"' not in page and 'name="refresh_existing"' not in page
+    assert 'name="policy" value="1080p"' in page and "Upgrade to 1080p" in page
+    client.app.state.jobs.close()

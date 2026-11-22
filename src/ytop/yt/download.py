@@ -572,11 +572,22 @@ def _process_item_body(
     fetch_transcripts: bool = True,
     preserve_audio: bool = False,
     refresh_existing: bool = False,
+    upgrade: bool = False,
     max_height: int | None = None,
 ) -> tuple[ItemResult, dict]:
     title = item.title or item.id
     playlist_id = str(playlist.get("id") or "")
     vdir = video_directory(layout, playlist_id, item.id)
+    if upgrade and not force and not item.error and item.selection is not None:
+        media = find_media(layout, vdir)
+        stored = _stored_height(vdir) if media is not None else None
+        if media is not None:
+            offered = item.selection.video.get("height") or 0
+            if stored is not None and offered <= stored:
+                return _keep_existing(item, layout, playlist_id, vdir, media, lock,
+                                      quiet=quiet)
+            # Taller than what is on disk: replace this video's media only.
+            force = True
     if item.error or item.info is None or item.selection is None:
         media = find_media(layout, vdir)
         if not quiet:
@@ -754,6 +765,7 @@ def download_probe(
     preserve_audio: bool | None = None,
     quality: str | None = None,
     refresh_existing: bool = False,
+    upgrade: bool = False,
     library_root: Path | None = None,
     cancel: Callable[[], bool] | None = None,
     on_item_start: StartCallback | None = None,
@@ -943,6 +955,7 @@ def download_probe(
                 fetch_transcripts=fetch_transcripts,
                 preserve_audio=bool(preserve_audio),
                 refresh_existing=refresh_existing,
+                upgrade=upgrade,
                 max_height=max_height or None,
             )
         except JobCancelled:
@@ -1073,6 +1086,28 @@ def media_lookup(layout: LibraryLayout) -> Callable[[str, str], bool]:
     return have
 
 
+def _stored_height(vdir: Path) -> int | None:
+    """Height of the media on disk, as recorded in ``meta.json``."""
+    meta = read_json(vdir / "meta.json") or {}
+    height = (meta.get("format") or {}).get("height")
+    return height if isinstance(height, int) and height > 0 else None
+
+
+def upgrade_lookup(layout: LibraryLayout, max_height: int | None) -> Callable[[str, str], bool]:
+    """``have`` for an upgrade: videos already at or above ``max_height``
+    count as done and are not read again.  Without a cap every downloaded
+    video is read, since only YouTube knows whether more is on offer."""
+    present = media_lookup(layout)
+
+    def have(playlist_id: str, video_id: str) -> bool:
+        if not max_height or not present(playlist_id, video_id):
+            return False
+        height = _stored_height(video_directory(layout, playlist_id, video_id))
+        return height is not None and height >= max_height
+
+    return have
+
+
 def fetch_playlist(
     value: str,
     config: Config,
@@ -1088,6 +1123,7 @@ def fetch_playlist(
     fetch_transcripts: bool = True,
     preserve_audio: bool | None = None,
     refresh_existing: bool = False,
+    upgrade: bool = False,
     library_root: Path | None = None,
     cancel: Callable[[], bool] | None = None,
     on_item_start: StartCallback | None = None,
@@ -1095,7 +1131,11 @@ def fetch_playlist(
     on_progress: Callable[[ProbedItem, int, int], None] | None = None,
 ) -> FetchResult:
     """Probe and download a playlist.  Videos already downloaded are not
-    re-read from YouTube unless ``refresh_existing`` (or ``force``)."""
+    re-read from YouTube unless ``refresh_existing`` (or ``force``).
+
+    ``upgrade`` re-reads downloaded videos stored below ``max_height`` (all
+    of them without a cap) and replaces only those YouTube now offers taller;
+    videos at or above the cap are kept untouched."""
     lock = threading.Lock()
 
     def probe_status(item: ProbedItem) -> None:
@@ -1125,9 +1165,10 @@ def fetch_playlist(
         preserve_audio=bool(preserve_audio),
         cache_root=library_root,
         have=(
-            media_lookup(LibraryLayout(Path(library_root).expanduser()))
-            if library_root is not None and not (force or refresh_existing)
-            else None
+            None if library_root is None or force or refresh_existing
+            else upgrade_lookup(LibraryLayout(Path(library_root).expanduser()), max_height)
+            if upgrade
+            else media_lookup(LibraryLayout(Path(library_root).expanduser()))
         ),
     )
     return download_probe(
@@ -1143,6 +1184,7 @@ def fetch_playlist(
         fetch_transcripts=fetch_transcripts,
         preserve_audio=preserve_audio,
         refresh_existing=refresh_existing,
+        upgrade=upgrade,
         library_root=library_root,
         cancel=cancel,
         on_item_start=on_item_start,

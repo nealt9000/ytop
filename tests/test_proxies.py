@@ -1,22 +1,20 @@
 import sys
 import textwrap
+from dataclasses import replace
 
 import pytest
 from yt_dlp.utils import DownloadError, GeoRestrictedError
 
-from ytop.yt import probe as probe_mod
-from ytop.yt.probe import ProbeError, classify_failure
-from dataclasses import replace
-
 from ytop.config import Config, ProxyServer
-from ytop.yt.probe import base_options
+from ytop.yt import probe as probe_mod
+from ytop.yt.probe import ProbeError, base_options, classify_failure
 from ytop.yt.proxies import (
-    format_servers,
-    parse_servers,
     RegionBlockedError,
     covering_countries,
+    format_servers,
     is_region_blocked,
     order_proxies,
+    parse_servers,
     proxy_url,
     redact,
     region_blocked_message,

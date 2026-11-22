@@ -257,6 +257,7 @@ def cmd_fetch(args) -> int:
             jobs=args.jobs,
             force=args.force,
             refresh_existing=args.refresh,
+            upgrade=args.upgrade,
             dry_run=args.dry_run,
             max_height=cfg.max_height,
             target_mb_per_hour=cfg.target_mb_per_hour,
@@ -1009,6 +1010,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="re-read descriptions, thumbnails, audio tracks and missing "
                         "transcripts of videos already downloaded (slower; by "
                         "default only new videos are read)")
+    p.add_argument("--upgrade", action="store_true",
+                   help="re-download videos saved below the current quality "
+                        "(--max-height / config) when YouTube offers more; "
+                        "videos at or above it are kept")
     p.add_argument("--dry-run", action="store_true", help="probe and estimate only")
     p.add_argument("--max-height", type=int, default=None,
                    help="optional hard height cap (0 = no cap; default: config)")

@@ -220,3 +220,18 @@ def test_cli_refuses_to_run_under_sudo(monkeypatch, capsys):
     monkeypatch.setenv("SUDO_UID", "1000")
     assert main(["doctor"]) == 2
     assert "sudo" in capsys.readouterr().err
+
+
+def test_fetch_upgrade_flag_reaches_fetch_playlist(tmp_path: Path, monkeypatch):
+    from ytop.yt import download as download_mod
+
+    root = factory_library(tmp_path / "lib").root
+    seen: dict = {}
+
+    def fake_fetch(value, cfg, **kwargs):
+        seen.update(kwargs)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(download_mod, "fetch_playlist", fake_fetch)
+    main(["fetch", "PL1", "--library", str(root), "--upgrade"])
+    assert seen.get("upgrade") is True

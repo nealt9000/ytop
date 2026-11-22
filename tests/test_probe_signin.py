@@ -256,3 +256,18 @@ def test_short_profile_does_not_mangle_unrelated_text(fake_analyse):
     fake_analyse.script = script
     item = probe_video("vid", Config(age_gate_browser="firefox:1")).items[0]
     assert item.error == "Age-restricted — signed-in retry failed: HTTP Error 410: retry 1 of 10"
+
+
+def test_signed_in_read_skips_quick_analysis(fake_analyse, monkeypatch):
+    """Signed-in reads need the JS challenge solved: quick analysis skips it."""
+    seen: list[tuple[str | None, bool]] = []
+    inner = fake_analyse.__call__
+
+    def recording(video_id, config, cache_root=None, **kw):
+        seen.append((active_signin(), config.quick_analysis))
+        return inner(video_id, config, cache_root, **kw)
+
+    monkeypatch.setattr(probe_mod, "analyse_video", recording)
+    fake_analyse.script = _age_gated_unless_signed_in
+    analyse_with_fallback("vid", Config(age_gate_browser="firefox", quick_analysis=True))
+    assert seen == [(None, True), ("firefox", False)]

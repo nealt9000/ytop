@@ -407,7 +407,9 @@ def _analyse_signed_in(
     try:
         with using_signin(browser):
             return analyse_video(
-                video_id, replace(config, retries=1), cache_root,
+                # Signed-in reads need the JS challenge solved, which the
+                # quick analysis skips.
+                video_id, replace(config, retries=1, quick_analysis=False), cache_root,
                 max_height=max_height, preserve_audio=preserve_audio,
             )
     except JobCancelled:

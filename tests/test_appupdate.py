@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+import ytop
 import ytop.makestick as ms
 from factories import library_set, make_library
 from fake_releases import FakeReleases
@@ -40,6 +41,7 @@ from ytop.web.library import Library
 PLATS = ["linux-x86_64", "windows-x86_64"]
 OLD_ID = "202601010000-old0000"
 NEW_ID = "209912312359-newer00"
+NEW_VERSION = ytop.__version__  # releases carry the repo version (package_release checks)
 GH_REPO = "someone/ytop"
 STAGE = boot.MAKING_SRC
 CMD = "Start YTOP (Windows).cmd"
@@ -129,7 +131,7 @@ def _serve(fake: FakeReleases, folder: Path, *, notes: str = "Faster pages.",
            edit: dict[str, bytes] | None = None) -> None:
     assets = {p.name: p.read_bytes() for p in sorted(folder.iterdir())}
     assets.update(edit or {})
-    fake.app_release(GH_REPO, "v0.1.0", assets, notes=notes)
+    fake.app_release(GH_REPO, f"v{NEW_VERSION}", assets, notes=notes)
 
 
 @pytest.fixture
@@ -177,7 +179,7 @@ def test_check_offers_only_newer_verified_releases(stick: Path, builds, server):
     yt = stick / ".ytop"
     found = appupdate.check_app(yt, _config(server), updater.Http())
     assert found is not None
-    assert (found.version, found.build_id, found.notes) == ("0.1.0", NEW_ID, "Faster pages.")
+    assert (found.version, found.build_id, found.notes) == (NEW_VERSION, NEW_ID, "Faster pages.")
     # Only the small files are fetched to check: never a piece.
     assert _downloads(server) == ["SHA256SUMS", "ytop-release.json"]
 
@@ -230,7 +232,7 @@ def test_install_downloads_only_changed_pieces(stick: Path, builds, server, tmp_
     server.requests.clear()
     result = _install(stick, server)
     assert result.status == "updated", result.message
-    assert result.message == "YTOP was updated to 0.1.0. Start it again."
+    assert result.message == f"YTOP was updated to {NEW_VERSION}. Start it again."
     assert _downloads(server) == sorted([
         "SHA256SUMS", "ytop-release.json", "app.tar.gz",
         "lib-windows-x86_64.tar.gz", "runtime-windows-x86_64-python.tar.gz",
@@ -671,7 +673,7 @@ class SilentUpdater:
 
 def _release() -> appupdate.AppRelease:
     return appupdate.AppRelease(
-        version="0.1.0", build_id=NEW_ID, tag="v0.1.0", notes="Faster pages.",
+        version=NEW_VERSION, build_id=NEW_ID, tag=f"v{NEW_VERSION}", notes="Faster pages.",
         doc={}, assets={},
     )
 
@@ -727,7 +729,7 @@ def test_asks_once_then_respects_the_answer(stick: Path):
         assert load_config(stick).updates.check_app is True
         assert fake.checks == 1
         page = client.get("/").text
-        assert ASK not in page and "YTOP 0.1.0 is available" in page
+        assert ASK not in page and f"YTOP {NEW_VERSION} is available" in page
         assert 'href="/app-update"' in page and ">Update<" in page
         updates.on_start_outcome("up to date")
         assert fake.checks == 2
@@ -797,8 +799,8 @@ def test_install_quits_and_says_start_again(
     assert app.state.stopping
     out = capsys.readouterr().out
     if outcome == "updated":
-        assert "YTOP was updated to 0.1.0. Start it again." in page
-        assert "YTOP was updated to 0.1.0. Start it again." in out
+        assert f"YTOP was updated to {NEW_VERSION}. Start it again." in page
+        assert f"YTOP was updated to {NEW_VERSION}. Start it again." in out
     else:
         assert "undone" in page and "undone" in out
 
@@ -876,12 +878,13 @@ def test_a_kept_offer_survives_a_start_check_without_an_answer(
     assert again.offer is not None and again.offer.build_id == first.offer.build_id
 
 
-def test_a_broken_release_is_not_rechecked_every_poll(stick: Path):
+@pytest.mark.parametrize("status", ["error", "rate_limited"])
+def test_a_broken_release_is_not_rechecked_every_poll(stick: Path, status: str):
     from datetime import UTC, datetime, timedelta
 
     start = datetime(2026, 11, 14, 9, 0, tzinfo=UTC)
     now = [start]
-    broken = SilentUpdater("error")
+    broken = SilentUpdater(status)
     updates = appupdate.AppUpdates(
         stick / ".ytop", lambda: load_config(stick), stick, check=broken.check,
         clock=lambda: now[0],
@@ -897,6 +900,25 @@ def test_a_broken_release_is_not_rechecked_every_poll(stick: Path):
     now[0] = start + timedelta(hours=6, minutes=1)
     updates.recheck_if_due()
     assert broken.checks == 2
+
+
+@pytest.mark.parametrize("status", ["offline", "error", "rate_limited"])
+def test_a_recheck_without_an_answer_keeps_the_visible_offer(stick: Path, status: str):
+    from datetime import UTC, datetime
+
+    from ytop.config import set_updates_option
+
+    now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
+    silent = SilentUpdater(status)
+    updates = appupdate.AppUpdates(
+        stick / ".ytop", lambda: load_config(stick), stick, check=silent.check,
+        clock=lambda: now[0],
+    )
+    set_updates_option(stick, "check_app", True)
+    updates.offer = _release()
+    updates.recheck_if_due()
+    assert silent.checks == 1
+    assert updates.offer is not None and updates.offer.build_id == NEW_ID
 
 
 def test_answering_yes_records_the_check(stick: Path):
@@ -1051,7 +1073,7 @@ def test_revert_restores_the_old_manifest_exactly(stick: Path, server):
         assert not (stick / leftover).exists(), leftover
     # The files it reverted from are the rollback copy now.
     found = appupdate.previous_version(yt)
-    assert found is not None and (found.version, found.build_id) == ("0.1.0", NEW_ID)
+    assert found is not None and (found.version, found.build_id) == (NEW_VERSION, NEW_ID)
     assert updated != before
 
 
@@ -1064,7 +1086,7 @@ def test_revert_twice_returns_to_the_update(stick: Path, server):
     assert _owned_state(stick) == before
     result = _revert(stick)
     assert result.status == "reverted", result.message
-    assert result.message == "YTOP was reverted to 0.1.0. Start it again."
+    assert result.message == f"YTOP was reverted to {NEW_VERSION}. Start it again."
     assert _owned_state(stick) == updated
     found = appupdate.previous_version(yt)
     assert found is not None and found.build_id == OLD_ID

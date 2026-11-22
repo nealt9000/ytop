@@ -3,12 +3,17 @@ name: Stick
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      bump_artifact:
+        description: Artifact holding bump.bundle (one release commit); build from it
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: stick-${{ github.ref }}
+  group: stick-${{ github.ref }}-${{ inputs.bump_artifact || 'plain' }}
   cancel-in-progress: true
 
 jobs:
@@ -17,6 +22,18 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Downloaded outside the checkout: untracked files there make the build id "-dirty".
+      - name: Fetch the release bump commit
+        if: inputs.bump_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.bump_artifact }}
+          path: ${{ runner.temp }}/bump
+      - name: Build from the bump commit
+        if: inputs.bump_artifact != ''
+        run: |
+          git fetch "$RUNNER_TEMP/bump/bump.bundle" 'refs/heads/*:refs/remotes/bump/*'
+          git checkout --detach bump/release
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
@@ -208,7 +225,8 @@ jobs:
           have=$(jq -r .build_id /mnt/stick/.ytop/build.json)
           [ "$want" = "$have" ] \
             || { echo "::error::stick is $have, release B is $want"; exit 1; }
-          [ "$(jq -r .version /mnt/stick/.ytop/build.json)" = "0.1.1" ]
+          [ "$(jq -r .version /mnt/stick/.ytop/build.json)" \
+            = "$(jq -r .version serve/test/ytop/*/ytop-release.json)" ]
       - name: Smoke test after the app update
         run: python3 tools/smoke_stick.py /mnt/stick --timeout 180
       - name: Component update to a re-packed newer yt-dlp

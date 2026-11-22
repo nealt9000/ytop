@@ -189,22 +189,41 @@ releases built by `tools/ci_fake_release.py`.
 
 ## Releasing
 
-Releases are cut from a pushed tag; the workflow (`.github/workflows/release.yml`)
-builds the 5-platform image, runs the OS smoke tests, packages it with
-`tools/package_release.py` and publishes a GitHub release.
+Releases are automatic. Every push to `main` that changes shipped files is
+released once CI passes (`.github/workflows/auto-release.yml`). Shipped files
+are `src/`, `stick/`, `tools/build_stick.py`, `tools/package_release.py`,
+`pyproject.toml` and `uv.lock`; docs-, tests- or CI-only pushes do not release.
+`tools/next_version.py` picks the version from the commit subjects since the
+last `vX.Y.Z` tag:
 
-1. Bump the version in `pyproject.toml` (`[project] version`) and in
-   `src/ytop/__init__.py` (`__version__`); a test keeps the two equal.
-2. Commit it.
-3. Tag with the release notes as the annotated message (they become the
-   release notes YTOP shows before an app update):
-   `git tag -a vX.Y.Z -m "<notes>"`
-4. Push the tag: `git push origin vX.Y.Z`. The workflow fails if the tag is not
-   `v` plus the pyproject version.
+- a `!` after the type (`feat!: ...`) or a `BREAKING CHANGE:` footer gives a
+  minor bump while the major version is 0 (a major bump from 1.0 on);
+- otherwise any `feat` gives a minor bump;
+- anything else (`fix`, `perf`, `refactor`, `build`, untyped subjects...) gives
+  a patch bump.
 
-To rehearse, run the **Release** workflow by hand (`workflow_dispatch`) with
-`dry_run` left on: it builds and packages everything, uploads the files as the
-`release-files` workflow artifact and creates no release.
+The release notes are the commit subjects grouped as Features, Fixes,
+Performance and Other. The workflow commits the version bump in the runner,
+builds the 5-platform image from that commit and runs the OS smoke tests; only
+then does it push the commit and the annotated tag together and publish the
+GitHub release, packaged with `tools/package_release.py`. A failure before that
+leaves no commit, tag or release. If `main` moved meanwhile, nothing is pushed
+and the next push's run releases everything since the last tag.
+
+The bot commits `chore(release): vX.Y.Z` to `main` (as `github-actions[bot]`),
+so pull before your next push.
+
+To rehearse, run the **Auto release** workflow by hand (`workflow_dispatch`)
+with `dry_run` left on: it plans, bumps, builds, smoke-tests and packages,
+prints what it would release and pushes or publishes nothing.
+
+Hand-pushed tags still work through `.github/workflows/release.yml`: bump the
+version in `pyproject.toml`, `src/ytop/__init__.py` and `uv.lock`
+(`python tools/next_version.py write X.Y.Z`), commit, tag with the release notes
+as the annotated message (`git tag -a vX.Y.Z --cleanup=verbatim -F notes.md`;
+`verbatim` keeps the `## ...` heading lines) and push the tag. That workflow
+fails if the tag is not `v` plus the pyproject version, and its own `dry_run`
+rehearsal uploads the files as the `release-files` artifact.
 
 Each release holds one `.tar.gz` per piece (`app`, `root`, `lib-common`,
 `lib-<platform>`, `runtime-<platform>-python`, `runtime-<platform>-bin`),

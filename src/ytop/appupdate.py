@@ -979,7 +979,7 @@ class AppUpdates:
             raise ValueError("no library is connected")
         set_updates_option(self.library_root, "check_app", yes)
         if yes and self.online:
-            self.check()
+            self._record_check(self.check())
 
     def on_start_outcome(self, outcome: str) -> None:
         """The start-up component check finished with ``outcome``: the

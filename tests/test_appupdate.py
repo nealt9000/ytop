@@ -837,6 +837,22 @@ def test_start_up_app_check_runs_at_every_start(stick: Path):
     assert fake.checks == 3
 
 
+def test_answering_yes_records_the_check(stick: Path):
+    from datetime import UTC, datetime
+
+    from ytop.config import set_updates_option
+
+    now = [datetime(2026, 11, 14, 9, 0, tzinfo=UTC)]
+    fake = FakeUpdater()
+    updates = _stick_updates(stick, now, fake)
+    set_updates_option(stick, "check_app", None)
+    updates.online = True
+    updates.answer(True)
+    assert fake.checks == 1 and load_config(stick).updates.last_check
+    updates.recheck_if_due()
+    assert fake.checks == 1
+
+
 def test_recheck_runs_every_six_hours(stick: Path):
     from datetime import UTC, datetime, timedelta
 

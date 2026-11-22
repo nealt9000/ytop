@@ -490,3 +490,184 @@ def test_one_clashing_name_does_not_block_the_rest_of_a_sync(tmp_path):
     first = layout.resolve_media(_media_ref(layout, "PL1", "v1"))
     assert first is not None and first.read_bytes() == b"one"
     assert not layout.rename_journal.exists()
+
+
+def _drop_first_entry(layout: LibraryLayout, pid: str) -> None:
+    """Remove a playlist's first entry the way the web UI does (its media
+    was never downloaded), leaving every later file one number too high."""
+    path = layout.playlist_meta_dir(pid) / "playlist.json"
+    doc = read_json(path) or {}
+    first = doc["entries"].pop(0)["id"]
+    write_json(path, doc)
+    meta_dir = layout.video_meta_dir(pid, first)
+    media = layout.media_root / _media_ref(layout, pid, first)
+    for path in media.parent.glob(f"{media.stem}.*"):
+        path.unlink()
+    for child in meta_dir.iterdir():
+        child.unlink()
+    meta_dir.rmdir()
+
+
+def _renumber_library(tmp_path: Path) -> LibraryLayout:
+    layout = make_library(tmp_path)
+    add_playlist(
+        layout, "PL1", "Docs",
+        [("v0", "Gone"), ("v1", "Oceans"), ("v2", "Deserts"), ("v3", "Forests")],
+    )
+    folder = layout.media_root / "Docs"
+    for media in folder.glob("*.webm"):
+        media.with_name(f"{media.stem}.en.srt").write_text("1\n")
+    _drop_first_entry(layout, "PL1")
+    return layout
+
+
+def _assert_renumbered(layout: LibraryLayout) -> None:
+    folder = layout.media_root / "Docs"
+    assert sorted(p.name for p in folder.iterdir() if p.suffix != ".jpg") == [
+        "01 - Oceans.en.srt", "01 - Oceans.webm",
+        "02 - Deserts.en.srt", "02 - Deserts.webm",
+        "03 - Forests.en.srt", "03 - Forests.webm",
+    ]
+    assert _media_ref(layout, "PL1", "v1") == "Docs/01 - Oceans.webm"
+    assert _media_ref(layout, "PL1", "v3") == "Docs/03 - Forests.webm"
+    assert _leftovers(layout) == []
+    assert not layout.rename_journal.exists()
+
+
+def test_a_renumber_renames_and_rewrites_each_file_once(tmp_path, monkeypatch):
+    """Removing an early entry shifts every later number.  No new name equals
+    another file's old one, so each file is renamed straight to its new name
+    and its meta.json rewritten once; the temporary hop is only for swaps."""
+    import ytop.publish as publish
+
+    layout = _renumber_library(tmp_path)
+    replaces: list[tuple[str, str]] = []
+    meta_writes: list[Path] = []
+    real_replace, real_write = os.replace, publish.write_json
+
+    def counting_replace(src, dst, *args, **kwargs):
+        replaces.append((Path(src).name, Path(dst).name))
+        return real_replace(src, dst, *args, **kwargs)
+
+    def counting_write(path, data, **kwargs):
+        if Path(path).name == "meta.json":
+            meta_writes.append(Path(path))
+        return real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(os, "replace", counting_replace)
+    monkeypatch.setattr(publish, "write_json", counting_write)
+    report = sync_playlist_files(layout, "PL1")
+    monkeypatch.undo()
+
+    assert report.errors == []
+    assert report.renamed == 6
+    media_moves = [
+        pair for pair in replaces if Path(pair[1]).suffix in {".webm", ".srt"}
+    ]
+    assert sorted(media_moves) == [
+        ("02 - Oceans.en.srt", "01 - Oceans.en.srt"),
+        ("02 - Oceans.webm", "01 - Oceans.webm"),
+        ("03 - Deserts.en.srt", "02 - Deserts.en.srt"),
+        ("03 - Deserts.webm", "02 - Deserts.webm"),
+        ("04 - Forests.en.srt", "03 - Forests.en.srt"),
+        ("04 - Forests.webm", "03 - Forests.webm"),
+    ]
+    assert len(meta_writes) == 3
+    _assert_renumbered(layout)
+
+
+def test_a_direct_batch_interrupted_before_its_refs_is_finished(
+    tmp_path, monkeypatch, caplog,
+):
+    import ytop.publish as publish
+
+    layout = _renumber_library(tmp_path)
+
+    def yanked(*args, **kwargs):
+        raise OSError("stick yanked")
+
+    monkeypatch.setattr(publish, "_rewrite_refs", yanked)
+    with pytest.raises(OSError):
+        sync_playlist_files(layout, "PL1")
+    monkeypatch.undo()
+    assert read_json(layout.rename_journal)["phase"] == 1
+
+    recover_rename_journal(layout)
+
+    _assert_renumbered(layout)
+    assert "exists" not in caplog.text
+
+
+def test_a_direct_batch_interrupted_between_phases_is_finished(
+    tmp_path, monkeypatch, caplog,
+):
+    import ytop.publish as publish
+
+    layout = _renumber_library(tmp_path)
+    real_write = publish.write_json
+
+    def yank_after_phase_two_is_recorded(path, data, **kwargs):
+        real_write(path, data, **kwargs)
+        if Path(path) == layout.rename_journal and data.get("phase") == 2:
+            raise OSError("stick yanked")
+
+    monkeypatch.setattr(publish, "write_json", yank_after_phase_two_is_recorded)
+    with pytest.raises(OSError):
+        sync_playlist_files(layout, "PL1")
+    monkeypatch.undo()
+    assert read_json(layout.rename_journal)["phase"] == 2
+
+    recover_rename_journal(layout)
+
+    _assert_renumbered(layout)
+    assert "exists" not in caplog.text
+
+
+def test_a_direct_batch_interrupted_midway_through_its_renames_is_finished(
+    tmp_path, monkeypatch,
+):
+    layout = _renumber_library(tmp_path)
+    real_replace = os.replace
+    media_moves = []
+
+    def flaky_replace(src, dst, *args, **kwargs):
+        if Path(src).suffix in {".webm", ".srt"}:
+            media_moves.append(src)
+            if len(media_moves) == 3:
+                raise OSError("stick yanked")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    with pytest.raises(OSError):
+        sync_playlist_files(layout, "PL1")
+    monkeypatch.undo()
+
+    recover_rename_journal(layout)
+
+    _assert_renumbered(layout)
+
+
+def test_a_case_only_rename_still_goes_through_a_temporary_name(
+    tmp_path, monkeypatch,
+):
+    """On FAT ``01 - a`` and ``01 - A`` are one name: that rename keeps the
+    temporary hop rather than replacing a file with itself."""
+    layout = make_library(tmp_path)
+    add_playlist(layout, "PL1", "Docs", [("v1", "oceans")])
+    titles = layout.titles_file
+    write_json(titles, {"videos": {"v1": "Oceans"}})
+    real_replace = os.replace
+    hops = []
+
+    def watching(src, dst, *args, **kwargs):
+        if Path(dst).name.startswith(".ytoprename-"):
+            hops.append(Path(src).name)
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", watching)
+    report = sync_playlist_files(layout, "PL1")
+    monkeypatch.undo()
+
+    assert report.errors == []
+    assert hops == ["01 - oceans.webm"]
+    assert _media_ref(layout, "PL1", "v1") == "Docs/01 - Oceans.webm"

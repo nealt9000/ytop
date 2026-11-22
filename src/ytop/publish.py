@@ -5,6 +5,14 @@ batch goes through ``rename-journal.json`` in two phases (``src -> tmp``, then
 ``tmp -> dst``), so a swap such as ``01 - A`` <-> ``02 - A`` never collides and
 a batch interrupted by an unplugged stick is finished on the next start.
 
+The hop through a temporary name is only for targets that clash with the
+batch's own sources (swaps, case-only renames).  Any other op is recorded with
+``tmp == dst`` and renamed straight to its target in phase 1, so a renumber
+after a removal renames each file and rewrites each ``meta.json`` once rather
+than twice: on a FAT stick every small file write takes a large fraction of a
+second.  An older build recovering such a journal completes it correctly (it
+only logs that the target already exists).
+
 Journal paths are relative to the media root, so a stick that comes back under
 a different mount point or drive letter still recovers. ``files.media`` refs
 (and playlist ``folder`` values) follow each phase: ``src -> tmp`` with phase 1
@@ -223,23 +231,35 @@ def _finish_journal(layout: LibraryLayout, journal: dict) -> int:
     """Run the remaining phases of a journal; returns renames completed."""
     base = layout.media_root
     ops = _valid_ops(journal)
+    done = 0
     if journal.get("phase") == 1:
         touched: set[Path] = set()
+        moved: dict[str, str] = {}
         for op in ops:
             src, tmp = base / op["src"], base / op["tmp"]
+            direct = op["tmp"] == op["dst"]
             if os.path.lexists(src) and not os.path.lexists(tmp):
                 tmp.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(src, tmp)
                 touched.update((src.parent, tmp.parent))
+                if direct:
+                    done += 1
+            elif direct and os.path.lexists(src):
+                # Something appeared at dst since the batch was planned; the
+                # file and its refs stay where they are.
+                log.warning("rename target %s exists; left %s", tmp, src)
+                continue
+            moved[op["src"]] = op["tmp"]
         # The renames must be on disk before the journal says they happened.
         _fsync_dirs(touched)
-        _rewrite_refs(layout, {op["src"]: op["tmp"] for op in ops})
+        _rewrite_refs(layout, moved)
         journal["phase"] = 2
         write_json(layout.rename_journal, journal)
-    done = 0
     completed: dict[str, str] = {}
     renamed: set[Path] = set()
     for op in ops:
+        if op["tmp"] == op["dst"]:
+            continue  # a direct op: finished in phase 1
         tmp, dst = base / op["tmp"], base / op["dst"]
         if os.path.lexists(tmp):
             if os.path.lexists(dst):
@@ -315,16 +335,48 @@ def _run_batch(
     if not ops:
         return clean
     entries = []
+    hop_needed = _hop_needed(layout, ops)
     for i, (src, dst) in enumerate(ops):
-        tmp = dst.parent / f"{TMP_PREFIX}{i}-{uuid.uuid4().hex[:8]}{dst.suffix}"
+        target = layout.relative_media(dst)
+        if hop_needed(dst):
+            # Another op's source (or this one's, in another case) holds the
+            # name: hop through a unique temporary name so nothing collides.
+            tmp = dst.parent / f"{TMP_PREFIX}{i}-{uuid.uuid4().hex[:8]}{dst.suffix}"
+            hop = layout.relative_media(tmp)
+        else:
+            hop = target  # a direct op: renamed straight to dst in phase 1
         entries.append({
             "src": layout.relative_media(src),
-            "tmp": layout.relative_media(tmp),
-            "dst": layout.relative_media(dst),
+            "tmp": hop,
+            "dst": target,
         })
     write_json(layout.rename_journal, {"phase": 1, "ops": entries})
     report.renamed += _finish_journal(layout, {"phase": 1, "ops": entries})
     return clean
+
+
+def _fold(relative: str) -> tuple[str, ...]:
+    """A media-relative path as case-folded parts: FAT, NTFS and APFS ignore
+    case, so ``01 - a`` and ``01 - A`` are one name."""
+    return PurePosixPath(relative.casefold()).parts
+
+
+def _hop_needed(layout: LibraryLayout, ops: list[tuple[Path, Path]]):
+    """A test for whether an op's target needs the temporary hop: it does
+    when the target, or a folder above it, is one of the batch's sources
+    (a swap, a name taken over from another op, a case-only rename), or
+    when it is a folder that holds a source.  Any other target is free, so
+    renaming straight to it cannot collide and its ref mapping stays a no-op
+    when recovery applies it again."""
+    sources = {_fold(layout.relative_media(src)) for src, _ in ops}
+    holders = {parts[:end] for parts in sources for end in range(1, len(parts))}
+
+    def needed(dst: Path) -> bool:
+        parts = _fold(layout.relative_media(dst))
+        lineage = {parts[:end] for end in range(1, len(parts) + 1)}
+        return bool(lineage & sources) or parts in holders
+
+    return needed
 
 
 def _finish_pending(layout: LibraryLayout) -> int:

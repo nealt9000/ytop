@@ -420,6 +420,34 @@ def test_proxied_download_failure_never_triggers_an_update(tmp_path: Path, monke
     manager.close()
 
 
+def test_signed_in_download_failure_never_triggers_an_update(tmp_path: Path, monkeypatch):
+    ytop = make_store(tmp_path)
+    fake = FakeUpdater()
+    scripted_probe(monkeypatch, [True])
+
+    def download_probe(probe, config, *, on_item_done=None, **kwargs):
+        for item in probe.items:
+            item.signed_in = True
+        results = [
+            ItemResult(item.index, item.id, item.title, "failed",
+                       error="DownloadError: nsig extraction failed")
+            for item in probe.items
+        ]
+        for result in results:
+            if on_item_done:
+                on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results, total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "download_probe", download_probe)
+    manager = JobManager(lib_root(tmp_path), autoupdate=make_auto(ytop, fake))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert fake.calls == 0
+    assert job.failed == 1
+    manager.close()
+
+
 def test_retried_download_selection_follows_the_efficient_budget(tmp_path: Path, monkeypatch):
     """The real download_probe re-selects a retried video under the budget
     it is given, instead of the probe's full-quality pick."""

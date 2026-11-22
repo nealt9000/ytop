@@ -41,3 +41,9 @@ def test_classify_failure_age_restricted():
     assert classify_failure(
         "not made this video available in your country\nSign in to confirm your age"
     ) == "region_blocked"
+
+
+def test_classify_failure_age_restricted_outranks_youtube_changed():
+    assert classify_failure(
+        "Sign in to confirm your age\nnsig extraction failed; unable to extract"
+    ) == "age_restricted"

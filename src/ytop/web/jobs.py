@@ -2356,8 +2356,10 @@ class JobManager:
         broken: list[str] = []
 
         def on_done(result: ItemResult) -> None:
-            # A flaky proxy never triggers a component update.
-            via_proxy = any(i.proxy for i in probe.items if i.id == result.id)
+            # A flaky proxy or sign-in never triggers a component update.
+            via_proxy = any(
+                i.proxy or i.signed_in for i in probe.items if i.id == result.id
+            )
             if result.status == "failed" and not via_proxy and (
                 result.error_kind == "youtube_changed" or self._fixable(result.error)
             ):

@@ -235,3 +235,48 @@ def test_fetch_upgrade_flag_reaches_fetch_playlist(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(download_mod, "fetch_playlist", fake_fetch)
     main(["fetch", "PL1", "--library", str(root), "--upgrade"])
     assert seen.get("upgrade") is True
+
+
+def test_ctrl_c_cancels_fetch_like_the_web_cancel(tmp_path: Path, monkeypatch, capsys):
+    """The first Ctrl-C sets the cancel flag the workers check (#52)."""
+    import os
+    import signal
+
+    from ytop.yt import download as download_mod
+    from ytop.yt.probe import JobCancelled
+
+    root = factory_library(tmp_path / "lib").root
+    before = signal.getsignal(signal.SIGINT)
+
+    def fake_fetch(value, cfg, *, cancel, **kwargs):
+        assert not cancel()
+        os.kill(os.getpid(), signal.SIGINT)  # what Ctrl-C delivers
+        assert cancel()
+        raise JobCancelled("cancelled by the user")
+
+    monkeypatch.setattr(download_mod, "fetch_playlist", fake_fetch)
+    assert main(["fetch", "PL1", "--library", str(root)]) == 130
+    err = capsys.readouterr().err
+    assert "Stopping" in err and "fetch cancelled" in err
+    assert signal.getsignal(signal.SIGINT) is before  # put back afterwards
+
+
+def test_a_second_ctrl_c_quits_at_once(tmp_path: Path, monkeypatch):
+    import os
+    import signal
+
+    from ytop import cli
+    from ytop.yt import download as download_mod
+
+    root = factory_library(tmp_path / "lib").root
+    exits: list[int] = []
+    monkeypatch.setattr(cli.os, "_exit", exits.append)
+
+    def fake_fetch(value, cfg, *, cancel, **kwargs):
+        os.kill(os.getpid(), signal.SIGINT)
+        os.kill(os.getpid(), signal.SIGINT)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(download_mod, "fetch_playlist", fake_fetch)
+    main(["fetch", "PL1", "--library", str(root)])
+    assert exits == [130]

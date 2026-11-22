@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import signal
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from .config import SESSION_AUTH, load_config
@@ -218,9 +222,35 @@ def cmd_probe(args) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _ctrl_c_cancels() -> Iterator[threading.Event]:
+    """While inside: the first Ctrl-C sets the returned event (the cancel flag
+    the download workers check, as the web UI's Cancel does), the second quits
+    at once.  Worker threads never see ``KeyboardInterrupt``, and waiting for
+    them is what made a plain Ctrl-C hang."""
+    stop = threading.Event()
+
+    def on_sigint(signum, frame) -> None:
+        if stop.is_set():
+            os._exit(130)
+        stop.set()
+        print("\nStopping after the current downloads (Ctrl-C again to quit now)…",
+              file=sys.stderr, flush=True)
+
+    try:
+        previous = signal.signal(signal.SIGINT, on_sigint)
+    except ValueError:  # not the main thread: leave Ctrl-C alone
+        yield stop
+        return
+    try:
+        yield stop
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def cmd_fetch(args) -> int:
     from .yt.download import fetch_playlist
-    from .yt.probe import ProbeError
+    from .yt.probe import JobCancelled, ProbeError
 
     if args.limit is not None and args.limit < 1:
         print("--limit must be at least 1", file=sys.stderr)
@@ -250,21 +280,26 @@ def cmd_fetch(args) -> int:
         print(f"config failed: {exc}", file=sys.stderr)
         return 1
     try:
-        result = fetch_playlist(
-            args.playlist,
-            cfg,
-            limit=args.limit,
-            jobs=args.jobs,
-            force=args.force,
-            refresh_existing=args.refresh,
-            upgrade=args.upgrade,
-            dry_run=args.dry_run,
-            max_height=cfg.max_height,
-            target_mb_per_hour=cfg.target_mb_per_hour,
-            min_height=cfg.min_height,
-            preserve_audio=True if args.preserve_audio else None,
-            library_root=root,
-        )
+        with _ctrl_c_cancels() as stop:
+            result = fetch_playlist(
+                args.playlist,
+                cfg,
+                limit=args.limit,
+                jobs=args.jobs,
+                force=args.force,
+                refresh_existing=args.refresh,
+                upgrade=args.upgrade,
+                dry_run=args.dry_run,
+                max_height=cfg.max_height,
+                target_mb_per_hour=cfg.target_mb_per_hour,
+                min_height=cfg.min_height,
+                preserve_audio=True if args.preserve_audio else None,
+                library_root=root,
+                cancel=stop.is_set,
+            )
+    except JobCancelled:
+        print("fetch cancelled; run it again to resume", file=sys.stderr)
+        return 130
     except (ProbeError, ValueError, RuntimeError) as exc:
         print(f"fetch failed: {exc}", file=sys.stderr)
         return 1

@@ -18,7 +18,7 @@ from ..tags import Tag, TagEdits, TagStore, apply_edits, effective_category, vid
 from ..transcripts.store import query_tokens
 from ..transcripts.store import search as search_transcripts
 from ..yt.metadata import human_bytes
-from .library import Library, playlist_key
+from .library import Library, playlist_key, quality_summary
 from .render import format_duration, format_timestamp, thumb_url
 
 CARD_LIMIT = 12
@@ -50,6 +50,8 @@ class PlaylistCard:
     next_label: str
     next_title: str
     next_position: float
+    quality_summary: str = ""
+    transcript_count: int = 0
 
     @property
     def is_ungrouped(self) -> bool:
@@ -209,6 +211,8 @@ def _card(item: _Loaded, row: PlaylistRow, key: str) -> PlaylistCard:
     if next_video is not None:
         next_title = item.video_titles.get(next_video.video_id) or next_video.title
     return PlaylistCard(
+        quality_summary=quality_summary(available),  # type: ignore[arg-type]
+        transcript_count=sum(1 for v in available if v.has_transcript),
         key=key,
         library_id=item.ref.id,
         library_label=item.ref.label,
@@ -272,7 +276,8 @@ def library_videos(lib: Library) -> list[dict]:
 
     Read from the index (no meta.json is opened).  The ``key`` form value is
     ``"<playlist key>:<video id>"``, as ``create_playlist`` expects.  The
-    index holds no quality or audio details, so those labels are empty.
+    index stores each video's rendition, so its quality and audio labels
+    come from there too.
     """
     rows: list[dict] = []
     for item in _build_cards(lib, None):
@@ -291,12 +296,12 @@ def library_videos(lib: Library) -> list[dict]:
                     "thumb_url": thumb_url(card.key, video.video_id),
                     "available": video.available,
                     "watched": done,
-                    "quality_label": "",
+                    "quality_label": video.quality_label if video.available else "",
                     "size_label": (
                         human_bytes(video.media_bytes)
                         if video.available and video.media_bytes else ""
                     ),
-                    "audio_detail": "",
+                    "audio_detail": video.audio_detail if video.available else "",
                     "library_id": card.library_id,
                     "library_label": card.library_label,
                     "source": card.title,

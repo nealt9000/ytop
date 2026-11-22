@@ -866,7 +866,16 @@ def test_fsync_dir_called_in_batch(tmp_path, monkeypatch):
     assert publish._run_batch(layout, [(src, dst)], report)
     assert dst.is_file()
     assert report.renamed == 1
-    # Once after phase 1 (src -> tmp) and once after phase 2 (tmp -> dst).
+    # A free target is renamed straight to dst in phase 1, then made durable.
+    assert calls.count(folder) >= 1
+
+    # A clashing target (a swap) hops: once after phase 1 (src -> tmp) and
+    # once after phase 2 (tmp -> dst).
+    calls.clear()
+    other = folder / "02 - Second.webm"
+    report = publish.SyncReport()
+    assert publish._run_batch(layout, [(dst, other), (other, dst)], report)
+    assert report.renamed == 2
     assert calls.count(folder) >= 2
 
 

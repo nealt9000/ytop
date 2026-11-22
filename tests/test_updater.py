@@ -19,10 +19,12 @@ from pathlib import Path
 import pytest
 
 from fake_releases import FakeReleases, make_wheel
+from stick_fakes import code_bytes
 from ytop import components as comp
 from ytop import updater as up
 from ytop.config import Config
 from ytop.runtime import current_platform
+from ytop.stick.boot import code_paths
 
 ROOT = Path(__file__).resolve().parent.parent
 PLATS = ["linux-x86_64", "macos-arm64", "windows-x86_64"]
@@ -266,16 +268,19 @@ def test_update_switches_verified_components(ytop: Path, fake: FakeReleases):
         "yt-dlp": "2026.10.26", "yt-dlp-ejs": "0.8.0", "youtube-transcript-api": "1.2.5",
     }
     folder = ytop / "components/yt-dlp/2026.11.1"
-    assert (folder / "yt_dlp/__init__.py").is_file()
-    assert (folder / "yt_dlp-2026.11.1.dist-info/RECORD").is_file()
-    assert not list(folder.glob("*.data"))  # scripts and data are not installed
+    assert code_bytes(folder, "yt_dlp/__init__.py") is not None
+    assert code_bytes(folder, "yt_dlp-2026.11.1.dist-info/RECORD") is not None
+    # Packed (#37): one zip; scripts and data are not installed.
+    assert sorted(p.name for p in folder.iterdir()) == [comp.COMPLETE, "lib.zip"]
     assert comp.python_paths(ytop)[0] == folder
     # The smoke test saw the staged components first, then the current others.
+    # Packed folders (#37) are on the path as their zip, then themselves.
     request = smoke.calls[-1]
     staged = [p for p in request.paths if ".staging" in p.parts]
-    assert len(staged) == 3 and request.paths[:3] == staged
-    assert request.paths[3] == ytop / "components/bgutil-plugin/2.0.2"
-    assert request.paths[4] == ytop / "lib/common"
+    assert len(staged) == 6 and request.paths[:6] == staged
+    assert [p.name for p in staged[::2]] == ["lib.zip"] * 3
+    assert request.paths[6] == ytop / "components/bgutil-plugin/2.0.2"
+    assert request.paths[7] == ytop / "lib/common"
     assert request.expect == {
         "yt-dlp": "2026.11.1", "yt-dlp-ejs": "0.9.0", "youtube-transcript-api": "1.2.6",
     }
@@ -607,28 +612,30 @@ def test_installed_component_has_bytecode_and_imports_without_writing(
     publish(fake)
     run_update(ytop, fake, ["yt-dlp"])
     folder = ytop / "components/yt-dlp/2026.11.1"
-    pyc = folder / "yt_dlp/__pycache__/__init__.cpython-312.pyc"
-    data = pyc.read_bytes()
+    data = code_bytes(folder, "yt_dlp/__init__.pyc")
+    assert data is not None
     assert int.from_bytes(data[4:8], "little") == 0b01  # unchecked hash
     code = marshal.loads(data[16:])
     assert code.co_filename == ".ytop/components/yt-dlp/2026.11.1/yt_dlp/__init__.py"
-    # A read-only copy (a write-protected stick): the pyc is used as it is
-    # (an edited source is not even looked at) and nothing is written.
+    # A read-only copy (a write-protected stick): the packed pyc is used as
+    # it is and nothing is written.
     copy = tmp_path / "ro"
     shutil.copytree(folder, copy)
-    (copy / "yt_dlp/__init__.py").write_text("__version__ = 'edited'\n")
     for path in sorted(copy.rglob("*"), reverse=True):
         path.chmod(stat.S_IREAD | (stat.S_IEXEC if path.is_dir() else 0))
     copy.chmod(stat.S_IREAD | stat.S_IEXEC)
     before = sorted(p.as_posix() for p in copy.rglob("*"))
+    paths = [str(p) for p in code_paths(copy)]
     try:
         out = subprocess.run(
             [sys.executable, "-I", "-S", "-c",
-             f"import sys; sys.path.insert(0, {str(copy)!r}); import yt_dlp; "
-             "print(yt_dlp.__version__)"],
+             f"import sys; sys.path[0:0] = {paths!r}; import yt_dlp; "
+             "print(yt_dlp.__version__, yt_dlp.__file__)"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        assert out == "2026.11.1"
+        version, path = out.split(" ", 1)
+        assert version == "2026.11.1"
+        assert path.startswith(str(copy / "lib.zip"))
         assert sorted(p.as_posix() for p in copy.rglob("*")) == before
     finally:
         for path in [copy, *copy.rglob("*")]:

@@ -62,6 +62,7 @@ from .bgserver import (
     is_bundled,
     prepare_server,
 )
+from .codezip import pack_folder, read_code_text, top_level_dirs
 from .components import (
     BGUTIL_SERVER,
     COMPONENT_DISTS,
@@ -86,7 +87,7 @@ from .components import (
     write_current,
 )
 from .config import Config
-from .stick.boot import COMPONENTS_DIR, LOCK
+from .stick.boot import COMPONENTS_DIR, LOCK, code_paths
 
 __all__ = [
     "COMPONENT_DISTS",
@@ -484,20 +485,16 @@ def _norm(dist: str) -> str:
     return re.sub(r"[-_.]+", "_", dist).lower()
 
 
-def _dist_infos(folder: Path, dist: str) -> list[tuple[Path, str]]:
-    """(dist-info folder, version) for ``dist`` directly in ``folder``."""
+def _dist_infos(folder: Path, dist: str) -> list[tuple[str, str]]:
+    """(dist-info folder name, version) for ``dist`` directly in ``folder``
+    (loose, or in its ``lib.zip``)."""
     prefix = _norm(dist) + "-"
     found = []
-    try:
-        entries = list(folder.iterdir())
-    except OSError:
-        return []
-    for entry in entries:
-        name = entry.name
+    for name in sorted(top_level_dirs(folder)):
         if name.lower().endswith(".dist-info") and name.lower().startswith(prefix):
             version = name[len(prefix):-len(".dist-info")]
-            if version and "-" not in version and entry.is_dir():
-                found.append((entry, version))
+            if version and "-" not in version:
+                found.append((name, version))
     return found
 
 
@@ -557,9 +554,8 @@ def deno_minimum(folders: dict[str, Path]) -> str | None:
     ejs = folders.get("yt-dlp-ejs")
     if ejs is not None:
         for info, _version in _dist_infos(ejs, "yt-dlp-ejs"):
-            try:
-                text = (info / "METADATA").read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            text = read_code_text(ejs, f"{info}/METADATA")
+            if text is None:
                 continue
             for line in text.split("\n\n", 1)[0].splitlines():  # the headers
                 key, _, value = line.partition(":")
@@ -569,12 +565,7 @@ def deno_minimum(folders: dict[str, Path]) -> str | None:
                         found.append(match.group(1))
     ytdlp = folders.get("yt-dlp")
     if ytdlp is not None:
-        try:
-            text = (ytdlp / "yt_dlp/utils/_jsruntime.py").read_text(
-                encoding="utf-8", errors="replace"
-            )
-        except OSError:
-            text = ""
+        text = read_code_text(ytdlp, "yt_dlp/utils/_jsruntime.py") or ""
         block = _DENO_CLASS.search(text)
         match = _MIN_VERSION.search(block.group(0)) if block else None
         if match:
@@ -847,6 +838,7 @@ def _stage_python(ytop: Path, http: Http, release: Release, progress: Progress |
     folder = version_dir(version)
     assert folder is not None
     compile_bytecode(ready, name, folder)
+    pack_folder(ready)
     mark_complete(ready)
     return _Staged(name, version, ready)
 
@@ -1380,6 +1372,11 @@ def _groups(staged: dict[str, _Staged]) -> list[list[str]]:
     return groups
 
 
+def _code(folders: list[Path]) -> list[Path]:
+    """``sys.path`` for code folders: each one's zip, then the folder."""
+    return [path for folder in folders for path in code_paths(folder)]
+
+
 def _request_builder(
     ytop: Path, config: Config, current: Current, staged: dict[str, _Staged],
     platforms: list[str], python: str,
@@ -1387,9 +1384,9 @@ def _request_builder(
     """Builds the smoke request for a subset of the staged components."""
     plat = _host_platform()
     lib = [_lib_common(ytop), *([ytop / "lib" / plat] if plat else [])]
-    lib = [p for p in lib if p.is_dir()]
+    lib = _code([p for p in lib if p.is_dir()])
     now_folders = _current_folders(ytop, current)
-    baseline = [now_folders[n] for n in PYTHON_COMPONENTS if n in now_folders] + lib
+    baseline = _code([now_folders[n] for n in PYTHON_COMPONENTS if n in now_folders]) + lib
     current_deno: Path | None = None
     runtime = os.environ.get("YTOP_RUNTIME")
     if plat is not None and runtime:
@@ -1407,7 +1404,7 @@ def _request_builder(
             deno = staged[DENO].folder / plat / deno_exe(plat)
             deno_version = staged[DENO].version
         return SmokeRequest(
-            python=python, paths=paths + lib,
+            python=python, paths=_code(paths) + lib,
             expect={n: staged[n].version for n in chosen},
             deno=deno, deno_version=deno_version,
             video=config.updates.smoke_video, online=True, baseline=baseline,

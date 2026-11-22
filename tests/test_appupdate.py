@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,7 +92,14 @@ def builds(tmp_path_factory):
     # Changes in the app, a Windows lib and the Windows Python (in use while
     # YTOP runs there); everything else is the same build.
     (new / "app/ytop/NEW_APP").write_text("new\n")
-    (new / "lib/windows-x86_64/nativepkg/_native.txt").write_text("rebuilt\n")
+    # The Windows lib is packed (#37): its lib.zip is what changes.
+    packed = new / "lib/windows-x86_64/lib.zip"
+    with zipfile.ZipFile(packed) as zf:
+        members = {n: zf.read(n) for n in zf.namelist()}
+    members["nativepkg/_native.txt"] = b"rebuilt\n"
+    with zipfile.ZipFile(packed, "w") as zf:
+        for name in sorted(members):
+            zf.writestr(name, members[name])
     (new / "runtime/windows-x86_64/python/python.exe").write_bytes(b"MZ new python")
     with open(new / "app/ytop/stick/launchers" / CMD, "ab") as handle:
         handle.write(b"rem newer launcher\r\n")
@@ -1015,7 +1023,7 @@ def test_previous_holds_exactly_the_replaced_files(stick: Path, server):
     # The Windows Python and lib, and the Windows launcher template: the
     # update's added app file is not in it, nor the unchanged rest of app/.
     assert replaced == {
-        "lib/windows-x86_64/nativepkg/_native.txt",
+        "lib/windows-x86_64/lib.zip",
         "runtime/windows-x86_64/python/python.exe",
         f"app/ytop/stick/launchers/{CMD}",
     }
@@ -1092,7 +1100,7 @@ def test_revert_twice_returns_to_the_update(stick: Path, server):
     assert found is not None and found.build_id == OLD_ID
     # Only one previous version is ever kept.
     assert _tree(yt / ms.PREVIOUS) == {
-        "lib/windows-x86_64/nativepkg/_native.txt",
+        "lib/windows-x86_64/lib.zip",
         "runtime/windows-x86_64/python/python.exe",
         f"app/ytop/stick/launchers/{CMD}",
         "build.json", MANIFEST_NAME, ms.PREVIOUS_MARK,

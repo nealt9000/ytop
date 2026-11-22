@@ -308,3 +308,15 @@ def make_fake_image(
         server_install=server_install or fake_server_install,
     )
     return out / ".ytop"
+
+
+def code_bytes(folder: Path, rel: str) -> bytes | None:
+    """A file of a code folder, loose or packed in its ``lib.zip``
+    (``ytop.codezip``); None when it has neither."""
+    if (folder / rel).is_file():
+        return (folder / rel).read_bytes()
+    try:
+        with zipfile.ZipFile(folder / "lib.zip") as zf:
+            return zf.read(rel)
+    except (OSError, KeyError):
+        return None

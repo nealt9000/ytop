@@ -2,6 +2,7 @@ import importlib.util
 import json
 import re
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from stick_fakes import (
     STALE_STDLIB_PYC,
     _sha,
     _tar,
+    code_bytes,
     fake_bundled_install,
     fake_install_deps,
     fake_server_install,
@@ -133,17 +135,18 @@ def test_offline_requires_cache(tmp_path):
 
 def test_dedupe_common(tmp_path):
     yt = build(tmp_path) / ".ytop"
+    common = yt / "lib/common"
     # A package identical on every platform moves to common as a whole.
-    assert (yt / "lib/common/sharedpkg/__init__.py").is_file()
-    assert (yt / "lib/common/sharedpkg/data/x.txt").is_file()
+    assert code_bytes(common, "sharedpkg/__init__.py") is not None
+    assert code_bytes(common, "sharedpkg/data/x.txt") is not None
     for plat in PLATS:
-        assert not (yt / f"lib/{plat}/sharedpkg").exists()
-        native = yt / f"lib/{plat}/nativepkg/_native.txt"
-        assert native.read_text() == f"built for {plat}\n"
+        lib = yt / f"lib/{plat}"
+        assert code_bytes(lib, "sharedpkg/__init__.py") is None
+        assert code_bytes(lib, "nativepkg/_native.txt") == f"built for {plat}\n".encode()
         # Never split a package across lib/common and lib/<plat>: Python
         # cannot import a regular package from two sys.path entries.
-        assert (yt / f"lib/{plat}/nativepkg/__init__.py").is_file()
-    assert not (yt / "lib/common/nativepkg").exists()
+        assert code_bytes(lib, "nativepkg/__init__.py") is not None
+    assert code_bytes(common, "nativepkg/__init__.py") is None
 
 
 def _stdlib_entries(yt, plat) -> dict[str, bytes]:
@@ -302,10 +305,13 @@ def test_real_versions_toml_pins_every_platform():
 
 def test_bytecode_for_app_lib_and_stdlib(tmp_path):
     yt = build(tmp_path) / ".ytop"
-    assert _unchecked_hash_pyc(yt / "lib/common/sharedpkg/__pycache__/__init__.cpython-312.pyc")
+    # Packed code (#37): each pyc sits beside its source, where zipimport
+    # looks, and the source stays for tracebacks.
+    assert _unchecked_hash_pyc(None, code_bytes(yt / "lib/common", "sharedpkg/__init__.pyc"))
+    assert code_bytes(yt / "lib/common", "sharedpkg/__init__.py")
     for plat in PLATS:
         assert _unchecked_hash_pyc(
-            yt / f"lib/{plat}/nativepkg/__pycache__/__init__.cpython-312.pyc"
+            None, code_bytes(yt / f"lib/{plat}", "nativepkg/__init__.pyc")
         )
         entries = _stdlib_entries(yt, plat)
         assert _unchecked_hash_pyc(None, entries["json/__init__.pyc"])
@@ -378,16 +384,23 @@ def test_build_seeds_the_store(tmp_path):
         folder = yt / "components" / name / version
         info = f"{dist.replace('-', '_')}-{version}.dist-info"
         for rel in [*files, f"{info}/METADATA", f"{info}/RECORD"]:
-            assert (folder / rel).read_bytes() == (yt / "lib/common" / rel).read_bytes()
+            assert code_bytes(folder, rel) == code_bytes(yt / "lib/common", rel) is not None
+        # Packed (#37): the zip and the COMPLETE marker; a namespace package
+        # (the bgutil plugin's yt_dlp_plugins) stays loose: zipimport cannot
+        # import one.
+        loose = sorted(p.name for p in folder.iterdir())
+        assert loose == [comp.COMPLETE, "lib.zip"] or loose == [
+            comp.COMPLETE, "lib.zip", "yt_dlp_plugins"] and name == "bgutil-plugin"
         # Only importable parts: no console scripts or data files.
-        assert not (folder / "share").exists() and not (folder / "bin").exists()
+        with zipfile.ZipFile(folder / "lib.zip") as zf:
+            assert not [n for n in zf.namelist() if n.startswith(("share/", "bin/"))]
         # The always-present fallback stays in the image.
-        assert (yt / "lib/common" / files[0]).is_file()
+        assert code_bytes(yt / "lib/common", files[0]) is not None
         py = [f for f in files if f.endswith(".py")][0]
-        pyc = folder / py.rsplit("/", 1)[0] / "__pycache__" / (
-            py.rsplit("/", 1)[1][:-3] + ".cpython-312.pyc"
-        )
-        assert _unchecked_hash_pyc(pyc)
+        head, _, mod = py.rpartition("/")
+        loose = folder / head / "__pycache__" / f"{mod[:-3]}.cpython-312.pyc"
+        data = loose.read_bytes() if loose.is_file() else code_bytes(folder, py[:-3] + ".pyc")
+        assert _unchecked_hash_pyc(None, data)
     assert comp.python_paths(yt) == [
         yt / "components" / name / FAKE_COMPONENTS[name][1]
         for name in comp.PYTHON_COMPONENTS

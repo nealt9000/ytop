@@ -563,6 +563,9 @@ CURRENT_JSON = "current.json"
 # Written last into a version folder (and removed first when one goes): a
 # folder without it was cut off half way and is never imported.
 COMPLETE = ".complete"
+# A code folder's pure-Python packages, packed (ytop.codezip): the zip goes
+# on sys.path ahead of the folder, which keeps what must stay loose.
+CODE_ZIP = "lib.zip"
 # The pure-Python components, in the order they go on sys.path.
 PYTHON_COMPONENTS = ("yt-dlp", "yt-dlp-ejs", "bgutil-plugin", "youtube-transcript-api")
 _VERSION_KEEP = frozenset(
@@ -621,6 +624,13 @@ def component_paths(ytop: Path) -> list[Path]:
         if (path / COMPLETE).is_file():
             paths.append(path)
     return paths
+
+
+def code_paths(folder: Path) -> list[Path]:
+    """The ``sys.path`` entries for a code folder: its ``lib.zip`` (when it
+    has one), then the folder itself."""
+    packed = folder / CODE_ZIP
+    return [packed, folder] if packed.is_file() else [folder]
 
 
 def platform_key() -> str | None:
@@ -697,11 +707,14 @@ def main(argv: list[str] | None = None) -> int:
     # Components come from the stick, even when the rest runs from the
     # Linux cache: they change without a new build, so the cache (one per
     # build) never holds them.  The stick is there at launch.
+    folders = [
+        *component_paths(image_root),
+        runtime_root / "lib" / "common",
+        runtime_root / "lib" / key,
+    ]
     sys.path[0:0] = [
         str(runtime_root / "app"),
-        *(str(path) for path in component_paths(image_root)),
-        str(runtime_root / "lib" / "common"),
-        str(runtime_root / "lib" / key),
+        *(str(path) for folder in folders for path in code_paths(folder)),
     ]
     os.environ["YTOP_HOME"] = str(home)
     os.environ["YTOP_RUNTIME"] = str(runtime_root / "runtime" / key)

@@ -220,6 +220,7 @@ def _download_media(
     progress: BytesCallback | None = None,
     cancel: Callable[[], bool] | None = None,
     preserve_audio: bool = False,
+    max_height: int | None = None,
 ) -> tuple[Path, str]:
     video_dir = video_directory(layout, playlist_id, item.id)
     if not force:
@@ -244,10 +245,12 @@ def _download_media(
             # Formats can disappear between probing and downloading.  Re-probe
             # once, reselect, and resume; never discard a partial file.
             try:
+                # Never above the height chosen for this run (cap or budget).
+                cap = item.selection.video.get("height") or max_height
                 info = extract_video_info(item.id, config, layout.root)
                 item.info = info
                 item.selection = select_format(
-                    info, config.audio_language, preserve_audio=preserve_audio
+                    info, config.audio_language, cap, preserve_audio=preserve_audio
                 )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
@@ -637,7 +640,7 @@ def _process_item_body(
         media, status = _download_media(
             item, layout, playlist_id, config, force, lock,
             quiet=quiet, progress=progress, cancel=cancel,
-            preserve_audio=preserve_audio,
+            preserve_audio=preserve_audio, max_height=max_height,
         )
     except JobCancelled:
         raise

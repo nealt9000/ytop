@@ -1434,3 +1434,24 @@ def test_upgrade_without_a_cap_rereads_every_downloaded_video(
 def LibraryLayoutFor(root: Path):
     from ytop.layout import LibraryLayout
     return LibraryLayout(root)
+
+
+def test_download_retry_keeps_the_chosen_height(tmp_path: Path, real_probe, monkeypatch):
+    calls, state, extracted = real_probe
+    monkeypatch.setattr(download_mod.time, "sleep", lambda s: None)
+    state["items"] = [_with_heights(item(1, "vid1"), 720, 1080)]
+    failed = []
+
+    def fail_once(video_id, template):
+        if not failed:
+            failed.append(video_id)
+            raise DownloadError("HTTP Error 403: Forbidden")
+
+    state["on_download"] = fail_once
+    result = download_mod.fetch_playlist(
+        "PL1", Config(), library_root=make_library(tmp_path).root,
+        max_height=720, target_mb_per_hour=0,
+    )
+    assert failed == ["vid1"]
+    assert [i.status for i in result.items] == ["downloaded"]
+    assert _stored_height(result, "vid1") == 720

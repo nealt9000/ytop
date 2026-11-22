@@ -54,8 +54,8 @@ EXECUTABLE_LAUNCHERS = ("Start YTOP (Mac).command", "start-ytop-linux.sh")
 from ytop.bgserver import (  # noqa: E402
     ServerError,
     ServerInstall,
-    deno_install,
     find_native,
+    install_and_bundle,
     prepare_server,
 )
 from ytop.components import (  # noqa: E402
@@ -820,7 +820,7 @@ def build(
     with tempfile.TemporaryDirectory() as tools:
         if server_install is None:
             deno = host_deno(by_key, files, cache, offline, Path(tools))
-            server_install = deno_install
+            server_install = install_and_bundle
         else:
             deno = Path(tools) / "deno"  # the injected install does not run it
         seeded[BGUTIL_SERVER] = seed_server(

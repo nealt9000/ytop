@@ -506,6 +506,25 @@ def test_plugin_and_server_update_together(ytop: Path, fake: FakeReleases):
     assert folders(ytop, "bgutil-server") == ["2.1.0"]
 
 
+def test_a_bundled_server_is_never_copied_from(ytop: Path, fake: FakeReleases):
+    """A bundled server's node_modules holds only what its bundle reads:
+    the new server is installed (and bundled) even with the same
+    dependencies."""
+    from ytop.bgserver import BUNDLE_MARKER
+
+    (ytop / "components/bgutil-server/2.0.2/server" / BUNDLE_MARKER).write_text("{}")
+    publish_plugin(fake)
+    installs: list[Path] = []
+
+    def install(deno: Path, server: Path) -> None:
+        installs.append(server)
+        fill_modules(deno, server)
+
+    result = run_update(ytop, fake, ["bgutil-plugin"], server_install=install)
+    assert "bgutil-server" in result.updated, result
+    assert len(installs) == 1
+
+
 def test_server_with_new_dependencies_is_installed(ytop: Path, fake: FakeReleases):
     publish_plugin(fake, dependencies={"axios": "^2"})
 

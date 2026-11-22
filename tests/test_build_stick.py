@@ -16,6 +16,7 @@ from stick_fakes import (
     STALE_STDLIB_PYC,
     _sha,
     _tar,
+    fake_bundled_install,
     fake_install_deps,
     fake_server_install,
     load_build_stick,
@@ -456,6 +457,41 @@ def test_build_seeds_bgutil_server(tmp_path):
     entries = read_manifest(yt / MANIFEST_NAME)
     assert entries is not None
     assert not [rel for rel in entries if rel.startswith("components/")]
+
+
+def test_build_swaps_in_a_bundled_server(tmp_path):
+    from ytop import components as comp
+    from ytop.bgserver import BUNDLE_STUB, is_bundled
+
+    yt = make_fake_image(tmp_path / "stick", PLATS, server_install=fake_bundled_install)
+    server = _server_folder(yt)
+    files = sorted(p.relative_to(server).as_posix() for p in server.rglob("*") if p.is_file())
+    assert files == [
+        "bundled.json", "deno.json",
+        "node_modules/THIRD_PARTY_LICENSES.txt", "node_modules/quickjs-wasi/base64.so",
+        "package.json", "src/generate_once.js", "src/generate_once.ts",
+    ]
+    assert (server / "src/generate_once.ts").read_text() == BUNDLE_STUB
+    assert (server / "src/generate_once.js").read_text() == "// bundled script\n"
+    assert json.loads((server / "bundled.json").read_text()) == {
+        "assets": ["quickjs-wasi/base64.so"],
+    }
+    assert is_bundled(server)
+    assert comp.server_home(yt) == server
+    assert (server.parent / "LICENSE").read_text() == "GPL text\n"
+
+
+@pytest.mark.parametrize(
+    "asset", ["../escape.js", "/etc/passwd", "a/../../b", "C:/x", "axios\\index.js",
+              "missing/file.css", 7, ""],
+)
+def test_build_refuses_a_bad_bundle_asset(tmp_path, asset):
+    def install(deno, server):
+        fake_bundled_install(deno, server)
+        (server / "bundle/assets.json").write_text(json.dumps([asset]))
+
+    with pytest.raises(bs.BuildError, match="asset"):
+        build(tmp_path, server_install=install)
 
 
 @pytest.mark.parametrize(

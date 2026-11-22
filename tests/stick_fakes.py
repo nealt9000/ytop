@@ -16,6 +16,7 @@ import json
 import sys
 import tarfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -156,6 +157,17 @@ def fake_server_install(deno: Path, server: Path) -> None:
     (server / "node_modules/.bin/axios").symlink_to("../axios/index.js")
 
 
+def fake_bundled_install(deno: Path, server: Path) -> None:
+    """Stand-in for :func:`ytop.bgserver.install_and_bundle`: the fake
+    install, then what ``bgbundle.mjs`` writes into ``server/bundle/``."""
+    fake_server_install(deno, server)
+    bundle = server / "bundle"
+    bundle.mkdir()
+    (bundle / "generate_once.js").write_text("// bundled script\n")
+    (bundle / "assets.json").write_text(json.dumps(["quickjs-wasi/base64.so"]))
+    (bundle / "THIRD_PARTY_LICENSES.txt").write_text("axios: MIT\n")
+
+
 def make_fake_sources(src: Path, platforms: list[str]) -> Path:
     """Write fake archives for ``platforms`` under ``src``; return versions.toml."""
     src.mkdir(parents=True, exist_ok=True)
@@ -279,7 +291,9 @@ def fake_install_deps(plat: str, target: Path) -> None:
     )
 
 
-def make_fake_image(out: Path, platforms: list[str]) -> Path:
+def make_fake_image(
+    out: Path, platforms: list[str], server_install: Callable[[Path, Path], None] | None = None,
+) -> Path:
     """Build a fake stick image into ``out``; return its ``.ytop`` directory."""
     bs = load_build_stick()
     work = out.parent / f".{out.name}-fake-src"
@@ -291,6 +305,6 @@ def make_fake_image(out: Path, platforms: list[str]) -> Path:
         versions_path=versions,
         offline=False,
         install=fake_install_deps,
-        server_install=fake_server_install,
+        server_install=server_install or fake_server_install,
     )
     return out / ".ytop"

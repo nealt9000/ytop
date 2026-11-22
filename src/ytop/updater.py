@@ -55,7 +55,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import product, sticklock
-from .bgserver import ServerError, ServerInstall, deno_install, prepare_server
+from .bgserver import (
+    ServerError,
+    ServerInstall,
+    install_and_bundle,
+    is_bundled,
+    prepare_server,
+)
 from .components import (
     BGUTIL_SERVER,
     COMPONENT_DISTS,
@@ -896,14 +902,16 @@ def _dependencies(server: Path) -> object:
 
 def _server_installer(ytop: Path, install: ServerInstall | None) -> ServerInstall:
     """Fills a new server's ``node_modules``: copied from the current
-    server when the dependencies are the same, else by ``deno install``
-    (``install``, default :func:`ytop.bgserver.deno_install`) with a Deno
-    that runs here."""
+    server when the dependencies are the same and it is not bundled (a
+    bundled server keeps only the files its bundle reads), else by
+    ``install`` (default :func:`ytop.bgserver.install_and_bundle`) with a
+    Deno that runs here."""
 
     def fill(_unused: Path, server: Path) -> None:
         current = server_home(ytop)
         if (
             current is not None and (current / "node_modules").is_dir()
+            and not is_bundled(current)
             and _dependencies(current) == _dependencies(server)
         ):
             shutil.copytree(current / "node_modules", server / "node_modules",
@@ -915,7 +923,7 @@ def _server_installer(ytop: Path, install: ServerInstall | None) -> ServerInstal
             return
         if deno is None:
             raise ServerError("no Deno that runs here to fetch the PO-token server's packages")
-        deno_install(deno, server)
+        install_and_bundle(deno, server)
 
     return fill
 

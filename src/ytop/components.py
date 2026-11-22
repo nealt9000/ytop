@@ -834,7 +834,7 @@ def _prune(target: Path, current: Current, names: list[str]) -> None:
             keep.add(version_dir(current.previous.get(name)))
         folder = store_dir(target) / name
         try:
-            entries = list(folder.iterdir())
+            entries = sorted(folder.iterdir())  # a stable order on every filesystem
         except OSError:
             continue
         for entry in entries:

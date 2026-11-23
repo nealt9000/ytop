@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from factories import add_playlist, library_set, make_library
+from ytop.index import index_for
 from ytop.layout import LibraryLayout, init_library, read_library
 from ytop.tags import TagStore
 from ytop.web.app import create_app
@@ -307,3 +310,30 @@ def test_home_count_is_not_announced_on_load(tmp_path: Path) -> None:
 def test_library_edit_form_next_is_url_encoded() -> None:
     template = (STATIC_JS.parents[1] / "templates/library.html").read_text()
     assert 'name="next" value="/?library={{ s.id|urlencode }}"' in template
+
+
+def test_home_page_is_not_held_up_by_a_download_writing_the_index(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    client = _client(layout)
+    assert "One" in client.get("/").text
+    index = index_for(layout)
+    held, release = threading.Event(), threading.Event()
+
+    def download_commit() -> None:  # stuck behind a busy stick
+        with index._lock:
+            held.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=download_commit, daemon=True)
+    holder.start()
+    assert held.wait(5)
+    try:
+        start = time.monotonic()
+        for path in ("/", "/videos", "/playlist/P1"):
+            assert client.get(path).status_code == 200
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        holder.join(5)
+    assert elapsed < 5.0
+    client.app.state.jobs.close()

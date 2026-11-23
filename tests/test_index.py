@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -883,3 +885,74 @@ def test_playlist_in_the_wrong_folder_is_not_listed(tmp_path: Path) -> None:
     lib = Library(library_set(layout))
     assert {view.id for view in lib.playlists()} == {"P1", "P2"}
     assert lib.resolve_playlist("P9") is None
+
+
+def _hold_lock(index, release: "threading.Event") -> "threading.Thread":
+    """Hold the index's lock in another thread (as a download's commit stuck
+    behind a busy stick does) until ``release`` is set."""
+    held = threading.Event()
+
+    def hold() -> None:
+        with index._lock:
+            held.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert held.wait(5)
+    return thread
+
+
+def test_a_page_is_not_held_up_by_a_busy_index(tmp_path: Path) -> None:
+    layout = _library(tmp_path)
+    index = index_for(layout)
+    assert index.refresh_for_page()
+    assert len(index.playlists(page=True)) == 2
+    index.derived(page=True)
+    add_playlist(layout, "P3", "Third", [("c1", "C One")])
+    release = threading.Event()
+    holder = _hold_lock(index, release)
+    try:
+        start = time.monotonic()
+        assert index.refresh_for_page(wait=0.2) is False
+        rows = index.playlists(page=True)
+        index.derived(page=True)
+        index.vocabulary(page=True)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        holder.join(5)
+    # The rows read last, quickly; the next page catches up.
+    assert elapsed < 2.0
+    assert {p.playlist_id for p in rows} == {"P1", "P2"}
+    assert index.refresh_for_page(wait=10)
+    assert {p.playlist_id for p in index.playlists(page=True)} == {"P1", "P2", "P3"}
+
+
+def test_the_first_page_waits_for_the_index(tmp_path: Path) -> None:
+    layout = _library(tmp_path)
+    index = index_for(layout)
+    release = threading.Event()
+    holder = _hold_lock(index, release)
+    threading.Timer(0.3, release.set).start()
+    try:
+        # Nothing read yet, so there is nothing older to show: it waits.
+        assert index.refresh_for_page(wait=0.01)
+        assert len(index.playlists(page=True)) == 2
+    finally:
+        release.set()
+        holder.join(5)
+
+
+def test_a_page_read_of_tags_never_writes(tmp_path: Path) -> None:
+    layout = _library(tmp_path)
+    index = index_for(layout)
+    index.refresh_for_page()
+    index.playlists(page=True)
+    index.derived(page=True)
+    index.refresh_video("P1", "a1")  # leaves the tags to derive again
+    before = layout.index_db.stat().st_mtime_ns
+    index.derived(page=True)
+    assert layout.index_db.stat().st_mtime_ns == before
+    # A non-page read still derives them.
+    index.derived()

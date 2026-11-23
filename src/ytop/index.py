@@ -49,6 +49,15 @@ MTIME_SLACK_NS = 2_000_000_000
 WRITE_TIMEOUT_S = 30.0
 READ_TIMEOUT_S = 2.0
 
+# How long a page waits on this process's own index work.  A download writes
+# its rows (and a page's refresh writes playlists that changed) on the stick,
+# and while a video is being written there one small commit can wait seconds
+# or minutes behind it.  A page waits this long for its refresh, and
+# PAGE_LOCK_WAIT_S for the lock to read, then shows the rows it read last;
+# the refresh carries on in the background for the next page.
+PAGE_WAIT_S = 0.5
+PAGE_LOCK_WAIT_S = 0.1
+
 # OSError numbers that mean "this place cannot be written".
 _UNWRITABLE_ERRNOS = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 
@@ -218,6 +227,15 @@ def index_for(layout: LibraryLayout, *, read_only: bool = False) -> LibraryIndex
         return index
 
 
+def vocabulary_of(derived: dict[str, Derived]) -> dict[str, Tag]:
+    """Every tag in ``derived`` (as :meth:`LibraryIndex.derived` returns), by key."""
+    vocab: dict[str, Tag] = {}
+    for row in derived.values():
+        for tag in row.tags:
+            vocab.setdefault(tag.key, tag)
+    return vocab
+
+
 def refresh_video_quietly(
     layout: LibraryLayout, playlist_id: str, video_id: str
 ) -> None:
@@ -362,6 +380,12 @@ class LibraryIndex:
         self._memory_fallback = False
         self._last_playlists: list[PlaylistRow] = []
         self._last_derived: dict[str, Derived] = {}
+        # Whether those have been read once: until then a page waits.
+        self._playlists_read = False
+        self._derived_read = False
+        # The background refresh pages start (one at a time).
+        self._refresher: threading.Thread | None = None
+        self._refresher_lock = threading.Lock()
         # Refreshes a locked database refused, in the order asked for.
         self._pending_refresh: dict[tuple[str, str | None], None] = {}
         # Where the raw.json backfill carries on from, and whether the last
@@ -419,8 +443,12 @@ class LibraryIndex:
         default: Callable[[], T],
         *,
         timeout: float | None = None,
+        lock_wait: float | None = None,
     ) -> T:
         """Run ``op`` in a session.
+
+        With ``lock_wait``, gives up (``default()``) when this process's
+        lock is not free within that many seconds.
 
         A library that cannot be written switches to the in-memory index for
         the rest of the process, and ``op`` is retried once.  A damaged
@@ -428,6 +456,13 @@ class LibraryIndex:
         aside and rebuilt, and ``op`` retried once.  A locked database, or a
         second failure, logs and returns ``default()``.
         """
+        if lock_wait is not None:
+            if not self._lock.acquire(timeout=lock_wait):
+                return default()
+            try:
+                return self._guarded(op, default, timeout=timeout)
+            finally:
+                self._lock.release()
         with self._lock:
             for attempt in (1, 2):
                 try:
@@ -601,6 +636,32 @@ class LibraryIndex:
             changed += self._guarded(lambda conn: self._drop_missing(conn, seen), lambda: 0)
         self._guarded(lambda conn: self._derive_if_needed(conn, changed), _none)
         return changed
+
+    def refresh_for_page(self, wait: float = PAGE_WAIT_S) -> bool:
+        """Run :meth:`ensure_fresh` in a background thread for a page and
+        wait up to ``wait`` seconds for it (as long as it takes until the
+        page has read the index once); True when it finished.
+
+        One refresh runs at a time: a page that finds one running waits for
+        that one, so a refresh held up behind the stick never piles up more.
+        """
+        with self._refresher_lock:
+            thread = self._refresher
+            if thread is None or not thread.is_alive():
+                thread = threading.Thread(
+                    target=self._refresh_quietly, name="ytop-index-refresh",
+                    daemon=True,
+                )
+                self._refresher = thread
+                thread.start()
+        thread.join(wait if self._playlists_read and self._derived_read else None)
+        return not thread.is_alive()
+
+    def _refresh_quietly(self) -> None:
+        try:
+            self.ensure_fresh()
+        except Exception as exc:  # noqa: BLE001 - the index is disposable
+            log.warning("library index %s refresh failed: %s", self.layout.index_db, exc)
 
     def rebuild(self) -> int:
         """Re-index every playlist from scratch; returns how many."""
@@ -1208,28 +1269,42 @@ class LibraryIndex:
 
     # -- reads ----------------------------------------------------------------
 
-    def playlists(self) -> list[PlaylistRow]:
+    def playlists(self, *, page: bool = False) -> list[PlaylistRow]:
         """Every indexed playlist, each with its videos in playlist order.
 
         A locked (or unrecoverable) database returns the rows from the last
-        successful read, or an empty list.
+        successful read, or an empty list.  So does a ``page`` read that
+        finds this process's lock busy for :data:`PAGE_LOCK_WAIT_S` (once
+        the rows have been read at all).
         """
         result = self._guarded(
-            self._read_playlists, lambda: None, timeout=READ_TIMEOUT_S
+            self._read_playlists, lambda: None, timeout=READ_TIMEOUT_S,
+            lock_wait=PAGE_LOCK_WAIT_S if page and self._playlists_read else None,
         )
         if result is None:
             return list(self._last_playlists)
         self._last_playlists = result
+        self._playlists_read = True
         return list(result)
 
-    def derived(self) -> dict[str, Derived]:
-        """Each playlist's derived category and tags (recomputed if stale)."""
+    def derived(self, *, page: bool = False) -> dict[str, Derived]:
+        """Each playlist's derived category and tags (recomputed if stale).
+
+        A ``page`` read, once they have been read at all, never writes: it
+        reads them as they are (the page's refresh derives them again), and
+        answers from the last read when the lock is busy, as
+        :meth:`playlists` does.
+        """
+        quick = page and self._derived_read
         result = self._guarded(
-            self._read_derived, lambda: None, timeout=READ_TIMEOUT_S
+            self._read_derived_rows if quick else self._read_derived,
+            lambda: None, timeout=READ_TIMEOUT_S,
+            lock_wait=PAGE_LOCK_WAIT_S if quick else None,
         )
         if result is None:
             return dict(self._last_derived)
         self._last_derived = result
+        self._derived_read = True
         return dict(result)
 
     def search_meta(
@@ -1351,13 +1426,9 @@ class LibraryIndex:
             ))
         return hits
 
-    def vocabulary(self) -> dict[str, Tag]:
+    def vocabulary(self, *, page: bool = False) -> dict[str, Tag]:
         """Every derived tag in the library, by key."""
-        vocab: dict[str, Tag] = {}
-        for derived in self.derived().values():
-            for tag in derived.tags:
-                vocab.setdefault(tag.key, tag)
-        return vocab
+        return vocabulary_of(self.derived(page=page))
 
     @staticmethod
     def _read_playlists(conn: sqlite3.Connection) -> list[PlaylistRow]:
@@ -1406,6 +1477,10 @@ class LibraryIndex:
         if self._tags_dirty(conn):
             self._derive(conn)
             conn.commit()
+        return self._read_derived_rows(conn)
+
+    @staticmethod
+    def _read_derived_rows(conn: sqlite3.Connection) -> dict[str, Derived]:
         tags: dict[str, list[Tag]] = {}
         for row in conn.execute(
             "SELECT playlist_id, key, label FROM idx_tags "

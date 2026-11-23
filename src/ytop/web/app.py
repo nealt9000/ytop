@@ -1031,8 +1031,8 @@ def create_app(
         category_names: list[str] = []
         if ref is not None:
             index = index_for(ref.layout, read_only=ref.read_only)
-            index.ensure_fresh()  # a tag added on disk since the last page
-            derived = index.derived()
+            index.refresh_for_page()  # a tag added on disk since the last page
+            derived = index.derived(page=True)
             edits = TagStore(ref.layout).read()
             pid = playlist.id
             row = derived.get(pid)
@@ -1188,7 +1188,7 @@ def create_app(
             ((key, labels[key], count) for key, count in counts.items()),
             key=lambda row: row[1].casefold(),
         )
-        vocabulary = index_for(ref.layout, read_only=ref.read_only).vocabulary()
+        vocabulary = index_for(ref.layout, read_only=ref.read_only).vocabulary(page=True)
         edits = TagStore(ref.layout).read()
         # A tag's own name before its rename: derived, or as the user added it.
         names = {key: tag.label for key, tag in vocabulary.items()}

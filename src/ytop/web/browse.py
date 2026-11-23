@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
-from ..index import PlaylistRow, VideoRow, index_for
+from ..index import PlaylistRow, VideoRow, index_for, vocabulary_of
 from ..libraries import LibraryRef
 from ..tags import Tag, TagEdits, TagStore, apply_edits, effective_category, video_tags
 from ..transcripts.store import query_tokens
@@ -121,17 +121,20 @@ class _Loaded:
 
 def _load(lib: Library, ref: LibraryRef) -> _Loaded:
     index = index_for(ref.layout, read_only=ref.read_only)
-    index.ensure_fresh()
+    # Never held up by a download writing to the same stick: at worst the
+    # page shows the rows read last (see index.PAGE_WAIT_S).
+    index.refresh_for_page()
     titles = lib.titles_for(ref).read()
+    derived = index.derived(page=True)
     return _Loaded(
         ref=ref,
-        rows=index.playlists(),
+        rows=index.playlists(page=True),
         progress=lib.progress_for(ref).read(),
         video_titles=titles.get("videos") or {},
         playlist_titles=titles.get("playlists") or {},
         edits=TagStore(ref.layout).read(),
-        derived=index.derived(),
-        vocabulary=index.vocabulary(),
+        derived=derived,
+        vocabulary=vocabulary_of(derived),
     )
 
 

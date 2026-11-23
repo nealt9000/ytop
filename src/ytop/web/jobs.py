@@ -146,6 +146,12 @@ QUALITY_TIERS = (480, 720, 1080, 1440, 2160)
 TIER_POLICIES = tuple(f"{height}p" for height in QUALITY_TIERS)
 
 
+def _timed_out(error: object) -> bool:
+    """A video failed because a helper process ran out of time (the
+    PO-token script's Deno on a busy stick): worth one more try."""
+    return "TimeoutExpired" in str(error or "")
+
+
 def policy_settings(policy: str, config: Config) -> tuple[float, int]:
     """``(target_mb_per_hour, max_height)`` for a review quality choice."""
     if policy == "efficient":
@@ -2387,6 +2393,7 @@ class JobManager:
             )
 
         broken: list[str] = []
+        timed_out: list[str] = []
 
         def on_done(result: ItemResult) -> None:
             # A flaky proxy or sign-in never triggers a component update.
@@ -2397,6 +2404,8 @@ class JobManager:
                 result.error_kind == "youtube_changed" or self._fixable(result.error)
             ):
                 broken.append(result.id)
+            elif result.status == "failed" and _timed_out(result.error):
+                timed_out.append(result.id)
             with self._lock:
                 base = self._base_bytes.get(job_id, 0) + int(result.size or 0)
                 self._base_bytes[job_id] = base
@@ -2469,6 +2478,16 @@ class JobManager:
             if self._unplugged(job_id):
                 self._pause(job_id)
                 return
+        if timed_out:
+            retried_bytes += self._retry_timed_out(
+                job_id, job, probe, timed_out, config, location, cancel,
+                on_start, on_progress,
+            )
+            if cancel.is_set():
+                raise JobCancelled("cancelled by the user")
+            if self._unplugged(job_id):
+                self._pause(job_id)
+                return
 
         playlist = fetch.playlist or {}
         if job.kind == "video":
@@ -2514,43 +2533,81 @@ class JobManager:
         added = [0]
 
         def attempt(item: ProbedItem) -> bool:
-            again = probe_video(
-                item.id, config, playlist=probe.playlist, index=item.index,
-                max_height=job.max_height,
-                preserve_audio=job.preserve_audio,
-                cancel=cancel.is_set,
-                cache_root=location.root,
-            )
-            fresh = again.items[0] if again.items else None
-            if fresh is None or fresh.error or fresh.selection is None:
-                return False
-            results: list[ItemResult] = []
-            download_probe(
-                ProbeResult(url=probe.url, playlist=probe.playlist, items=[fresh]),
-                config,
-                jobs=1,
-                quiet=True,
-                # The job's quality policy, as the main pass applies it.
-                max_height=job.max_height,
-                target_mb_per_hour=job.target_mb_per_hour,
-                min_height=config.min_height,
-                fetch_transcripts=True,
-                preserve_audio=job.preserve_audio,
-                library_root=location.root,
-                cancel=cancel.is_set,
-                on_item_start=on_start,
-                on_item_done=results.append,
-                on_progress=on_progress,
-            )
-            result = results[-1] if results else None
-            if result is None or result.status == "failed":
-                return False
-            added[0] += int(result.size or 0)
-            self._record_retry(job_id, result)
-            return True
+            return self._retry_item(job_id, job, probe, item, config, location,
+                                    cancel, on_start, on_progress, added)
 
         auto.fix(items, attempt, say=self._say(job_id), cancel=cancel.is_set)
         return added[0]
+
+    def _retry_timed_out(
+        self, job_id: str, job: Job, probe: ProbeResult, timed_out: list[str],
+        config: Config, location: LibraryRef, cancel: threading.Event,
+        on_start: Callable[[ProbedItem], None],
+        on_progress: Callable[[ProbedItem, int, int], None],
+    ) -> int:
+        """Videos that failed because a helper ran out of time (the PO-token
+        script's Deno on a busy stick): read and download each once more,
+        with the same components.  Returns the bytes the retries added."""
+        by_id = {item.id: item for item in probe.items}
+        added = [0]
+        for video_id in dict.fromkeys(timed_out):
+            if cancel.is_set():
+                break
+            if video_id not in by_id:
+                continue
+            try:
+                self._retry_item(job_id, job, probe, by_id[video_id], config,
+                                 location, cancel, on_start, on_progress, added)
+            except JobCancelled:
+                raise
+            except Exception:  # noqa: BLE001 - the video just stays failed
+                log.exception("retrying %s failed", video_id)
+        return added[0]
+
+    def _retry_item(
+        self, job_id: str, job: Job, probe: ProbeResult, item: ProbedItem,
+        config: Config, location: LibraryRef, cancel: threading.Event,
+        on_start: Callable[[ProbedItem], None],
+        on_progress: Callable[[ProbedItem, int, int], None],
+        added: list[int],
+    ) -> bool:
+        """Read and download one failed video again (with whatever yt-dlp
+        the active runner holds); records it and adds its bytes to
+        ``added[0]`` when it works."""
+        again = probe_video(
+            item.id, config, playlist=probe.playlist, index=item.index,
+            max_height=job.max_height,
+            preserve_audio=job.preserve_audio,
+            cancel=cancel.is_set,
+            cache_root=location.root,
+        )
+        fresh = again.items[0] if again.items else None
+        if fresh is None or fresh.error or fresh.selection is None:
+            return False
+        results: list[ItemResult] = []
+        download_probe(
+            ProbeResult(url=probe.url, playlist=probe.playlist, items=[fresh]),
+            config,
+            jobs=1,
+            quiet=True,
+            # The job's quality policy, as the main pass applies it.
+            max_height=job.max_height,
+            target_mb_per_hour=job.target_mb_per_hour,
+            min_height=config.min_height,
+            fetch_transcripts=True,
+            preserve_audio=job.preserve_audio,
+            library_root=location.root,
+            cancel=cancel.is_set,
+            on_item_start=on_start,
+            on_item_done=results.append,
+            on_progress=on_progress,
+        )
+        result = results[-1] if results else None
+        if result is None or result.status == "failed":
+            return False
+        added[0] += int(result.size or 0)
+        self._record_retry(job_id, result)
+        return True
 
     def _record_retry(self, job_id: str, result: ItemResult) -> None:
         """A failed video that worked on its retry."""

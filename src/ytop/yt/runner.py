@@ -46,6 +46,8 @@ def out(doc):
 try:
     from yt_dlp import YoutubeDL
     opts = args["opts"]
+    # ytop.yt.pot.RELAX_POT_TIMEOUTS: the PO-token plugin's timeouts.
+    exec(args.get("prelude") or "", {})
     if isinstance(opts.get("cookiesfrombrowser"), list):
         opts["cookiesfrombrowser"] = tuple(opts["cookiesfrombrowser"])
     if args["op"] == "download":
@@ -137,7 +139,11 @@ class SubprocessRunner:
 
     def _run(self, op: str, url: str, opts: dict, hooks: list[Callable[[dict], None]],
              timeout: float | None) -> Any:
+        from .pot import RELAX_POT_TIMEOUTS
+
         args = {"op": op, "url": url, "opts": _plain(opts),
+                # No plugins (PO tokens off): nothing to relax.
+                "prelude": "" if opts.get("plugin_dirs") == [] else RELAX_POT_TIMEOUTS,
                 "paths": [str(p) for p in self.paths], "hook_keys": list(_HOOK_KEYS)}
         with tempfile.TemporaryFile() as errors:
             proc = subprocess.Popen(

@@ -20,6 +20,43 @@ from .signin import active_signin
 
 PLUGIN_DIST = "bgutil-ytdlp-pot-provider"
 
+# Seconds the bgutil plugin waits for its Deno script (its ``--version``
+# check, then the token run).  Its own 15 s and 20 s are too short for a
+# stick: Deno keeps its cache with the library, and on a busy USB stick
+# starting Deno can take 15 s or more.  The check's timeout is not caught
+# by the plugin, so running out of time failed the whole video.
+POT_SCRIPT_TIMEOUT = 60.0
+
+# Source, so the retry's child Python (``ytop.yt.runner``, which cannot
+# import ytop) runs exactly the same code.  yt-dlp loads plugins once per
+# process, as fresh modules, so the classes are patched after that load.
+RELAX_POT_TIMEOUTS = f"""
+import sys
+try:
+    from yt_dlp.plugins import all_plugins_loaded, load_all_plugins
+except ImportError:  # an older yt-dlp: leave the plugin as it is
+    pass
+else:
+    if not all_plugins_loaded.value:
+        load_all_plugins()
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("yt_dlp_plugins.extractor.getpot_bgutil"):
+            continue
+        for cls in list(vars(module).values()):
+            if not isinstance(cls, type):
+                continue
+            for attr in ("_GET_SCRIPT_VSN_TIMEOUT", "_GETPOT_TIMEOUT"):
+                value = vars(cls).get(attr)
+                if isinstance(value, (int, float)) and value < {POT_SCRIPT_TIMEOUT!r}:
+                    setattr(cls, attr, {POT_SCRIPT_TIMEOUT!r})
+"""
+
+
+def relax_pot_timeouts() -> None:
+    """Give the bgutil plugin's Deno script :data:`POT_SCRIPT_TIMEOUT`
+    seconds (loading yt-dlp's plugins first, as a ``YoutubeDL`` would)."""
+    exec(compile(RELAX_POT_TIMEOUTS, "<ytop.yt.pot>", "exec"), {})
+
 
 def cookies_from_browser(value: str) -> tuple:
     """Convert ``chrome`` or ``chrome:profile`` into yt-dlp's tuple form."""
@@ -108,6 +145,7 @@ def apply_auth_options(opts: dict, config: Config) -> None:
         # plugin dirs is the supported way to disable it for a run.
         opts["plugin_dirs"] = []
     else:
+        relax_pot_timeouts()
         server = current_server_home()
         if server is not None:
             # The plugin's Deno provider runs <server_home>/src/generate_once.ts

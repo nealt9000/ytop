@@ -182,3 +182,106 @@ def test_check_browser_spec_lowercases_only_the_browser():
 def test_check_browser_spec_rejects_empty_browser(value):
     with pytest.raises(ValueError, match="unknown browser ''"):
         pot.check_browser_spec(value)
+
+
+def _fake_plugin(monkeypatch: pytest.MonkeyPatch):
+    """The bgutil plugin's two modules as yt-dlp leaves them in sys.modules
+    after loading plugins (fresh module objects, classes defined inside)."""
+    import sys
+    import types
+
+    base_mod = types.ModuleType("yt_dlp_plugins.extractor.getpot_bgutil")
+    script_mod = types.ModuleType("yt_dlp_plugins.extractor.getpot_bgutil_script")
+
+    class BgUtilPTPBase:
+        _GETPOT_TIMEOUT = 20.0
+
+    class BgUtilScriptPTPBase(BgUtilPTPBase):
+        _GET_SCRIPT_VSN_TIMEOUT = 15.0
+
+    class BgUtilScriptDenoPTP(BgUtilScriptPTPBase):
+        pass
+
+    base_mod.BgUtilPTPBase = BgUtilPTPBase
+    script_mod.BgUtilScriptPTPBase = BgUtilScriptPTPBase
+    script_mod.BgUtilScriptDenoPTP = BgUtilScriptDenoPTP
+    monkeypatch.setitem(sys.modules, base_mod.__name__, base_mod)
+    monkeypatch.setitem(sys.modules, script_mod.__name__, script_mod)
+    import yt_dlp.plugins as plugins
+
+    monkeypatch.setattr(plugins.all_plugins_loaded, "value", True)
+    return BgUtilScriptDenoPTP
+
+
+def test_pot_timeouts_allow_a_slow_stick(stick: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deno keeps its cache on the stick: on a busy stick the plugin's
+    15 s script check (and 20 s token run) time out, failing the video."""
+    provider = _fake_plugin(monkeypatch)
+    base_options(Config(), cache_root=stick)
+    assert provider._GET_SCRIPT_VSN_TIMEOUT == pot.POT_SCRIPT_TIMEOUT == 60.0
+    assert provider._GETPOT_TIMEOUT == pot.POT_SCRIPT_TIMEOUT
+    # Idempotent, and never shortens a longer timeout of a later plugin.
+    provider.__mro__[1]._GET_SCRIPT_VSN_TIMEOUT = 90.0
+    pot.relax_pot_timeouts()
+    assert provider._GET_SCRIPT_VSN_TIMEOUT == 90.0
+
+
+def test_pot_timeouts_left_alone_when_the_provider_is_off(
+    stick: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _fake_plugin(monkeypatch)
+    base_options(Config(pot_provider="off"), cache_root=stick)
+    assert provider._GET_SCRIPT_VSN_TIMEOUT == 15.0
+
+
+FAKE_PLUGINS = """
+import sys, types
+
+class _Flag:
+    value = False
+
+all_plugins_loaded = _Flag()
+
+def load_all_plugins():
+    module = types.ModuleType("yt_dlp_plugins.extractor.getpot_bgutil_script")
+
+    class BgUtilScriptPTPBase:
+        _GET_SCRIPT_VSN_TIMEOUT = 15.0
+
+    module.BgUtilScriptPTPBase = BgUtilScriptPTPBase
+    sys.modules[module.__name__] = module
+    all_plugins_loaded.value = True
+"""
+
+FAKE_YTDLP = """
+import sys
+
+class YoutubeDL:
+    def __init__(self, opts):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+    def extract_info(self, url, download=False):
+        module = sys.modules.get("yt_dlp_plugins.extractor.getpot_bgutil_script")
+        return {"timeout": module and module.BgUtilScriptPTPBase._GET_SCRIPT_VSN_TIMEOUT}
+    def sanitize_info(self, info):
+        return info
+"""
+
+
+def test_child_runner_relaxes_the_timeouts_too(tmp_path: Path) -> None:
+    import sys
+
+    from ytop.yt import runner
+
+    package = tmp_path / "yt_dlp"
+    package.mkdir()
+    (package / "__init__.py").write_text(FAKE_YTDLP)
+    (package / "plugins.py").write_text(FAKE_PLUGINS)
+    child = runner.SubprocessRunner([tmp_path], python=sys.executable)
+    url = "https://www.youtube.com/watch?v=abc"
+    assert child.extract(url, {})["timeout"] == pot.POT_SCRIPT_TIMEOUT
+    # PO tokens off: plugins are never loaded for it.
+    assert child.extract(url, {"plugin_dirs": []})["timeout"] is None

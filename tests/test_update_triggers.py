@@ -899,3 +899,113 @@ def test_a_check_never_runs_alongside_an_update(tmp_path: Path):
     assert fake.calls == 1
     # The check's write did not undo the switch.
     assert read_current(ytop).current["yt-dlp"] == "2.0"
+
+
+# --- a timed-out helper: one more try at the end of the job -------------------------
+
+TIMED_OUT = ("TimeoutExpired: Command '['deno', 'run', 'generate_once.ts', '--version']' "
+             "timed out after 15.0 seconds")
+
+
+def scripted_download(monkeypatch, tmp_path: Path, outcomes: list[str]):
+    """download_probe downloads or times out per item attempt, in order."""
+    attempts: list[str] = []
+
+    def download_probe(probe, config, *, on_item_start=None, on_item_done=None, **kwargs):
+        results = []
+        for item in probe.items:
+            attempts.append(item.id)
+            if outcomes.pop(0) == "timeout":
+                result = ItemResult(item.index, item.id, item.title, "failed", error=TIMED_OUT)
+            else:
+                result = ItemResult(item.index, item.id, item.title, "downloaded", size=500)
+            results.append(result)
+            if on_item_done:
+                on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results,
+                           total_bytes=sum(r.size for r in results))
+
+    monkeypatch.setattr(jobs_module, "download_probe", download_probe)
+    return attempts
+
+
+def test_a_timed_out_video_is_tried_once_more(tmp_path: Path, monkeypatch):
+    ytop = make_store(tmp_path)
+    fake = FakeUpdater()
+    scripted_probe(monkeypatch, [True, True])
+    attempts = scripted_download(monkeypatch, tmp_path, ["timeout", "ok"])
+    manager = JobManager(lib_root(tmp_path), autoupdate=make_auto(ytop, fake))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+
+    assert attempts == ["abc12345678", "abc12345678"]
+    assert fake.calls == 0, "a timeout is not YouTube changing: no update"
+    assert job.status == "done"
+    assert (job.downloaded, job.failed) == (1, 0)
+    assert job.items[0]["status"] == "downloaded" and job.items[0]["error"] is None
+    assert job.bytes_downloaded == 500
+    manager.close()
+
+
+def test_a_timed_out_video_is_retried_only_once(tmp_path: Path, monkeypatch):
+    scripted_probe(monkeypatch, [True, True])
+    attempts = scripted_download(monkeypatch, tmp_path, ["timeout", "timeout"])
+    manager = JobManager(lib_root(tmp_path))  # no component store: still retried
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+
+    assert attempts == ["abc12345678", "abc12345678"]
+    assert job.status == "done"
+    assert (job.downloaded, job.failed) == (0, 1)
+    assert job.items[0]["status"] == "failed"
+    assert job.items[0]["error"] == TIMED_OUT
+    manager.close()
+
+
+def test_other_failures_are_not_retried(tmp_path: Path, monkeypatch):
+    scripted_probe(monkeypatch, [True])
+    attempts: list[str] = []
+
+    def download_probe(probe, config, *, on_item_done=None, **kwargs):
+        results = []
+        for item in probe.items:
+            attempts.append(item.id)
+            result = ItemResult(item.index, item.id, item.title, "failed",
+                                error="DownloadError: ERROR: Private video")
+            results.append(result)
+            on_item_done(result)
+        return FetchResult(tmp_path, probe.playlist, results, total_bytes=0)
+
+    monkeypatch.setattr(jobs_module, "download_probe", download_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert attempts == ["abc12345678"]
+    assert job.failed == 1
+    manager.close()
+
+
+def test_a_retry_that_raises_leaves_the_video_failed(tmp_path: Path, monkeypatch):
+    calls = []
+
+    def probe_video(video_id, config, *, playlist=None, index=1, **kwargs):
+        calls.append(video_id)
+        if len(calls) > 1:
+            raise RuntimeError("the retry's read blew up")
+        item = video_item(video_id, index)
+        return ProbeResult(url=item.url, playlist=playlist or {"id": "un-grouped"},
+                           items=[item])
+
+    monkeypatch.setattr(jobs_module, "probe_video", probe_video)
+    scripted_download(monkeypatch, tmp_path, ["timeout"])
+    manager = JobManager(lib_root(tmp_path))
+    job = wait_for(manager, manager.create_video_probe("abc12345678").id, {"ready"})
+    manager.start_download(job.id)
+    job = wait_for(manager, job.id, {"done", "failed"})
+    assert len(calls) == 2
+    assert job.status == "done" and job.failed == 1
+    assert job.items[0]["error"] == TIMED_OUT
+    manager.close()

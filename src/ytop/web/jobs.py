@@ -99,6 +99,12 @@ INTERRUPTED_MESSAGE = (
 )
 # Nonterminal progress is coalesced; a terminal transition always flushes.
 SAVE_INTERVAL_S = 0.75
+# Progress saves are written by one background thread, never under the job
+# lock: on a USB stick busy with a download, rewriting jobs.json can take
+# seconds, and every page (and the downloads poll) needs that lock.  The
+# thread writes only the latest state, at most once per this many seconds
+# (a finished job, or anything a person did, is still written at once).
+BACKGROUND_SAVE_GAP_S = 2.0
 
 
 # Heights a web upgrade pass can raise a playlist to (#54).
@@ -592,6 +598,20 @@ class JobManager:
         self._unsaved: set[str] = set()
         self._save_pending = False
         self._last_save = 0.0
+        # Writes to jobs.json happen one at a time, in order: each carries a
+        # number taken under the job lock, and an older one is never written
+        # over a newer one.  Lock order: the job lock before _save_io; the
+        # background writer never takes the job lock while holding _save_io.
+        self._save_io = threading.Lock()
+        self._save_seq = 0
+        self._written_seq: dict[str, int] = {}
+        # The background writer: the latest unwritten rows per library.
+        self._writer_cv = threading.Condition()
+        self._writer_pending: dict[str, tuple] = {}
+        self._writer_busy = False
+        self._writer_hurry = 0
+        self._writer_stop = False
+        self._writer_thread: threading.Thread | None = None
         self._closed = False
         self._load()
         self._reconcile_moves()
@@ -933,8 +953,8 @@ class JobManager:
 
     def _save(self, *, force: bool = True) -> None:
         """Persist each job to its own library's jobs.json.  Nonterminal
-        progress is coalesced; terminal state is always flushed
-        synchronously."""
+        progress is coalesced and written by the background writer; terminal
+        state is always written synchronously."""
         with self._lock:
             now = time.monotonic()
             if not force and now - self._last_save < SAVE_INTERVAL_S:
@@ -950,36 +970,115 @@ class JobManager:
                 target = self._save_target(job)
                 if target is not None:
                     groups.setdefault(target, []).append(job)
+            writes = []
             for library_id, jobs in groups.items():
-                ref = self._refs[library_id]
                 rows = [asdict(job) for job in jobs]
                 if self._written.get(library_id) == rows:
                     continue
-                try:
-                    # Never recreate the folders of a stick unplugged since
-                    # the last scan.
-                    if not ref.layout.marker.is_file():
-                        continue
-                    write_json(ref.layout.jobs_file, {
-                        "schema": 1,
-                        "jobs": rows,
-                    })
-                except OSError as exc:
-                    # A locked stick or read-only mount: say so once, not on
-                    # every progress save.
-                    if library_id not in self._unsaved:
-                        self._unsaved.add(library_id)
-                        log.warning(
-                            "could not save jobs to %s: %s", ref.root, exc
-                        )
-                    continue
-                self._unsaved.discard(library_id)
-                self._files.add(library_id)
+                self._save_seq += 1
+                writes.append((
+                    library_id, self._save_seq, self._refs[library_id], rows,
+                    [job.id for job in jobs],
+                ))
+                # Taken as written now (a failed write forgets it again),
+                # so the same rows are not queued twice.
                 self._written[library_id] = rows
-                for job in jobs:
-                    self._origin[job.id] = library_id
             self._last_save = now
             self._save_pending = False
+            if force:
+                for write in writes:
+                    self._write_jobs(*write)
+                return
+        self._queue_writes(writes)
+
+    def _write_jobs(
+        self, library_id: str, seq: int, ref: LibraryRef, rows: list[dict],
+        job_ids: list[str],
+    ) -> None:
+        """Write one library's jobs.json, unless a newer save already did."""
+        error: OSError | None = None
+        with self._save_io:
+            if seq <= self._written_seq.get(library_id, 0):
+                return
+            try:
+                # Never recreate the folders of a stick unplugged since the
+                # last scan.
+                if not ref.layout.marker.is_file():
+                    error = FileNotFoundError(str(ref.layout.marker))
+                else:
+                    write_json(ref.layout.jobs_file, {"schema": 1, "jobs": rows})
+            except OSError as exc:
+                error = exc
+            if error is None:
+                self._written_seq[library_id] = seq
+        with self._lock:
+            if error is not None:
+                if self._written.get(library_id) is rows:
+                    self._written.pop(library_id, None)  # write it next save
+                if isinstance(error, FileNotFoundError) and not ref.layout.marker.is_file():
+                    return
+                # A locked stick or read-only mount: say so once, not on
+                # every progress save.
+                if library_id not in self._unsaved:
+                    self._unsaved.add(library_id)
+                    log.warning("could not save jobs to %s: %s", ref.root, error)
+                return
+            self._unsaved.discard(library_id)
+            self._files.add(library_id)
+            for job_id in job_ids:
+                self._origin[job_id] = library_id
+
+    def _queue_writes(self, writes: list[tuple]) -> None:
+        if not writes:
+            return
+        with self._writer_cv:
+            for write in writes:
+                self._writer_pending[write[0]] = write  # only the latest counts
+            if self._writer_thread is None:
+                self._writer_thread = threading.Thread(
+                    target=self._writer_loop, name="ytop-jobs-writer", daemon=True
+                )
+                self._writer_thread.start()
+            self._writer_cv.notify_all()
+
+    def _writer_loop(self) -> None:
+        while True:
+            with self._writer_cv:
+                while not self._writer_pending and not self._writer_stop:
+                    self._writer_cv.wait()
+                if not self._writer_pending:
+                    return
+                batch = list(self._writer_pending.values())
+                self._writer_pending.clear()
+                self._writer_busy = True
+            for write in batch:
+                try:
+                    self._write_jobs(*write)
+                except Exception:  # noqa: BLE001 - never lose the writer
+                    log.exception("saving jobs to %s failed", write[2].root)
+            with self._writer_cv:
+                self._writer_busy = False
+                self._writer_cv.notify_all()
+                # Coalesce: later progress waits, unless someone is waiting.
+                self._writer_cv.wait_for(
+                    lambda: self._writer_stop or self._writer_hurry > 0,
+                    timeout=BACKGROUND_SAVE_GAP_S,
+                )
+
+    def flush_saves(self, timeout: float | None = None) -> bool:
+        """Wait until every queued progress save is written; True when done.
+        Never call it holding the job lock (the writer needs it)."""
+        assert not self._lock.held(), "flush_saves() under the job lock"
+        with self._writer_cv:
+            self._writer_hurry += 1
+            self._writer_cv.notify_all()
+            try:
+                return self._writer_cv.wait_for(
+                    lambda: not self._writer_pending and not self._writer_busy,
+                    timeout=timeout,
+                )
+            finally:
+                self._writer_hurry -= 1
 
     def _flush_save(self) -> None:
         with self._lock:
@@ -2171,6 +2270,12 @@ class JobManager:
                     job.error = "cancelled by the server shutting down"
                     job.finished_at = now_iso()
             self._save(force=True)
+        with self._writer_cv:
+            self._writer_stop = True
+            self._writer_cv.notify_all()
+            thread = self._writer_thread
+        if thread is not None:
+            thread.join(30)
         return True
 
     def _run_download(self, job_id: str) -> None:

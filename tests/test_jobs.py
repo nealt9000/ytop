@@ -1176,3 +1176,80 @@ def test_a_new_review_reuses_recent_reads_but_an_upgrade_does_not(
     job = manager.create_probe("PLTESTJOBS00000000000000000001", upgrade_height=upgrade)
     wait_for(manager, job.id, {"ready"})
     assert reusing == [not upgrade]
+
+
+def _jobs_on_disk(tmp_path: Path) -> dict:
+    from ytop.yt.metadata import read_json
+
+    doc = read_json(LibraryLayout(lib_root(tmp_path)).jobs_file) or {}
+    return {row["id"]: row for row in doc.get("jobs") or []}
+
+
+def test_a_slow_progress_save_does_not_hold_up_the_job_list(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    wait_for(manager, job.id, {"ready"})
+    real_write = jobs_module.write_json
+    writing, release = threading.Event(), threading.Event()
+
+    def slow_write(path, data, **kwargs):  # a stick busy with a download
+        writing.set()
+        release.wait(30)
+        real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(jobs_module, "write_json", slow_write)
+    manager._last_save = 0.0
+    manager._bump(job.id, "downloaded")  # a progress save
+    assert writing.wait(5)
+    try:
+        start = time.monotonic()
+        assert manager.get(job.id).downloaded == 1
+        manager.list()
+        assert time.monotonic() - start < 1.0
+    finally:
+        release.set()
+    assert manager.flush_saves(timeout=10)
+    assert _jobs_on_disk(tmp_path)[job.id]["downloaded"] == 1
+    manager.close()
+
+
+def test_an_older_save_never_overwrites_a_newer_one(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    wait_for(manager, job.id, {"ready"})
+    ref = next(iter(manager._refs.values()))
+    newer = [dict(_jobs_on_disk(tmp_path)[job.id], title="Newer")]
+    older = [dict(newer[0], title="Older")]
+    manager._write_jobs(ref.id, 10_000, ref, newer, [job.id])
+    manager._write_jobs(ref.id, 9_999, ref, older, [job.id])
+    assert _jobs_on_disk(tmp_path)[job.id]["title"] == "Newer"
+    manager.close()
+
+
+def test_a_failed_progress_save_is_written_next_time(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "probe_playlist", fake_probe)
+    manager = JobManager(lib_root(tmp_path))
+    job = manager.create_probe("PLTESTJOBS00000000000000000001")
+    wait_for(manager, job.id, {"ready"})
+    real_write = jobs_module.write_json
+    calls = {"n": 0}
+
+    def flaky_write(path, data, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(5, "I/O error")
+        real_write(path, data, **kwargs)
+
+    monkeypatch.setattr(jobs_module, "write_json", flaky_write)
+    manager._last_save = 0.0
+    manager._bump(job.id, "downloaded")
+    assert manager.flush_saves(timeout=10)
+    assert _jobs_on_disk(tmp_path)[job.id]["downloaded"] == 0
+    manager._last_save = 0.0
+    manager._bump(job.id, "skipped")
+    assert manager.flush_saves(timeout=10)
+    row = _jobs_on_disk(tmp_path)[job.id]
+    assert (row["downloaded"], row["skipped"]) == (1, 1)
+    manager.close()

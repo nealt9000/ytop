@@ -189,7 +189,7 @@ def test_category_counts_order(tmp_path):
   - add the New badge
   - add the new `continue_row` macro
 - Modify: `src/ytop/web/app.py` `library_page` (drop the `switcher` and
-  `several` arguments, add a body class)
+  `several` arguments)
 - Modify: `src/ytop/web/browse.py`:
   - remove `HomeView.summaries`, `start_new`, `categories`, `tags` and
     `channels`
@@ -221,9 +221,8 @@ def test_category_counts_order(tmp_path):
     has the h1.
   - The empty state (no playlists) renders inside `.home-main`, below the
     header. The sidebar still shows.
-  - `library_page` passes `body_class="home"`. `base.html` already has the
-    `body_class` block, so `library.html` sets `{% block body_class %}home{% endblock %}`
-    instead. In that case no route change is needed beyond removing
+  - `library.html` sets `{% block body_class %}home{% endblock %}` (the block
+    already exists in `base.html`). The only route change is removing
     `switcher` and `several`.
 
 - [ ] **Step 1: Rewrite the failing tests in `tests/test_browse_page.py`**

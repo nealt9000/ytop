@@ -222,6 +222,11 @@ def test_browse_js_wraps_storage() -> None:
     core = (STATIC_JS / "core.js").read_text()
     assert "export function storageGet" in core
     assert "export function storageSet" in core
+    # Per-tab state (the library filter survives a reload, not a new tab).
+    assert "export function sessionGet" in core
+    assert "export function sessionSet" in core
+    browse = (STATIC_JS / "browse.js").read_text()
+    assert "sessionGet" in browse and "sessionStorage" not in browse
     assert (STATIC_JS / "browse.js").is_file()
 
 
@@ -393,4 +398,15 @@ def test_continue_row_has_no_dangling_separator(tmp_path: Path) -> None:
     aside = client.get("/").text.split('class="home-continue"')[1].split("</aside>")[0]
     row = aside.split('href="/watch/P3/')[1].split("</li>")[0]
     assert not re.search(r"·\s*</span>", row)
+    client.app.state.jobs.close()
+
+
+def test_home_without_any_library_says_so(tmp_path: Path) -> None:
+    client = TestClient(create_app(None, libraries=library_set(None)))
+    main = _main(client.get("/").text)
+    assert "No library is connected" in main
+    assert 'href="/storage"' in main
+    assert "All libraries" not in main
+    assert "0 playlists" not in main
+    assert 'class="home-libraries"' not in main
     client.app.state.jobs.close()

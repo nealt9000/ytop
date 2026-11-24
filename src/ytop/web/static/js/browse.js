@@ -1,4 +1,4 @@
-import { $, $$, storageGet, storageSet } from "./core.js";
+import { $, $$, sessionGet, sessionSet, storageGet, storageSet } from "./core.js";
 
 // -- library home: playlist grid -------------------------------------------
 // The chip strip (one category at a time, plus "Not started") and the filter
@@ -117,6 +117,44 @@ export function initBrowse() {
   });
 
   const state = { category: null, notStarted: false, words: [] };
+
+  // The filter (text and chips) survives a reload in this tab, e.g. when a
+  // download finishing reloads the page; each library view keeps its own.
+  const filterKey = `ytop.browse.filter:${window.location.search}`;
+
+  function wordsOf(text) {
+    return text.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  }
+
+  function saveFilter() {
+    sessionSet(filterKey, JSON.stringify({
+      text: filterBox ? filterBox.value : "",
+      category: state.category,
+      notStarted: state.notStarted,
+    }));
+  }
+
+  function restoreFilter() {
+    let saved = null;
+    try {
+      saved = JSON.parse(sessionGet(filterKey, "null"));
+    } catch {
+      saved = null;
+    }
+    if (!saved || typeof saved !== "object") return;
+    if (filterBox && typeof saved.text === "string") {
+      filterBox.value = saved.text;
+      state.words = wordsOf(saved.text);
+    }
+    state.notStarted = saved.notStarted === true;
+    // A category whose chip is gone (its playlists were removed) is dropped.
+    const known = strip
+      ? $$('button.chip[data-chip="category"]', strip).map((chip) => chip.dataset.value || "")
+      : [];
+    state.category = typeof saved.category === "string" && known.includes(saved.category)
+      ? saved.category
+      : null;
+  }
 
   function matches(card) {
     if (state.category !== null && card.dataset.category !== state.category) return false;
@@ -252,17 +290,21 @@ export function initBrowse() {
         state.category = state.category === value ? null : value;
       }
       syncChips();
+      saveFilter();
       render();
     });
   }
 
   if (filterBox) {
     filterBox.addEventListener("input", () => {
-      state.words = filterBox.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      state.words = wordsOf(filterBox.value);
+      saveFilter();
       render();
     });
   }
 
+  restoreFilter();
+  syncChips();
   render();
   // Live only from now on: the count written on load is not announced.
   if (count) count.setAttribute("role", "status");

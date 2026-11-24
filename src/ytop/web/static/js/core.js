@@ -78,3 +78,23 @@ export function storageSet(key, value) {
     return false;
   }
 }
+
+// Per-tab state that should survive a reload but not a new tab. Same
+// never-throw rules as storageGet/storageSet.
+export function sessionGet(key, fallback = null) {
+  try {
+    const value = window.sessionStorage.getItem(key);
+    return value === null ? fallback : value;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+export function sessionSet(key, value) {
+  try {
+    window.sessionStorage.setItem(key, String(value));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}

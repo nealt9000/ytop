@@ -222,6 +222,11 @@ def test_browse_js_wraps_storage() -> None:
     core = (STATIC_JS / "core.js").read_text()
     assert "export function storageGet" in core
     assert "export function storageSet" in core
+    # Per-tab state (the library filter survives a reload, not a new tab).
+    assert "export function sessionGet" in core
+    assert "export function sessionSet" in core
+    browse = (STATIC_JS / "browse.js").read_text()
+    assert "sessionGet" in browse and "sessionStorage" not in browse
     assert (STATIC_JS / "browse.js").is_file()
 
 

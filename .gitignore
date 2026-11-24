@@ -31,3 +31,4 @@ build/
 
 # Small committed media fixtures (see tools/ffmpeg-minimal/README.md)
 !tests/fixtures/media/*
+.superpowers/

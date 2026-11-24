@@ -7,6 +7,7 @@ per-library overlays (title overrides, watch progress, tag edits) are laid on.
 from __future__ import annotations
 
 import html
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -89,6 +90,7 @@ class LibrarySummary:
     unwatched_hours: float
     used_bytes: int
     free_bytes: int
+    device: str = ""  # the filesystem it lives on: free space is per disk
 
 
 @dataclass
@@ -356,7 +358,15 @@ def _summary(item: _Loaded) -> LibrarySummary:
         unwatched_hours=(total - watched) / 3600,
         used_bytes=_used_bytes(item.rows),
         free_bytes=item.ref.free_bytes,
+        device=_device(item.ref),
     )
+
+
+def _device(ref: LibraryRef) -> str:
+    try:
+        return str(os.stat(ref.layout.root).st_dev)
+    except OSError:
+        return f"library:{ref.id}"  # unknown: count it on its own
 
 
 def _combined(summaries: list[LibrarySummary]) -> LibrarySummary:
@@ -373,7 +383,8 @@ def _combined(summaries: list[LibrarySummary]) -> LibrarySummary:
         watched_hours=sum(s.watched_hours for s in summaries),
         unwatched_hours=sum(s.unwatched_hours for s in summaries),
         used_bytes=sum(s.used_bytes for s in summaries),
-        free_bytes=sum(s.free_bytes or 0 for s in summaries),
+        # Libraries on one disk share its free space: count each disk once.
+        free_bytes=sum({s.device: s.free_bytes or 0 for s in summaries}.values()),
     )
 
 

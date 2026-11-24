@@ -9,7 +9,13 @@ import pytest
 from factories import add_big_library, add_playlist, library_set, make_library
 from ytop.layout import read_library
 from ytop.tags import TagStore
-from ytop.web.browse import CARD_LIMIT, build_home, build_videos, cards_for, search_library
+from ytop.web.browse import (
+    CARD_LIMIT,
+    build_home,
+    build_videos,
+    cards_for,
+    search_library,
+)
 from ytop.web.library import Library, ProgressStore, TitleStore
 from ytop.yt.metadata import read_json, write_json
 
@@ -413,3 +419,13 @@ def test_category_counts_order(tmp_path: Path) -> None:
     store.set_category("P2", "Cooking")
     store.set_category("P3", "Cooking")
     assert build_home(lib).category_counts == [("Cooking", 2), ("Music", 1)]
+
+
+def test_combined_free_space_counts_each_disk_once(tmp_path: Path) -> None:
+    # Both libraries sit on the same filesystem (tmp_path): one pool of free
+    # space, not two.
+    lib, *_ = _two_libraries(tmp_path)
+    home = build_home(lib)
+    frees = {s.free_bytes for s in home.libraries}
+    assert len(home.libraries) == 2 and all(frees)
+    assert home.header.free_bytes == max(frees)

@@ -9,7 +9,7 @@ import pytest
 from factories import add_big_library, add_playlist, library_set, make_library
 from ytop.layout import read_library
 from ytop.tags import TagStore
-from ytop.web.browse import build_home, build_videos, cards_for, search_library
+from ytop.web.browse import CARD_LIMIT, build_home, build_videos, cards_for, search_library
 from ytop.web.library import Library, ProgressStore, TitleStore
 from ytop.yt.metadata import read_json, write_json
 
@@ -357,3 +357,59 @@ def test_new_playlist_list_shows_each_videos_quality(tmp_path: Path) -> None:
     row = next(r for r in library_videos(lib) if r["id"] == "v1")
     assert row["quality_label"] == "720p H.264"
     assert row["audio_detail"] == "Opus 128k"
+
+
+def test_home_lists_every_library_when_one_selected(tmp_path: Path) -> None:
+    lib, _first, second, _ = _two_libraries(tmp_path)
+    second_id = read_library(second.root).id
+    home = build_home(lib, second_id)
+    assert [s.label for s in home.libraries] == ["First", "Second"]
+    assert home.header.id == second_id
+    assert {c.library_id for c in home.all_playlists} == {second_id}
+
+
+def test_home_header_combines_libraries(tmp_path: Path) -> None:
+    lib, *_ = _two_libraries(tmp_path)
+    home = build_home(lib)
+    assert home.header.id == "" and home.header.label == "All libraries"
+    assert home.header.playlist_count == sum(s.playlist_count for s in home.libraries) == 2
+    assert home.header.used_bytes == sum(s.used_bytes for s in home.libraries)
+
+
+def test_home_header_single_library_is_that_library(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    home = build_home(lib)
+    assert home.header.id == read_library(layout.root).id
+    assert len(home.libraries) == 1
+
+
+def test_home_loads_each_library_once(tmp_path: Path, monkeypatch) -> None:
+    import ytop.web.browse as browse
+
+    lib, _first, second, _ = _two_libraries(tmp_path)
+    calls = []
+    real = browse._load
+    monkeypatch.setattr(
+        browse, "_load", lambda l, ref: calls.append(ref.id) or real(l, ref)
+    )
+    build_home(lib, read_library(second.root).id)
+    assert len(calls) == 2
+
+
+def test_new_keys_are_recent_unstarted(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    ProgressStore(layout).update("v2", 30, duration=60)
+    assert build_home(lib).new_keys == {"P2"}
+    for n in range(CARD_LIMIT + 2):
+        add_playlist(layout, f"N{n}", f"New {n}", [(f"n{n}", "X")])
+    assert len(build_home(lib).new_keys) == CARD_LIMIT
+
+
+def test_category_counts_order(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    add_playlist(layout, "P3", "Three", [("x1", "X")])
+    store = TagStore(layout)
+    store.set_category("P1", "Music")
+    store.set_category("P2", "Cooking")
+    store.set_category("P3", "Cooking")
+    assert build_home(lib).category_counts == [("Cooking", 2), ("Music", 1)]

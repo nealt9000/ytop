@@ -1038,6 +1038,10 @@ body.home .page { max-width: 1920px; }
   grid-template-areas: "libs main cont";
 }
 .home-layout.no-continue { grid-template-columns: 220px minmax(0, 1fr); grid-template-areas: "libs main"; }
+/* Narrower cards than elsewhere: the side columns take room. */
+body.home .browse-results[data-view="grid"] .playlist-grid {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px;
+}
 .home-libraries { grid-area: libs; }
 .home-main { grid-area: main; min-width: 0; }
 .home-continue { grid-area: cont; }

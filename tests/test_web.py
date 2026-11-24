@@ -198,8 +198,8 @@ def test_library_page_lists_playlists(client: TestClient):
     assert response.status_code == 200
     assert "Playlist One" in response.text
     assert "Playlist Two" in response.text
-    # The stick summary counts the library's videos.
-    assert re.search(r"<dt>Videos</dt><dd>3</dd>", response.text)
+    # The header's stats line counts the library's videos.
+    assert re.search(r'class="home-stats[^"]*">[^<]*· 3 videos', response.text)
     assert "/playlist/PLTEST00000000000000000000000001" in response.text
     # The home cards no longer carry the quality line; the playlist page does.
     playlist = client.get("/playlist/PLTEST00000000000000000000000001").text

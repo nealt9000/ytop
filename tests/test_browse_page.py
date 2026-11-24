@@ -394,3 +394,14 @@ def test_continue_row_has_no_dangling_separator(tmp_path: Path) -> None:
     row = aside.split('href="/watch/P3/')[1].split("</li>")[0]
     assert not re.search(r"·\s*</span>", row)
     client.app.state.jobs.close()
+
+
+def test_home_without_any_library_says_so(tmp_path: Path) -> None:
+    client = TestClient(create_app(None, libraries=library_set(None)))
+    main = _main(client.get("/").text)
+    assert "No library is connected" in main
+    assert 'href="/storage"' in main
+    assert "All libraries" not in main
+    assert "0 playlists" not in main
+    assert 'class="home-libraries"' not in main
+    client.app.state.jobs.close()

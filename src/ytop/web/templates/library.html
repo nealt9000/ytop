@@ -3,6 +3,14 @@
 {% block title %}Library · {{ product_name }}{% endblock %}
 {% block body_class %}home{% endblock %}
 {% block content %}
+{% if not view.libraries %}
+<h1 class="sr-only">Library</h1>
+<section class="empty-state">
+  <h2>No library is connected</h2>
+  <p class="muted">Plug in a {{ product_name }} stick, or add a library on the Storage page.</p>
+  <a class="btn primary" href="/storage">Go to Storage</a>
+</section>
+{% else %}
 {% set h = view.header %}
 {% set several = view.libraries|length > 1 %}
 <div class="home-layout{% if not view.continue_watching %} no-continue{% endif %}">
@@ -123,4 +131,5 @@
   {% endif %}
 
 </div>
+{% endif %}
 {% endblock %}

@@ -27,7 +27,7 @@ def test_continue_and_start_new_split(tmp_path: Path) -> None:
     ProgressStore(layout).update("v2", 30, duration=60)
     home = build_home(lib)
     assert [c.playlist_id for c in home.continue_watching] == ["P1"]
-    assert [c.playlist_id for c in home.start_new] == ["P2"]
+    assert home.new_keys == {"P2"}
     card = home.continue_watching[0]
     assert card.next_label == "Video 2 of 3"
     assert card.next_url and card.next_url.endswith("/v2")
@@ -42,7 +42,7 @@ def test_fully_watched_playlist_is_in_neither_list(tmp_path: Path) -> None:
         ProgressStore(layout).update(vid, 60, duration=60, watched=True)
     home = build_home(lib)
     assert [c.playlist_id for c in home.continue_watching] == []
-    assert [c.playlist_id for c in home.start_new] == ["P1"]
+    assert home.new_keys == {"P1"}
 
 
 def test_continue_sorted_by_last_watched(tmp_path: Path) -> None:
@@ -86,7 +86,7 @@ def test_summary_counts_shared_media_once(tmp_path: Path) -> None:
         {"id": "v1", "title": "A",
          "files": {"media": layout.relative_media(media)}},
     )
-    summary = build_home(lib).summaries[0]
+    summary = build_home(lib).libraries[0]
     rows = index_for(layout).playlists()
     media_total = sum(
         {v.media_ref: v.media_bytes for p in rows for v in p.videos if v.media_ref}.values()
@@ -125,10 +125,10 @@ def test_ambiguous_playlist_keys_match_library(tmp_path: Path) -> None:
 
 def test_unplugged_library_absent(tmp_path: Path) -> None:
     lib, _first, second, libs = _two_libraries(tmp_path)
-    assert len(build_home(lib).summaries) == 2
+    assert len(build_home(lib).libraries) == 2
     shutil.rmtree(second.root)
     libs.libraries(refresh=True)
-    assert [s.label for s in build_home(lib).summaries] == ["First"]
+    assert [s.label for s in build_home(lib).libraries] == ["First"]
 
 
 def test_build_videos_by_tag_across_playlists(tmp_path: Path) -> None:

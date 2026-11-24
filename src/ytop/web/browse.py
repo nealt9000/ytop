@@ -22,7 +22,6 @@ from .library import Library, playlist_key, quality_summary
 from .render import format_duration, format_timestamp, thumb_url
 
 CARD_LIMIT = 12
-TOP_LIMIT = 5
 
 
 @dataclass
@@ -52,6 +51,7 @@ class PlaylistCard:
     next_position: float
     quality_summary: str = ""
     transcript_count: int = 0
+    started: bool = False
 
     @property
     def is_ungrouped(self) -> bool:
@@ -89,23 +89,16 @@ class LibrarySummary:
     unwatched_hours: float
     used_bytes: int
     free_bytes: int
-    top_categories: list[tuple[str, int]]
-    top_channels: list[tuple[str, int]]
 
 
 @dataclass
 class HomeView:
-    summaries: list[LibrarySummary]
+    libraries: list[LibrarySummary]  # every connected library (sidebar)
+    header: LibrarySummary  # the shown library, or all of them combined (id "")
     continue_watching: list[PlaylistCard]
-    start_new: list[PlaylistCard]
     all_playlists: list[PlaylistCard]
-    categories: list[str]
-    tags: list[Tag]
-    channels: list[str]
-    libraries: list[LibrarySummary] = field(default_factory=list)
-    header: LibrarySummary | None = None
-    new_keys: set[str] = field(default_factory=set)
-    category_counts: list[tuple[str, int]] = field(default_factory=list)
+    new_keys: set[str]  # recently updated, unstarted: the "New" badge
+    category_counts: list[tuple[str, int]]  # chip order: most playlists first
 
 
 @dataclass
@@ -338,11 +331,6 @@ def _started(item: _Loaded, row: PlaylistRow) -> bool:
     return False
 
 
-def _top(values: list[str]) -> list[tuple[str, int]]:
-    counts = Counter(value for value in values if value)
-    return sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:TOP_LIMIT]
-
-
 def _summary(item: _Loaded) -> LibrarySummary:
     seen: set[str] = set()
     total = watched = 0.0
@@ -368,8 +356,6 @@ def _summary(item: _Loaded) -> LibrarySummary:
         unwatched_hours=(total - watched) / 3600,
         used_bytes=_used_bytes(item.rows),
         free_bytes=item.ref.free_bytes,
-        top_categories=_top([card.category for card in item.cards]),
-        top_channels=_top([card.channel for card in item.cards]),
     )
 
 
@@ -388,8 +374,6 @@ def _combined(summaries: list[LibrarySummary]) -> LibrarySummary:
         unwatched_hours=sum(s.unwatched_hours for s in summaries),
         used_bytes=sum(s.used_bytes for s in summaries),
         free_bytes=sum(s.free_bytes or 0 for s in summaries),
-        top_categories=[],
-        top_channels=[],
     )
 
 
@@ -402,17 +386,14 @@ def build_home(lib: Library, library_id: str | None = None) -> HomeView:
     fresh: list[PlaylistCard] = []
     for item in loaded:
         for row, card in zip(item.rows, item.cards):
-            if not _started(item, row):
+            card.started = _started(item, row)
+            if not card.started:
                 fresh.append(card)
             elif card.next_url is not None:
                 continuing.append(card)
     continuing.sort(key=lambda card: card.last_watched_at, reverse=True)
     fresh.sort(key=lambda card: card.updated_at, reverse=True)
     all_cards = [card for item in loaded for card in item.cards]
-    tags: dict[str, Tag] = {}
-    for card in all_cards:
-        for tag in card.tags:
-            tags.setdefault(tag.key, tag)
     category_counts = sorted(
         Counter(c.category for c in all_cards if c.category).items(),
         key=lambda pair: (-pair[1], pair[0].casefold()),
@@ -420,15 +401,10 @@ def build_home(lib: Library, library_id: str | None = None) -> HomeView:
     return HomeView(
         libraries=libraries,
         header=header,
+        continue_watching=continuing[:CARD_LIMIT],
+        all_playlists=all_cards,
         new_keys={card.key for card in fresh[:CARD_LIMIT]},
         category_counts=category_counts,
-        summaries=[by_id[item.ref.id] for item in loaded],
-        continue_watching=continuing[:CARD_LIMIT],
-        start_new=fresh[:CARD_LIMIT],
-        all_playlists=all_cards,
-        categories=sorted({c.category for c in all_cards if c.category}),
-        tags=sorted(tags.values(), key=lambda tag: tag.label.casefold()),
-        channels=sorted({c.channel for c in all_cards if c.channel}, key=str.casefold),
     )
 
 

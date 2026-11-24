@@ -905,9 +905,7 @@ def create_app(
             request,
             "library.html",
             view=view,
-            switcher=refs if len(refs) > 1 else [],
             active_library=active,
-            several=len(view.summaries) > 1,
             job_by_playlist=job_by_playlist,
             live_job=live_job,
         )

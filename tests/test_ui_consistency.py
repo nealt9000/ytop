@@ -124,18 +124,19 @@ def test_storage_page_has_empty_state_block() -> None:
     )
 
 
-def test_long_chip_row_renders_more_toggle(tmp_path: Path) -> None:
+def test_chip_strip_has_no_more_toggle(tmp_path: Path) -> None:
+    from ytop.tags import TagStore
+
     layout = make_library(tmp_path)
+    store = TagStore(layout)
     for n in range(15):
-        meta = add_playlist(layout, f"P{n}", f"List {n}", [(f"v{n}", "A")])
-        doc = json.loads((meta / "playlist.json").read_text())
-        doc["channel"] = f"Channel {n:02d}"
-        (meta / "playlist.json").write_text(json.dumps(doc))
+        add_playlist(layout, f"P{n}", f"List {n}", [(f"v{n}", "A")])
+        store.set_category(f"P{n}", f"Topic {n:02d}")
     client = TestClient(create_app(layout.root, libraries=library_set(layout)))
     html = client.get("/").text
-    found = re.search(r'data-facet="channel".*?<div class="chip-scroll">(.*?)</div>', html, re.S)
-    assert found, "channel row not rendered"
-    row = found.group(1)
-    assert row.count('class="chip"') == 15
-    assert row.count("data-extra") == 3
-    assert re.search(r'<button type="button" class="chip-more"[^>]*aria-expanded="false"', row)
+    found = re.search(r'<div class="chip-strip"[^>]*>(.*?)</div>', html, re.S)
+    assert found, "chip strip not rendered"
+    strip = found.group(1)
+    assert strip.count('data-chip="category"') == 15
+    assert "chip-more" not in html
+    client.app.state.jobs.close()

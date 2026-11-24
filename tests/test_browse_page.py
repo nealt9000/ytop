@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import threading
@@ -71,6 +72,8 @@ def test_single_library_header_is_that_library(tmp_path: Path) -> None:
     assert re.search(rf'href="/\?library={info.id}"[^>]*aria-current="page"', main)
     assert f'action="/storage/{info.id}/label"' in main
     client.app.state.jobs.close()
+
+
 def test_home_has_no_page_level_add_buttons(tmp_path: Path) -> None:
     client = _client(_layout(tmp_path))
     main = _main(client.get("/").text)
@@ -137,6 +140,8 @@ def test_unknown_library_falls_back_to_all(tmp_path: Path) -> None:
     assert re.search(r"<h1[^>]*>\s*All libraries", main)
     assert re.search(r'<a[^>]*href="/"[^>]*aria-current="page"', main)
     client.app.state.jobs.close()
+
+
 def test_summary_edit_redirects_back(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     library_id = read_library(layout.root).id
@@ -362,4 +367,30 @@ def test_home_page_is_not_held_up_by_a_download_writing_the_index(tmp_path: Path
         release.set()
         holder.join(5)
     assert elapsed < 5.0
+    client.app.state.jobs.close()
+
+
+def test_tag_labels_with_a_pipe_survive(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    # A hand-edited tags.json skips TagStore's label cleaning.
+    layout.tags_file.parent.mkdir(parents=True, exist_ok=True)
+    layout.tags_file.write_text(json.dumps({
+        "schema": 1, "playlists": {"P1": {"add": ["Rock | Pop", "Jazz"]}},
+    }))
+    client = _client(layout)
+    card = re.search(r'<article[^>]*data-key="P1"[^>]*>', client.get("/").text).group(0)
+    raw = re.search(r"data-tag-labels='([^']*)'", card).group(1)
+    labels = json.loads(html.unescape(raw))
+    assert "Rock | Pop" in labels and "Jazz" in labels
+    client.app.state.jobs.close()
+
+
+def test_continue_row_has_no_dangling_separator(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    add_playlist(layout, "P3", "Three", [("z1", ""), ("z2", "")])
+    ProgressStore(layout).update("z1", 20, duration=60)
+    client = _client(layout)
+    aside = client.get("/").text.split('class="home-continue"')[1].split("</aside>")[0]
+    row = aside.split('href="/watch/P3/')[1].split("</li>")[0]
+    assert not re.search(r"·\s*</span>", row)
     client.app.state.jobs.close()

@@ -71,9 +71,19 @@ function splitList(raw) {
   return (raw || "").split("|").filter(Boolean);
 }
 
+// Tag labels arrive as a JSON list: a label may itself contain "|".
+function tagLabelsOf(card) {
+  try {
+    const labels = JSON.parse(card.dataset.tagLabels || "[]");
+    return Array.isArray(labels) ? labels.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 function haystack(card) {
   const d = card.dataset;
-  return [d.title, d.channel, d.category, splitList(d.tagLabels).join(" "), d.libraryLabel]
+  return [d.title, d.channel, d.category, tagLabelsOf(card).join(" "), d.libraryLabel]
     .filter(Boolean)
     .join(" ")
     .toLocaleLowerCase();
@@ -99,7 +109,7 @@ export function initBrowse() {
   const hay = new Map();
   cards.forEach((card) => {
     const keys = splitList(card.dataset.tags);
-    const labels = splitList(card.dataset.tagLabels);
+    const labels = tagLabelsOf(card);
     keys.forEach((key, i) => {
       if (!tagLabels.has(key)) tagLabels.set(key, labels[i] || key);
     });

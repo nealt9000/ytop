@@ -13,11 +13,10 @@
 {%- endif %}
 {%- endmacro %}
 
-{% macro playlist_card(card, multi, section="browse", new=False) -%}
+{% macro playlist_card(card, multi, new=False) -%}
 {%- set download = job_by_playlist.get(card.key) if job_by_playlist else None -%}
-{%- set resume = section == "continue" and card.next_url -%}
-{%- set href = card.next_url if resume else "/playlist/" ~ card.key -%}
-<article class="playlist-card{% if resume %} continue-card{% endif %}"
+{%- set href = "/playlist/" ~ card.key -%}
+<article class="playlist-card"
      data-key="{{ card.key }}"
      data-title="{{ card.title }}"
      data-updated="{{ card.updated_at or '' }}"
@@ -26,7 +25,7 @@
      data-bytes="{{ card.total_bytes }}"
      data-category="{{ card.category }}"
      data-tags="{{ card.tags|map(attribute='key')|join('|') }}"
-     data-tag-labels="{{ card.tags|map(attribute='label')|join('|') }}"
+     data-tag-labels='{{ card.tags|map(attribute="label")|list|tojson }}'
      data-started="{{ '1' if card.started else '0' }}"{% if new %}
      data-new{% endif %}
      data-channel="{{ card.channel }}"
@@ -46,12 +45,6 @@
     </div>
     <div class="playlist-card-body">
       <h3 class="playlist-card-title">{{ card.title }}</h3>
-      {% if resume %}
-      <span class="continue-next">
-        <span class="continue-label">{{ card.next_label }}</span>
-        <span class="continue-title">{{ card.next_title }}</span>
-      </span>
-      {% endif %}
       <span class="muted small playlist-card-meta">
         {%- if card.playlist_id == "un-grouped" %}Single videos{% else %}{{ card.channel or "Unknown channel" }}{% endif %}
         {%- if card.kind == "local" %} · built from your library{% endif %}

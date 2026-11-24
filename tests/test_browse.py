@@ -9,7 +9,13 @@ import pytest
 from factories import add_big_library, add_playlist, library_set, make_library
 from ytop.layout import read_library
 from ytop.tags import TagStore
-from ytop.web.browse import build_home, build_videos, cards_for, search_library
+from ytop.web.browse import (
+    CARD_LIMIT,
+    build_home,
+    build_videos,
+    cards_for,
+    search_library,
+)
 from ytop.web.library import Library, ProgressStore, TitleStore
 from ytop.yt.metadata import read_json, write_json
 
@@ -27,7 +33,7 @@ def test_continue_and_start_new_split(tmp_path: Path) -> None:
     ProgressStore(layout).update("v2", 30, duration=60)
     home = build_home(lib)
     assert [c.playlist_id for c in home.continue_watching] == ["P1"]
-    assert [c.playlist_id for c in home.start_new] == ["P2"]
+    assert home.new_keys == {"P2"}
     card = home.continue_watching[0]
     assert card.next_label == "Video 2 of 3"
     assert card.next_url and card.next_url.endswith("/v2")
@@ -42,7 +48,7 @@ def test_fully_watched_playlist_is_in_neither_list(tmp_path: Path) -> None:
         ProgressStore(layout).update(vid, 60, duration=60, watched=True)
     home = build_home(lib)
     assert [c.playlist_id for c in home.continue_watching] == []
-    assert [c.playlist_id for c in home.start_new] == ["P1"]
+    assert home.new_keys == {"P1"}
 
 
 def test_continue_sorted_by_last_watched(tmp_path: Path) -> None:
@@ -86,7 +92,7 @@ def test_summary_counts_shared_media_once(tmp_path: Path) -> None:
         {"id": "v1", "title": "A",
          "files": {"media": layout.relative_media(media)}},
     )
-    summary = build_home(lib).summaries[0]
+    summary = build_home(lib).libraries[0]
     rows = index_for(layout).playlists()
     media_total = sum(
         {v.media_ref: v.media_bytes for p in rows for v in p.videos if v.media_ref}.values()
@@ -125,10 +131,10 @@ def test_ambiguous_playlist_keys_match_library(tmp_path: Path) -> None:
 
 def test_unplugged_library_absent(tmp_path: Path) -> None:
     lib, _first, second, libs = _two_libraries(tmp_path)
-    assert len(build_home(lib).summaries) == 2
+    assert len(build_home(lib).libraries) == 2
     shutil.rmtree(second.root)
     libs.libraries(refresh=True)
-    assert [s.label for s in build_home(lib).summaries] == ["First"]
+    assert [s.label for s in build_home(lib).libraries] == ["First"]
 
 
 def test_build_videos_by_tag_across_playlists(tmp_path: Path) -> None:
@@ -357,3 +363,69 @@ def test_new_playlist_list_shows_each_videos_quality(tmp_path: Path) -> None:
     row = next(r for r in library_videos(lib) if r["id"] == "v1")
     assert row["quality_label"] == "720p H.264"
     assert row["audio_detail"] == "Opus 128k"
+
+
+def test_home_lists_every_library_when_one_selected(tmp_path: Path) -> None:
+    lib, _first, second, _ = _two_libraries(tmp_path)
+    second_id = read_library(second.root).id
+    home = build_home(lib, second_id)
+    assert [s.label for s in home.libraries] == ["First", "Second"]
+    assert home.header.id == second_id
+    assert {c.library_id for c in home.all_playlists} == {second_id}
+
+
+def test_home_header_combines_libraries(tmp_path: Path) -> None:
+    lib, *_ = _two_libraries(tmp_path)
+    home = build_home(lib)
+    assert home.header.id == "" and home.header.label == "All libraries"
+    assert home.header.playlist_count == sum(s.playlist_count for s in home.libraries) == 2
+    assert home.header.used_bytes == sum(s.used_bytes for s in home.libraries)
+
+
+def test_home_header_single_library_is_that_library(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    home = build_home(lib)
+    assert home.header.id == read_library(layout.root).id
+    assert len(home.libraries) == 1
+
+
+def test_home_loads_each_library_once(tmp_path: Path, monkeypatch) -> None:
+    import ytop.web.browse as browse
+
+    lib, _first, second, _ = _two_libraries(tmp_path)
+    calls = []
+    real = browse._load
+    monkeypatch.setattr(
+        browse, "_load", lambda l, ref: calls.append(ref.id) or real(l, ref)
+    )
+    build_home(lib, read_library(second.root).id)
+    assert len(calls) == 2
+
+
+def test_new_keys_are_recent_unstarted(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    ProgressStore(layout).update("v2", 30, duration=60)
+    assert build_home(lib).new_keys == {"P2"}
+    for n in range(CARD_LIMIT + 2):
+        add_playlist(layout, f"N{n}", f"New {n}", [(f"n{n}", "X")])
+    assert len(build_home(lib).new_keys) == CARD_LIMIT
+
+
+def test_category_counts_order(tmp_path: Path) -> None:
+    lib, layout = _lib(tmp_path)
+    add_playlist(layout, "P3", "Three", [("x1", "X")])
+    store = TagStore(layout)
+    store.set_category("P1", "Music")
+    store.set_category("P2", "Cooking")
+    store.set_category("P3", "Cooking")
+    assert build_home(lib).category_counts == [("Cooking", 2), ("Music", 1)]
+
+
+def test_combined_free_space_counts_each_disk_once(tmp_path: Path) -> None:
+    # Both libraries sit on the same filesystem (tmp_path): one pool of free
+    # space, not two.
+    lib, *_ = _two_libraries(tmp_path)
+    home = build_home(lib)
+    frees = {s.free_bytes for s in home.libraries}
+    assert len(home.libraries) == 2 and all(frees)
+    assert home.header.free_bytes == max(frees)

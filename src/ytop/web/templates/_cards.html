@@ -13,11 +13,10 @@
 {%- endif %}
 {%- endmacro %}
 
-{% macro playlist_card(card, multi, section="browse") -%}
+{% macro playlist_card(card, multi, new=False) -%}
 {%- set download = job_by_playlist.get(card.key) if job_by_playlist else None -%}
-{%- set resume = section == "continue" and card.next_url -%}
-{%- set href = card.next_url if resume else "/playlist/" ~ card.key -%}
-<article class="playlist-card{% if resume %} continue-card{% endif %}"
+{%- set href = "/playlist/" ~ card.key -%}
+<article class="playlist-card"
      data-key="{{ card.key }}"
      data-title="{{ card.title }}"
      data-updated="{{ card.updated_at or '' }}"
@@ -26,6 +25,9 @@
      data-bytes="{{ card.total_bytes }}"
      data-category="{{ card.category }}"
      data-tags="{{ card.tags|map(attribute='key')|join('|') }}"
+     data-tag-labels='{{ card.tags|map(attribute="label")|list|tojson }}'
+     data-started="{{ '1' if card.started else '0' }}"{% if new %}
+     data-new{% endif %}
      data-channel="{{ card.channel }}"
      data-library="{{ card.library_id }}"
      data-library-label="{{ card.library_label }}">
@@ -36,18 +38,13 @@
       {% else %}
         <span aria-hidden="true">{{ card.title[:1] }}</span>
       {% endif %}
+      {% if new %}<span class="new-badge">New</span>{% endif %}
       <span class="count-badge">{{ card.video_count }} video{% if card.video_count != 1 %}s{% endif %}</span>
       <span class="playlist-card-duration">{{ card.total_duration|duration }}</span>
       {% if download %}<span class="download-badge">Downloading {{ download.downloaded + download.skipped + download.failed }}/{{ download.video_count }}</span>{% endif %}
     </div>
     <div class="playlist-card-body">
       <h3 class="playlist-card-title">{{ card.title }}</h3>
-      {% if resume %}
-      <span class="continue-next">
-        <span class="continue-label">{{ card.next_label }}</span>
-        <span class="continue-title">{{ card.next_title }}</span>
-      </span>
-      {% endif %}
       <span class="muted small playlist-card-meta">
         {%- if card.playlist_id == "un-grouped" %}Single videos{% else %}{{ card.channel or "Unknown channel" }}{% endif %}
         {%- if card.kind == "local" %} · built from your library{% endif %}
@@ -76,6 +73,22 @@
     {{ tag_chips(card.tags, 3) }}
   </div>
 </article>
+{%- endmacro %}
+
+{% macro continue_row(card, multi) -%}
+<li class="continue-row">
+  <a href="{{ card.next_url }}">
+    <span class="continue-thumb{% if not card.thumb_url %} placeholder{% endif %}">
+      {% if card.thumb_url %}<img src="{{ card.thumb_url }}" alt="" loading="lazy">{% else %}<span aria-hidden="true">{{ card.title[:1] }}</span>{% endif %}
+      <span class="thumb-progress"><span style="width: {{ (card.progress * 100)|round(1) }}%"></span></span>
+    </span>
+    <span class="continue-text">
+      <span class="continue-row-title">{{ card.title }}</span>
+      <span class="muted tiny continue-row-next">{{ card.next_label }} · {{ card.next_title }}</span>
+      {% if multi %}<span class="muted tiny">{{ card.library_label }}</span>{% endif %}
+    </span>
+  </a>
+</li>
 {%- endmacro %}
 
 {% macro video_card(card) -%}

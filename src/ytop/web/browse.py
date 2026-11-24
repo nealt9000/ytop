@@ -7,6 +7,7 @@ per-library overlays (title overrides, watch progress, tag edits) are laid on.
 from __future__ import annotations
 
 import html
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -22,7 +23,6 @@ from .library import Library, playlist_key, quality_summary
 from .render import format_duration, format_timestamp, thumb_url
 
 CARD_LIMIT = 12
-TOP_LIMIT = 5
 
 
 @dataclass
@@ -52,6 +52,7 @@ class PlaylistCard:
     next_position: float
     quality_summary: str = ""
     transcript_count: int = 0
+    started: bool = False
 
     @property
     def is_ungrouped(self) -> bool:
@@ -89,19 +90,17 @@ class LibrarySummary:
     unwatched_hours: float
     used_bytes: int
     free_bytes: int
-    top_categories: list[tuple[str, int]]
-    top_channels: list[tuple[str, int]]
+    device: str = ""  # the filesystem it lives on: free space is per disk
 
 
 @dataclass
 class HomeView:
-    summaries: list[LibrarySummary]
+    libraries: list[LibrarySummary]  # every connected library (sidebar)
+    header: LibrarySummary  # the shown library, or all of them combined (id "")
     continue_watching: list[PlaylistCard]
-    start_new: list[PlaylistCard]
     all_playlists: list[PlaylistCard]
-    categories: list[str]
-    tags: list[Tag]
-    channels: list[str]
+    new_keys: set[str]  # recently updated, unstarted: the "New" badge
+    category_counts: list[tuple[str, int]]  # chip order: most playlists first
 
 
 @dataclass
@@ -138,15 +137,18 @@ def _load(lib: Library, ref: LibraryRef) -> _Loaded:
     )
 
 
-def _load_all(lib: Library, library_id: str | None) -> tuple[list[_Loaded], Counter]:
-    """Every online library, loaded once.  Keys count playlist ids across all
-    of them (as Library._keyed does), even when only one is shown."""
+def _load_all(
+    lib: Library, library_id: str | None
+) -> tuple[list[_Loaded], list[_Loaded], Counter]:
+    """Every online library, loaded once: (shown, everything, counts).  Keys
+    count playlist ids across all of them (as Library._keyed does), even when
+    only one is shown."""
     everything = [_load(lib, ref) for ref in lib.libraries.libraries()]
     counts: Counter = Counter()
     for item in everything:
         counts.update({row.playlist_id for row in item.rows})
     chosen = [item for item in everything if item.ref.id == library_id]
-    return (chosen or everything), counts
+    return (chosen or everything), everything, counts
 
 
 def _num(value: object) -> float:
@@ -242,14 +244,22 @@ def _card(item: _Loaded, row: PlaylistRow, key: str) -> PlaylistCard:
     )
 
 
-def _build_cards(lib: Library, library_id: str | None) -> list[_Loaded]:
-    loaded, counts = _load_all(lib, library_id)
+def _build_cards_all(
+    lib: Library, library_id: str | None
+) -> tuple[list[_Loaded], list[_Loaded]]:
+    """Cards for the shown libraries; every library comes back loaded too
+    (without cards when not shown)."""
+    loaded, everything, counts = _load_all(lib, library_id)
     for item in loaded:
         item.cards = [
             _card(item, row, playlist_key(row.playlist_id, item.ref.id, counts[row.playlist_id] > 1))
             for row in item.rows
         ]
-    return loaded
+    return loaded, everything
+
+
+def _build_cards(lib: Library, library_id: str | None) -> list[_Loaded]:
+    return _build_cards_all(lib, library_id)[0]
 
 
 def cards_for(lib: Library, library_id: str | None = None) -> list[PlaylistCard]:
@@ -269,7 +279,7 @@ def _used_bytes(rows: list[PlaylistRow]) -> int:
 def storage_usage(lib: Library) -> tuple[dict[str, int], int]:
     """Playlists per online library, and bytes used across them, from the
     index (no meta.json is opened)."""
-    loaded, _counts = _load_all(lib, None)
+    loaded, _everything, _counts = _load_all(lib, None)
     counts = {item.ref.id: len(item.rows) for item in loaded if item.rows}
     return counts, sum(_used_bytes(item.rows) for item in loaded)
 
@@ -323,11 +333,6 @@ def _started(item: _Loaded, row: PlaylistRow) -> bool:
     return False
 
 
-def _top(values: list[str]) -> list[tuple[str, int]]:
-    counts = Counter(value for value in values if value)
-    return sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:TOP_LIMIT]
-
-
 def _summary(item: _Loaded) -> LibrarySummary:
     seen: set[str] = set()
     total = watched = 0.0
@@ -353,36 +358,64 @@ def _summary(item: _Loaded) -> LibrarySummary:
         unwatched_hours=(total - watched) / 3600,
         used_bytes=_used_bytes(item.rows),
         free_bytes=item.ref.free_bytes,
-        top_categories=_top([card.category for card in item.cards]),
-        top_channels=_top([card.channel for card in item.cards]),
+        device=_device(item.ref),
+    )
+
+
+def _device(ref: LibraryRef) -> str:
+    try:
+        return str(os.stat(ref.layout.root).st_dev)
+    except OSError:
+        return f"library:{ref.id}"  # unknown: count it on its own
+
+
+def _combined(summaries: list[LibrarySummary]) -> LibrarySummary:
+    """The "All libraries" header: each library's own numbers added up (a
+    video on two sticks counts twice; there are two copies)."""
+    return LibrarySummary(
+        id="",
+        label="All libraries",
+        description="",
+        read_only=False,
+        playlist_count=sum(s.playlist_count for s in summaries),
+        video_count=sum(s.video_count for s in summaries),
+        total_hours=sum(s.total_hours for s in summaries),
+        watched_hours=sum(s.watched_hours for s in summaries),
+        unwatched_hours=sum(s.unwatched_hours for s in summaries),
+        used_bytes=sum(s.used_bytes for s in summaries),
+        # Libraries on one disk share its free space: count each disk once.
+        free_bytes=sum({s.device: s.free_bytes or 0 for s in summaries}.values()),
     )
 
 
 def build_home(lib: Library, library_id: str | None = None) -> HomeView:
-    loaded = _build_cards(lib, library_id)
+    loaded, everything = _build_cards_all(lib, library_id)
+    libraries = [_summary(item) for item in everything]
+    by_id = {s.id: s for s in libraries}
+    header = by_id[loaded[0].ref.id] if len(loaded) == 1 else _combined(libraries)
     continuing: list[PlaylistCard] = []
     fresh: list[PlaylistCard] = []
     for item in loaded:
         for row, card in zip(item.rows, item.cards):
-            if not _started(item, row):
+            card.started = _started(item, row)
+            if not card.started:
                 fresh.append(card)
             elif card.next_url is not None:
                 continuing.append(card)
     continuing.sort(key=lambda card: card.last_watched_at, reverse=True)
     fresh.sort(key=lambda card: card.updated_at, reverse=True)
     all_cards = [card for item in loaded for card in item.cards]
-    tags: dict[str, Tag] = {}
-    for card in all_cards:
-        for tag in card.tags:
-            tags.setdefault(tag.key, tag)
+    category_counts = sorted(
+        Counter(c.category for c in all_cards if c.category).items(),
+        key=lambda pair: (-pair[1], pair[0].casefold()),
+    )
     return HomeView(
-        summaries=[_summary(item) for item in loaded],
+        libraries=libraries,
+        header=header,
         continue_watching=continuing[:CARD_LIMIT],
-        start_new=fresh[:CARD_LIMIT],
         all_playlists=all_cards,
-        categories=sorted({c.category for c in all_cards if c.category}),
-        tags=sorted(tags.values(), key=lambda tag: tag.label.casefold()),
-        channels=sorted({c.channel for c in all_cards if c.channel}, key=str.casefold),
+        new_keys={card.key for card in fresh[:CARD_LIMIT]},
+        category_counts=category_counts,
     )
 
 

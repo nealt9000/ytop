@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import threading
@@ -42,11 +43,34 @@ def test_home_sections_present(tmp_path: Path) -> None:
     ProgressStore(layout).update("v1", 60, duration=60, watched=True)
     ProgressStore(layout).update("v2", 30, duration=60)
     client = _client(layout)
-    text = client.get("/").text
-    for heading in ("Continue watching", "Start something new", "Browse all"):
-        assert heading in text
-    assert "Video 2 of 3" in text
-    assert 'href="/watch/P1/v2"' in text
+    main = _main(client.get("/").text)
+    assert 'class="home-libraries"' in main and 'class="home-continue"' in main
+    assert "Start something new" not in main and "Browse all" not in main
+    continue_part = main.split('class="home-continue"')[1]
+    assert "Video 2 of 3" in continue_part and 'href="/watch/P1/v2"' in continue_part
+    assert 'id="browse-filter"' in main and 'data-chip="not-started"' in main
+    p2 = re.search(r'<article[^>]*data-key="P2"[^>]*>', main).group(0)
+    assert 'data-started="0"' in p2 and "data-new" in p2
+    p1 = re.search(r'<article[^>]*data-key="P1"[^>]*>', main).group(0)
+    assert 'data-started="1"' in p1 and "data-new" not in p1
+    client.app.state.jobs.close()
+
+
+def test_continue_column_absent_when_nothing_in_progress(tmp_path: Path) -> None:
+    client = _client(_layout(tmp_path))
+    assert 'class="home-continue"' not in client.get("/").text
+    client.app.state.jobs.close()
+
+
+def test_single_library_header_is_that_library(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    info = read_library(layout.root)
+    client = _client(layout)
+    main = _main(client.get("/").text)
+    assert "All libraries" not in main
+    assert re.search(r"<h1[^>]*>\s*" + re.escape(info.label), main)
+    assert re.search(rf'href="/\?library={info.id}"[^>]*aria-current="page"', main)
+    assert f'action="/storage/{info.id}/label"' in main
     client.app.state.jobs.close()
 
 
@@ -83,31 +107,38 @@ def test_home_escapes_tag_labels(tmp_path: Path) -> None:
     client.app.state.jobs.close()
 
 
-def test_library_switcher_only_with_two_libraries(tmp_path: Path) -> None:
+def _with_usb(tmp_path: Path):
     layout = _layout(tmp_path)
     libs = library_set(layout)
     client = _client(layout, libs)
-    assert 'class="library-switcher"' not in client.get("/").text
-
     usb_root = tmp_path / "usb" / "YTOP"
     init_library(usb_root, "Blue stick")
     add_playlist(LibraryLayout(usb_root), "PU", "Stick list", [("u1", "U")])
     libs.add_folder(usb_root, "Blue stick")
-    usb_id = read_library(usb_root).id
+    return client, read_library(usb_root).id
 
-    text = client.get("/").text
-    assert 'class="library-switcher"' in text
-    assert "All libraries" in text
-    assert "Blue stick" in text
-    # Several libraries shown: each summary heading is an h2.
-    assert "<h1" not in _main(text).split("Continue watching")[0].split("library-switcher")[1]
 
-    only = client.get("/", params={"library": usb_id}).text
-    assert re.search(
-        rf'<a[^>]*href="/\?library={usb_id}"[^>]*aria-current="page"', only
-    )
-    assert "Stick list" in only
-    assert ">One<" not in only
+def test_two_libraries_sidebar_and_combined_header(tmp_path: Path) -> None:
+    client, usb_id = _with_usb(tmp_path)
+    text = _main(client.get("/").text)
+    assert re.search(r'<a[^>]*href="/"[^>]*aria-current="page"', text)
+    sidebar = text.split('class="home-libraries"')[1].split("</nav>")[0]
+    assert "Blue stick" in sidebar and "All libraries" in sidebar
+    assert re.search(r"<h1[^>]*>\s*All libraries", text)
+    assert '/label"' not in text  # no Edit in the combined view
+
+    only = _main(client.get("/", params={"library": usb_id}).text)
+    assert re.search(rf'href="/\?library={usb_id}"[^>]*aria-current="page"', only)
+    assert "Stick list" in only and ">One<" not in only
+    assert "All libraries" in only  # still in the sidebar
+    client.app.state.jobs.close()
+
+
+def test_unknown_library_falls_back_to_all(tmp_path: Path) -> None:
+    client, _usb_id = _with_usb(tmp_path)
+    main = _main(client.get("/", params={"library": "nope"}).text)
+    assert re.search(r"<h1[^>]*>\s*All libraries", main)
+    assert re.search(r'<a[^>]*href="/"[^>]*aria-current="page"', main)
     client.app.state.jobs.close()
 
 
@@ -309,7 +340,7 @@ def test_home_count_is_not_announced_on_load(tmp_path: Path) -> None:
 
 def test_library_edit_form_next_is_url_encoded() -> None:
     template = (STATIC_JS.parents[1] / "templates/library.html").read_text()
-    assert 'name="next" value="/?library={{ s.id|urlencode }}"' in template
+    assert 'name="next" value="/?library={{ h.id|urlencode }}"' in template
 
 
 def test_home_page_is_not_held_up_by_a_download_writing_the_index(tmp_path: Path) -> None:
@@ -336,4 +367,30 @@ def test_home_page_is_not_held_up_by_a_download_writing_the_index(tmp_path: Path
         release.set()
         holder.join(5)
     assert elapsed < 5.0
+    client.app.state.jobs.close()
+
+
+def test_tag_labels_with_a_pipe_survive(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    # A hand-edited tags.json skips TagStore's label cleaning.
+    layout.tags_file.parent.mkdir(parents=True, exist_ok=True)
+    layout.tags_file.write_text(json.dumps({
+        "schema": 1, "playlists": {"P1": {"add": ["Rock | Pop", "Jazz"]}},
+    }))
+    client = _client(layout)
+    card = re.search(r'<article[^>]*data-key="P1"[^>]*>', client.get("/").text).group(0)
+    raw = re.search(r"data-tag-labels='([^']*)'", card).group(1)
+    labels = json.loads(html.unescape(raw))
+    assert "Rock | Pop" in labels and "Jazz" in labels
+    client.app.state.jobs.close()
+
+
+def test_continue_row_has_no_dangling_separator(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    add_playlist(layout, "P3", "Three", [("z1", ""), ("z2", "")])
+    ProgressStore(layout).update("z1", 20, duration=60)
+    client = _client(layout)
+    aside = client.get("/").text.split('class="home-continue"')[1].split("</aside>")[0]
+    row = aside.split('href="/watch/P3/')[1].split("</li>")[0]
+    assert not re.search(r"·\s*</span>", row)
     client.app.state.jobs.close()

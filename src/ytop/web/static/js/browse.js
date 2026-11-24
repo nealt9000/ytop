@@ -1,8 +1,11 @@
 import { $, $$, storageGet, storageSet } from "./core.js";
 
-// -- library home: Browse all ----------------------------------------------
-// Chips filter every section (AND across rows, OR within a row). Grouping
-// clones a card into each group it belongs to; sorting applies per group.
+// -- library home: playlist grid -------------------------------------------
+// The chip strip (one category at a time, plus "Not started") and the filter
+// box (every word must appear in a card's title, channel, category, tags or
+// library) narrow the grid only; Continue watching is never filtered.
+// Grouping clones a card into each group it belongs to; sorting applies per
+// group.
 
 const KEYS = {
   view: "ytop.browse.view",
@@ -10,7 +13,6 @@ const KEYS = {
   sort: "ytop.browse.sort",
 };
 const VIEWS = ["grid", "list"];
-const FACETS = ["category", "tags", "channel"];
 
 function isTextField(node) {
   if (!node || node === document.body) return false;
@@ -65,10 +67,16 @@ function comparator(mode) {
   return (a, b) => primary(a, b) || byTitle(a, b);
 }
 
-function cardValues(card, facet) {
-  const raw = card.dataset[facet] || "";
-  if (facet === "tags") return raw.split("|").filter(Boolean);
-  return raw ? [raw] : [];
+function splitList(raw) {
+  return (raw || "").split("|").filter(Boolean);
+}
+
+function haystack(card) {
+  const d = card.dataset;
+  return [d.title, d.channel, d.category, splitList(d.tagLabels).join(" "), d.libraryLabel]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
 }
 
 export function initBrowse() {
@@ -78,32 +86,38 @@ export function initBrowse() {
   const master = $("[data-browse-all]", results);
   const cards = master ? $$(".playlist-card", master) : [];
   const total = cards.length;
-  const others = $$("[data-browse-section]").filter((node) => !results.contains(node));
   const groupSelect = $("#browse-group");
   const sortSelect = $("#browse-sort");
   const viewButtons = $$(".view-toggle [data-view]");
   const count = $("#browse-count");
   const empty = $("#browse-empty");
-  const chipRows = $$(".chip-filter-row[data-facet]");
+  const strip = $("#browse-chips");
+  const filterBox = $("#browse-filter");
 
+  // Tag keys to labels, for Group by -> Tag (keys and labels share an order).
   const tagLabels = new Map();
-  $$('.chip-filter-row[data-facet="tags"] .chip').forEach((chip) => {
-    tagLabels.set(chip.dataset.value, chip.textContent.trim());
+  const hay = new Map();
+  cards.forEach((card) => {
+    const keys = splitList(card.dataset.tags);
+    const labels = splitList(card.dataset.tagLabels);
+    keys.forEach((key, i) => {
+      if (!tagLabels.has(key)) tagLabels.set(key, labels[i] || key);
+    });
+    hay.set(card, haystack(card));
   });
 
-  const selected = Object.fromEntries(FACETS.map((facet) => [facet, new Set()]));
+  const state = { category: null, notStarted: false, words: [] };
 
   function matches(card) {
-    return FACETS.every((facet) => {
-      const wanted = selected[facet];
-      if (!wanted.size) return true;
-      return cardValues(card, facet).some((value) => wanted.has(value));
-    });
+    if (state.category !== null && card.dataset.category !== state.category) return false;
+    if (state.notStarted && card.dataset.started !== "0") return false;
+    const text = hay.get(card) || haystack(card);
+    return state.words.every((word) => text.includes(word));
   }
 
   function groupsFor(card, mode) {
     if (mode === "tag") {
-      const tags = cardValues(card, "tags");
+      const tags = splitList(card.dataset.tags);
       return tags.length ? tags : [""];
     }
     if (mode === "library") return [card.dataset.library || ""];
@@ -161,16 +175,6 @@ export function initBrowse() {
         results.appendChild(section);
       });
     }
-    others.forEach((rail) => {
-      let visible = 0;
-      $$(".playlist-card", rail).forEach((card) => {
-        const hit = matches(card);
-        card.hidden = !hit;
-        if (hit) visible += 1;
-      });
-      const section = rail.closest(".home-section");
-      if (section) section.hidden = visible === 0;
-    });
     if (count) {
       const noun = `playlist${total === 1 ? "" : "s"}`;
       count.textContent = shown.length === total
@@ -211,40 +215,43 @@ export function initBrowse() {
     });
   }
 
-  // Long chip rows show the first few chips; "More" reveals the rest. A
-  // pressed chip is never hidden.
-  function syncRow(row) {
-    const more = $("[data-more]", row);
-    if (!more) return;
-    const open = more.getAttribute("aria-expanded") === "true";
-    $$("button.chip[data-extra]", row).forEach((chip) => {
-      chip.hidden = !open && chip.getAttribute("aria-pressed") !== "true";
+  function syncChips() {
+    if (!strip) return;
+    $$("button.chip[data-chip]", strip).forEach((chip) => {
+      const kind = chip.dataset.chip;
+      let on = false;
+      if (kind === "all") on = state.category === null && !state.notStarted;
+      else if (kind === "not-started") on = state.notStarted;
+      else on = state.category === (chip.dataset.value || "");
+      chip.setAttribute("aria-pressed", on ? "true" : "false");
     });
-    more.textContent = open ? "Fewer" : "More";
   }
 
-  chipRows.forEach((row) => {
-    const facet = row.dataset.facet;
-    const more = $("[data-more]", row);
-    if (more) {
-      more.addEventListener("click", () => {
-        const open = more.getAttribute("aria-expanded") !== "true";
-        more.setAttribute("aria-expanded", open ? "true" : "false");
-        syncRow(row);
-      });
-    }
-    row.addEventListener("click", (event) => {
-      const chip = event.target.closest("button.chip");
-      if (!chip || !row.contains(chip) || !selected[facet]) return;
-      const value = chip.dataset.value || "";
-      const on = chip.getAttribute("aria-pressed") !== "true";
-      chip.setAttribute("aria-pressed", on ? "true" : "false");
-      if (on) selected[facet].add(value);
-      else selected[facet].delete(value);
-      syncRow(row);
+  if (strip) {
+    strip.addEventListener("click", (event) => {
+      const chip = event.target.closest("button.chip[data-chip]");
+      if (!chip || !strip.contains(chip)) return;
+      const kind = chip.dataset.chip;
+      if (kind === "all") {
+        state.category = null;
+        state.notStarted = false;
+      } else if (kind === "not-started") {
+        state.notStarted = !state.notStarted;
+      } else {
+        const value = chip.dataset.value || "";
+        state.category = state.category === value ? null : value;
+      }
+      syncChips();
       render();
     });
-  });
+  }
+
+  if (filterBox) {
+    filterBox.addEventListener("input", () => {
+      state.words = filterBox.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      render();
+    });
+  }
 
   render();
   // Live only from now on: the count written on load is not announced.
